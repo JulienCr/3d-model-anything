@@ -1,0 +1,758 @@
+{
+ "note": "Pipe and duct centrelines in room metres (floor y = 0). Measured in the fused LiDAR depth frames where visible, else traced from photos; see each run's confidence. Checked by demos/trone/check-networks.py.",
+ "runs": [
+  {
+   "id": "L1",
+   "kind": "pipe",
+   "material": "creamPvc",
+   "d": 0.11,
+   "points": [
+    [
+     -0.85,
+     2.18,
+     1.15
+    ],
+    [
+     -0.85,
+     1.975,
+     1.15
+    ],
+    [
+     -0.85,
+     1.975,
+     1.952
+    ],
+    [
+     6.72,
+     1.975,
+     1.74
+    ],
+    [
+     6.72,
+     2.075,
+     1.5
+    ],
+    [
+     6.72,
+     2.08,
+     0.68
+    ],
+    [
+     7.2,
+     2.08,
+     0.68
+    ],
+    [
+     7.62,
+     2.08,
+     0.965
+    ],
+    [
+     7.75,
+     2.135,
+     0.965
+    ],
+    [
+     8.72,
+     2.135,
+     0.965
+    ]
+   ],
+   "ends": [
+    "slab",
+    "wall"
+   ],
+   "bend": 1.0,
+   "sleeves": 0,
+   "confidence": "lane line and bottom height measured in the depth frames (0.5 m sections), 5-pipe count and order cream/cream/black/cream/cream from photos 88-91; drops out of the slab at z 1.15 (vertical stubs in photos 279-281; earlier assumption of a run to the north wall disproved by photo 280); riser measured; they rest on the pillar top (2.02) at centre 2.08 (photos 170-172) and step up into the box at x 7.7"
+  },
+  {
+   "id": "L2",
+   "kind": "pipe",
+   "material": "creamPvc",
+   "d": 0.11,
+   "points": [
+    [
+     -0.96,
+     2.18,
+     1.15
+    ],
+    [
+     -0.96,
+     1.975,
+     1.15
+    ],
+    [
+     -0.96,
+     1.975,
+     2.065
+    ],
+    [
+     6.855,
+     1.975,
+     1.846
+    ],
+    [
+     6.855,
+     2.075,
+     1.606
+    ],
+    [
+     6.855,
+     2.08,
+     0.8
+    ],
+    [
+     7.2,
+     2.08,
+     0.8
+    ],
+    [
+     7.62,
+     2.08,
+     1.115
+    ],
+    [
+     7.75,
+     2.135,
+     1.115
+    ],
+    [
+     8.72,
+     2.135,
+     1.115
+    ]
+   ],
+   "ends": [
+    "slab",
+    "wall"
+   ],
+   "bend": 1.0,
+   "sleeves": 0,
+   "confidence": "lane line and bottom height measured in the depth frames (0.5 m sections), 5-pipe count and order cream/cream/black/cream/cream from photos 88-91; drops out of the slab at z 1.15 (vertical stubs in photos 279-281; earlier assumption of a run to the north wall disproved by photo 280); riser measured; they rest on the pillar top (2.02) at centre 2.08 (photos 170-172) and step up into the box at x 7.7"
+  },
+  {
+   "id": "L3",
+   "kind": "pipe",
+   "material": "blackFoam",
+   "d": 0.095,
+   "points": [
+    [
+     -1.07,
+     2.18,
+     0.92
+    ],
+    [
+     -1.07,
+     1.975,
+     0.92
+    ],
+    [
+     -1.07,
+     1.975,
+     2.178
+    ],
+    [
+     3.2,
+     1.975,
+     2.058
+    ]
+   ],
+   "ends": [
+    "slab",
+    "none"
+   ],
+   "bend": 1.0,
+   "sleeves": 2.0,
+   "confidence": "lane line and bottom height measured in the depth frames (0.5 m sections), 5-pipe count and order cream/cream/black/cream/cream from photos 88-91; drops out of the slab at z 0.92 (vertical stubs in photos 279-281; earlier assumption of a run to the north wall disproved by photo 280); black foam insulation ends at a white sleeve joint at x ~3.2 (photo 89)"
+  },
+  {
+   "id": "L3b",
+   "kind": "pipe",
+   "material": "creamPvc",
+   "d": 0.11,
+   "points": [
+    [
+     3.2,
+     1.975,
+     2.058
+    ],
+    [
+     6.95,
+     1.975,
+     1.953
+    ],
+    [
+     7.35,
+     1.975,
+     1.55
+    ],
+    [
+     8.72,
+     1.975,
+     1.55
+    ]
+   ],
+   "ends": [
+    "none",
+    "wall"
+   ],
+   "bend": 1.0,
+   "sleeves": 0,
+   "confidence": "cream continuation of L3 after the white sleeve joint seen in photo 89 (x ~3.2); at the east wall it is the north pipe of the three cream pipes in photo 173"
+  },
+  {
+   "id": "L4",
+   "kind": "pipe",
+   "material": "creamPvc",
+   "d": 0.11,
+   "points": [
+    [
+     -1.18,
+     2.18,
+     1.15
+    ],
+    [
+     -1.18,
+     1.975,
+     1.15
+    ],
+    [
+     -1.18,
+     1.975,
+     2.291
+    ],
+    [
+     6.95,
+     1.975,
+     2.063
+    ],
+    [
+     7.35,
+     1.975,
+     1.66
+    ],
+    [
+     8.72,
+     1.975,
+     1.66
+    ]
+   ],
+   "ends": [
+    "slab",
+    "wall"
+   ],
+   "bend": 1.0,
+   "sleeves": 0,
+   "confidence": "lane line and bottom height measured in the depth frames (0.5 m sections), 5-pipe count and order cream/cream/black/cream/cream from photos 88-91; drops out of the slab at z 1.15 (vertical stubs in photos 279-281; earlier assumption of a run to the north wall disproved by photo 280); jogs 0.4 m north at x 7.0-7.35 and enters the east partition at z 1.66 (bottoms measured at x 7.6-8.4; order black first in photo 174)"
+  },
+  {
+   "id": "L5",
+   "kind": "pipe",
+   "material": "creamPvc",
+   "d": 0.11,
+   "points": [
+    [
+     -1.29,
+     2.18,
+     1.15
+    ],
+    [
+     -1.29,
+     1.975,
+     1.15
+    ],
+    [
+     -1.29,
+     1.975,
+     2.404
+    ],
+    [
+     6.95,
+     1.975,
+     2.173
+    ],
+    [
+     7.35,
+     1.975,
+     1.77
+    ],
+    [
+     8.72,
+     1.975,
+     1.77
+    ]
+   ],
+   "ends": [
+    "slab",
+    "wall"
+   ],
+   "bend": 1.0,
+   "sleeves": 0,
+   "confidence": "lane line and bottom height measured in the depth frames (0.5 m sections), 5-pipe count and order cream/cream/black/cream/cream from photos 88-91; drops out of the slab at z 1.15 (vertical stubs in photos 279-281; earlier assumption of a run to the north wall disproved by photo 280); jogs 0.4 m north at x 7.0-7.35 and enters the east partition at z 1.77 (bottoms measured at x 7.6-8.4; order black first in photo 174)"
+  },
+  {
+   "id": "D1",
+   "kind": "pipe",
+   "material": "galvanised",
+   "d": 0.125,
+   "ends": [
+    "wall",
+    "tee"
+   ],
+   "clamps": 1.5,
+   "sockets": 3.0,
+   "bend": 1.5,
+   "points": [
+    [
+     -8.97,
+     1.995,
+     -2.32
+    ],
+    [
+     -4.0,
+     2.04,
+     -2.29
+    ],
+    [
+     -3.6,
+     2.06,
+     -2.43
+    ],
+    [
+     -3.0,
+     2.07,
+     -2.43
+    ]
+   ],
+   "confidence": "collector: route and heights measured (depth), diameter photo-gauged (photos 3, 12); enters the west wall"
+  },
+  {
+   "id": "D2",
+   "kind": "pipe",
+   "material": "brownPvc",
+   "d": 0.11,
+   "ends": [
+    "tee",
+    "wye"
+   ],
+   "clamps": 1.2,
+   "sockets": 0,
+   "bend": 1.0,
+   "points": [
+    [
+     -3.0,
+     2.07,
+     -2.43
+    ],
+    [
+     -2.0,
+     2.11,
+     -2.47
+    ]
+   ],
+   "confidence": "collector over the pilaster: plan line measured (depth plan band), height from photos 222-224"
+  },
+  {
+   "id": "D3",
+   "kind": "pipe",
+   "material": "greyPvc",
+   "d": 0.11,
+   "ends": [
+    "slab",
+    "wye"
+   ],
+   "clamps": 0,
+   "sockets": 0,
+   "bend": 1.0,
+   "points": [
+    [
+     -1.4,
+     2.18,
+     -2.2
+    ],
+    [
+     -1.48,
+     2.13,
+     -2.23
+    ],
+    [
+     -2.0,
+     2.11,
+     -2.47
+    ]
+   ],
+   "confidence": "diagonal branch: first 0.35 m measured (depth plan), slab entry estimated from photos 222, 223"
+  },
+  {
+   "id": "D4",
+   "kind": "pipe",
+   "material": "greyPvc",
+   "d": 0.11,
+   "ends": [
+    "wye",
+    "wall"
+   ],
+   "clamps": 1.2,
+   "sockets": 2.0,
+   "bend": 1.0,
+   "points": [
+    [
+     -2.0,
+     2.11,
+     -2.47
+    ],
+    [
+     -1.85,
+     2.03,
+     -2.62
+    ],
+    [
+     -0.95,
+     2.02,
+     -2.62
+    ],
+    [
+     -0.95,
+     2.02,
+     -2.95
+    ]
+   ],
+   "confidence": "continuation east of the Y, lower: estimated from photos 222-224 and 286"
+  },
+  {
+   "id": "D5a",
+   "kind": "pipe",
+   "material": "brownPvc",
+   "d": 0.1,
+   "ends": [
+    "tee",
+    "none"
+   ],
+   "clamps": 1.5,
+   "sockets": 2.0,
+   "bend": 1.0,
+   "points": [
+    [
+     -3.0,
+     2.07,
+     -2.43
+    ],
+    [
+     -2.72,
+     2.1,
+     -2.2
+    ],
+    [
+     -2.7,
+     2.1,
+     -1.3
+    ],
+    [
+     -2.6,
+     2.14,
+     0.6
+    ]
+   ],
+   "confidence": "branch south from the tee (old N1b): measured in the depth frames to z 0.6, brown PVC (photos 222, 270)"
+  },
+  {
+   "id": "D5b",
+   "kind": "pipe",
+   "material": "blackPipe",
+   "d": 0.075,
+   "ends": [
+    "none",
+    "floor"
+   ],
+   "clamps": 1.5,
+   "sleeves": 1.0,
+   "bend": 1.0,
+   "coupling": [
+    -2.6,
+    2.14,
+    0.6
+   ],
+   "brackets": [
+    0.45,
+    1.45
+   ],
+   "points": [
+    [
+     -2.6,
+     2.14,
+     0.6
+    ],
+    [
+     -2.59,
+     2.14,
+     1.9
+    ],
+    [
+     -2.4,
+     2.1,
+     2.56
+    ],
+    [
+     -2.4,
+     0.0,
+     2.56
+    ]
+   ],
+   "confidence": "black continuation after a brass coupling (photo 276), measured to z 1.8, then drops as the black riser to the floor (photos 51, 57, 62: the black pipe at the top of 62 runs north-west into it)"
+  },
+  {
+   "id": "D6",
+   "kind": "pipe",
+   "material": "greyPvc",
+   "d": 0.075,
+   "ends": [
+    "slab",
+    "floor"
+   ],
+   "brackets": [
+    0.45,
+    1.45
+   ],
+   "sockets": 2.0,
+   "points": [
+    [
+     -2.25,
+     2.18,
+     2.66
+    ],
+    [
+     -2.25,
+     0.0,
+     2.66
+    ]
+   ],
+   "confidence": "grey stack from the slab to the floor, not connected to the branch (photos 55, 57, 62); position measured (depth), diameter photo-gauged"
+  },
+  {
+   "id": "D7",
+   "kind": "pipe",
+   "material": "brownPvc",
+   "d": 0.1,
+   "ends": [
+    "wall",
+    "slab"
+   ],
+   "clamps": 1.5,
+   "sockets": 2.0,
+   "bend": 1.0,
+   "points": [
+    [
+     -1.26,
+     2.13,
+     -2.85
+    ],
+    [
+     -1.6,
+     2.13,
+     1.17
+    ],
+    [
+     -1.6,
+     2.18,
+     1.27
+    ]
+   ],
+   "confidence": "half-buried in the flock, so the scan only sees its cut: course ray-cast from photos 279 and 280 onto the flock plane (+-0.15 m), wall entry and slab rise estimated"
+  },
+  {
+   "id": "N5",
+   "kind": "duct",
+   "material": "flexDuct",
+   "d": 0.25,
+   "confidence": "route and bottom height measured, diameter photo-gauged (photos 189, 190); ends in the soffit box along the south wall",
+   "points": [
+    [
+     6.05,
+     2.08,
+     -2.9
+    ],
+    [
+     6.07,
+     2.16,
+     -1.2
+    ],
+    [
+     6.15,
+     2.17,
+     0.0
+    ],
+    [
+     6.23,
+     2.16,
+     1.0
+    ],
+    [
+     6.3,
+     2.14,
+     1.6
+    ],
+    [
+     6.45,
+     2.06,
+     2.35
+    ]
+   ]
+  },
+  {
+   "id": "N6",
+   "kind": "conduit",
+   "material": "blackPipe",
+   "d": 0.032,
+   "confidence": "estimated from photos 186-192 (too thin and too close to the flock for the depth data)",
+   "points": [
+    [
+     5.45,
+     1.38,
+     -2.92
+    ],
+    [
+     5.45,
+     2.13,
+     -2.9
+    ],
+    [
+     5.64,
+     2.13,
+     -2.7
+    ],
+    [
+     5.64,
+     2.13,
+     1.3
+    ],
+    [
+     5.64,
+     2.05,
+     1.5
+    ],
+    [
+     8.72,
+     2.05,
+     1.5
+    ]
+   ]
+  },
+  {
+   "id": "N6b",
+   "kind": "conduit",
+   "material": "blackPipe",
+   "d": 0.025,
+   "confidence": "estimated from photos 183, 186",
+   "points": [
+    [
+     5.45,
+     2.12,
+     -2.88
+    ],
+    [
+     2.75,
+     2.12,
+     -2.92
+    ]
+   ]
+  }
+ ],
+ "fittings": [
+  {
+   "type": "tee",
+   "at": [
+    -3.0,
+    2.07,
+    -2.43
+   ],
+   "dir": [
+    1,
+    0,
+    0
+   ],
+   "d": 0.125,
+   "material": "greyPvc"
+  },
+  {
+   "type": "wye",
+   "at": [
+    -2.0,
+    2.11,
+    -2.47
+   ],
+   "dir": [
+    1,
+    0.04,
+    -0.04
+   ],
+   "d": 0.11,
+   "material": "greyPvc"
+  },
+  {
+   "type": "tie",
+   "at": [
+    -2.17,
+    2.11,
+    -2.47
+   ],
+   "dir": [
+    1,
+    0,
+    0
+   ],
+   "d": 0.11,
+   "material": "steel"
+  }
+ ],
+ "rails": [
+  {
+   "from": [
+    0.4,
+    2.0500000000000003,
+    1.827
+   ],
+   "to": [
+    0.4,
+    2.0500000000000003,
+    2.447
+   ]
+  },
+  {
+   "from": [
+    2.4,
+    2.0500000000000003,
+    1.771
+   ],
+   "to": [
+    2.4,
+    2.0500000000000003,
+    2.391
+   ]
+  },
+  {
+   "from": [
+    4.4,
+    2.0500000000000003,
+    1.715
+   ],
+   "to": [
+    4.4,
+    2.0500000000000003,
+    2.335
+   ]
+  },
+  {
+   "from": [
+    6.1,
+    2.0500000000000003,
+    1.667
+   ],
+   "to": [
+    6.1,
+    2.0500000000000003,
+    2.287
+   ]
+  }
+ ]
+}

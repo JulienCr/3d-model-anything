@@ -1,5 +1,8 @@
 {
   "rooms": [
-    { "id": "office-v4" }
+    { "id": "office-v4" },
+    { "id": "atrium",  "drive": "Atrium",  "capture": "data/captures-in/atrium",  "roomIndex": 0, "mesh": "data/captures-in/atrium/mesh/room-0.ply",  "scans": "data/scans/atrium",        "makeAssets": "demos/atrium/make-assets.py" },
+    { "id": "trone",   "drive": "Trone",   "capture": "data/captures-in/trone",   "roomIndex": 0, "mesh": "data/captures-in/trone/mesh/room-0.ply",   "scans": "data/scans/trone",         "makeAssets": "demos/trone/make-assets.py" },
+    { "id": "couloir", "drive": "Couloir", "capture": "data/captures-in/couloir", "roomIndex": 0, "mesh": "data/captures-in/couloir/mesh/room-0.ply", "scans": "data/scans/couloir/recon", "makeAssets": "demos/couloir/make-assets.py" }
   ]
 }

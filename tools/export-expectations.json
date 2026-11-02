@@ -17,6 +17,9 @@
       "minLights": 7,
       "maxDegenerateFraction": 0.08,
       "maxBytes": { "model": 160000000, "lidar": 30000000, "photos": 5000000 }
-    }
+    },
+    "atrium":  { "topLevel": ["shell", "props", "lights"], "minWalls": 6, "minLights": 4, "minPhotos": 100 },
+    "trone":   { "topLevel": ["shell", "networks", "fixtures", "props", "lights"], "minWalls": 20, "minLights": 4, "minPhotos": 100 },
+    "couloir": { "maxMeshShareOfTriangles": 0.7, "topLevel": ["shell", "props", "lights"], "minWalls": 10, "minLights": 3, "minPhotos": 100 }
   }
 }
