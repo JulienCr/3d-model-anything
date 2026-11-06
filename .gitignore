@@ -17,3 +17,7 @@ data/exports/
 apps/house-capture/release/screenshots/
 
 HouseCapture.xcodeproj/
+
+# room-model pipeline
+data/room-model/
+pipelines/room_model/.venv/
