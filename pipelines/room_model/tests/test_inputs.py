@@ -35,7 +35,7 @@ def test_walls_follow_outline_order(capture):
 
 
 def test_off_outline_wall_is_reported(build):
-    base_root, base_truth = build()
+    base_root, _ = build()
     root, truth = build(extra_roomplan_wall=True)
     room, base = _room(root), _room(base_root)
     assert len(room.walls) == 6
@@ -44,13 +44,13 @@ def test_off_outline_wall_is_reported(build):
     assert room.off_outline == [truth.extra_ident]
 
 
-def test_split_wall_is_one_outline_wall(build):
+def test_split_wall_gets_one_label_per_piece(build):
     root, truth = build(split_south_wall=True)
     room = _room(root)
-    assert len(room.walls) == 6 and room.off_outline == []
-    south = [w for w in room.walls if w.ident in truth.wall_ident["south"]]
-    assert len(south) == 1
-    assert sorted([south[0].ident, *south[0].extra_idents]) == sorted(truth.wall_ident["south"])
+    assert len(room.walls) == 7 and room.off_outline == []
+    assert len(truth.wall_ident["south"]) == 2
+    labels = [[w.label for w in room.walls if w.ident == i] for i in truth.wall_ident["south"]]
+    assert all(len(v) == 1 for v in labels) and labels[0] != labels[1]
 
 
 def test_missing_wall_is_seeded_from_outline(build):

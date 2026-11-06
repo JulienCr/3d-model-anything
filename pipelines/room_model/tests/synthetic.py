@@ -242,6 +242,8 @@ def _roomplan(opt: SyntheticOptions, world: np.ndarray) -> tuple[dict, dict[str,
         lines.append((c, rot @ d))
         info.append((name, c, rot @ d, rot @ n, length))
     corners = [_intersect(*lines[k - 1], *lines[k]) for k in range(n_edges)]
+    if opt.split_south_wall:
+        corners.insert(1, lines[0][0])  # south centre = split point, on the shared perturbed line
 
     def frame_of(c_plan, d_plan, n_plan, y):
         m = np.eye(4)

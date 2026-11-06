@@ -26,7 +26,6 @@ class Wall:
     poly: list  # (s, t) outline in the wall frame, may be empty
     edge: tuple  # (start, end) of the matching floor-outline edge, room frame xyz
     doors: list = field(default_factory=list)
-    extra_idents: list = field(default_factory=list)  # collinear RoomPlan pieces of the same outline edge
 
     def local(self, p: np.ndarray):
         rel = np.atleast_2d(p) - self.c
@@ -119,7 +118,8 @@ class Room:
             else:
                 self.walls.append(self._seed_wall(k, a_pt, b_pt, height))
                 self.seeded_from_outline.append(self.walls[-1].ident)
-        self._attach_unmatched(raw, wall_t, matched)
+        used = {raw[i]["identifier"] for i in matched.values()}
+        self.off_outline = [w["identifier"] for w in raw if w["identifier"] not in used]
         self._attach_doors(data["doors"], w2r)
         self.ceiling_top = max(w.c[1] + w.top_t(0.0) for w in self.walls)
 
@@ -153,29 +153,10 @@ class Room:
         return Wall(label=f"M{k + 1}", ident=f"outline-{k}", c=c, x=np.array([n[2], 0.0, -n[0]]), y=UP.copy(), n=n,
                     w=length, h=height, poly=[], edge=(a_pt, b_pt))
 
-    def _attach_unmatched(self, raw: list, wall_t: list, matched: dict[int, int]) -> None:
-        """Unmatched RoomPlan walls lying on an outline edge join its wall; the others are off the outline."""
-        used = set(matched.values())
-        for i, (w, T) in enumerate(zip(raw, wall_t)):
-            if i in used:
-                continue
-            target = None
-            for wall in self.walls:
-                a_pt, b_pt = wall.edge
-                par = abs(T[:3, 0] @ (b_pt - a_pt)) / np.linalg.norm(b_pt - a_pt)
-                if par >= 0.98 and _seg_dist(T[[0, 2], 3][None], a_pt[[0, 2]], b_pt[[0, 2]])[0] < MATCH_DISTANCE:
-                    target = wall
-                    break
-            if target is None:
-                self.off_outline.append(w["identifier"])
-            else:
-                target.extra_idents.append(w["identifier"])
-
     def _attach_doors(self, doors_raw: list, w2r: np.ndarray) -> None:
         by_ident = {}
         for wall in self.walls:
             by_ident[wall.ident] = wall
-            by_ident.update({e: wall for e in wall.extra_idents})
         found = []
         for d in doors_raw:
             T = w2r @ colmajor(d["transform"], 4)
