@@ -24,6 +24,7 @@ NEIGHBORS = 5
 PEAK_THRESHOLD = 0.003
 MAX_FEATURES = 16384
 MIN_OBS = 50
+MIN_GOOD = 3
 FILTER_PX = 2.0
 SCHEMA = "room-model/registration-1"
 
@@ -57,6 +58,36 @@ def umeyama(src, dst):
 def keep_weak_at_arkit(refined, arkit, n_obs, min_obs=MIN_OBS):
     """name -> pose: the refined pose when n_obs >= min_obs, else the ARKit pose."""
     return {n: (refined[n] if n_obs[n] >= min_obs else arkit[n]) for n in refined}
+
+
+def fallback_reason(n_good, n_registered, n_photos, scale, after_px, before_px, rms_cm):
+    """Why the refinement must be discarded (ARKit poses kept), or None when it is accepted."""
+    if n_good < MIN_GOOD:
+        return "too few well-observed photos"
+    if n_registered < n_photos:
+        return "not all images registered"
+    if not 0.95 < scale < 1.05:
+        return f"Sim3 scale {scale:.4f} outside [0.95, 1.05]"
+    if after_px > before_px:
+        return "BA increased the mean reprojection error"
+    if rms_cm > 25:
+        return f"camera centre RMS after alignment {rms_cm:.1f} cm"
+    return None
+
+
+def photo_records(names, poses, is_refined, n_obs, dt_cm, dr_deg):
+    """poses.json `photos` entries; c2w_arkit is the 4x4 pose flattened column-major."""
+    return [
+        {
+            "name": n,
+            "c2w_arkit": [float(v) for v in poses[n].T.flatten()],
+            "refined": is_refined[n],
+            "n_obs": int(n_obs[n]),
+            "correction_cm": dt_cm[n] if is_refined[n] else 0.0,
+            "correction_deg": dr_deg[n] if is_refined[n] else 0.0,
+        }
+        for n in names
+    ]
 
 
 def _strip_exif(data: bytes) -> bytes:
@@ -176,6 +207,8 @@ def run(ctx: StageContext) -> Path:
 
     t0 = time.time()
     photos = load_photos(ctx.capture, ctx.room)
+    if not photos:
+        raise ValueError(f"no photos for room {ctx.room} in {ctx.capture}")
     names = [p.name for p in photos]
     reg = ctx.out / "registration"
     work, sparse = reg / "work", reg / "sparse"
@@ -200,35 +233,31 @@ def run(ctx: StageContext) -> Path:
         weak = [n for n in names if obs_tri[n] < MIN_OBS]
         good = [n for n in names if obs_tri[n] >= MIN_OBS]
 
-        rec = pycolmap.Reconstruction(str(work / "tri"))
-        _bundle_adjust(pycolmap, rec, good)
-        after_ba_px = _mean_reprojection(rec)
-        print(f"BA done {time.time() - t0:.0f}s")
-
-        c_ref = np.array([_poses(rec, good)[n][0] for n in good])
         ark = _poses(prior, names)
-        scale, R, t = umeyama(c_ref, np.array([ark[n][0] for n in good]))
-        rec.transform(pycolmap.Sim3d(scale, pycolmap.Rotation3d(R), t))
-        for n in weak:
-            im = rec.find_image_with_name(n)
-            im.frame.set_cam_from_world(im.camera_id, prior.find_image_with_name(n).cam_from_world())
-        rec.update_point_3d_errors()
-        refined_px = _mean_reprojection(rec)
+        scale, after_ba_px, rms_cm, ref = 1.0, before_px, 0.0, ark
+        dt_cm = {n: 0.0 for n in names}
+        dr_deg = {n: 0.0 for n in names}
+        rec = tri
+        if len(good) >= MIN_GOOD:
+            rec = pycolmap.Reconstruction(str(work / "tri"))
+            _bundle_adjust(pycolmap, rec, good)
+            after_ba_px = _mean_reprojection(rec)
+            print(f"BA done {time.time() - t0:.0f}s")
 
-        ref = _poses(rec, names)
-        dt_cm = {n: float(np.linalg.norm(ref[n][0] - ark[n][0]) * 100) for n in names}
-        dr_deg = {n: _rot_angle_deg(ref[n][1], ark[n][1]) for n in names}
-        rms_cm = float(np.sqrt(np.mean([dt_cm[n] ** 2 for n in good]))) if good else float("inf")
+            c_ref = np.array([_poses(rec, good)[n][0] for n in good])
+            scale, R, t = umeyama(c_ref, np.array([ark[n][0] for n in good]))
+            rec.transform(pycolmap.Sim3d(scale, pycolmap.Rotation3d(R), t))
+            for n in weak:
+                im = rec.find_image_with_name(n)
+                im.frame.set_cam_from_world(im.camera_id, prior.find_image_with_name(n).cam_from_world())
+            rec.update_point_3d_errors()
+            ref = _poses(rec, names)
+            dt_cm = {n: float(np.linalg.norm(ref[n][0] - ark[n][0]) * 100) for n in names}
+            dr_deg = {n: _rot_angle_deg(ref[n][1], ark[n][1]) for n in names}
+            rms_cm = float(np.sqrt(np.mean([dt_cm[n] ** 2 for n in good])))
 
-        fallback = None
-        if rec.num_reg_images() < len(names):
-            fallback = "not all images registered"
-        elif not 0.95 < scale < 1.05:
-            fallback = f"Sim3 scale {scale:.4f} outside [0.95, 1.05]"
-        elif after_ba_px > before_px:
-            fallback = "BA increased the mean reprojection error"
-        elif rms_cm > 25:
-            fallback = f"camera centre RMS after alignment {rms_cm:.1f} cm"
+        fallback = fallback_reason(len(good), rec.num_reg_images(), len(names), scale, after_ba_px,
+                                   before_px, rms_cm)
         final = tri if fallback else rec
         final.write_binary(str(sparse))
         final.write_text(str(sparse))
@@ -260,17 +289,7 @@ def run(ctx: StageContext) -> Path:
                 "seconds": time.time() - t0,
             },
             "fallback": fallback,
-            "photos": [
-                {
-                    "name": n,
-                    "c2w_arkit": [float(v) for v in poses[n].T.flatten()],
-                    "refined": is_refined[n],
-                    "n_obs": int(obs_final[n]) if not fallback else int(obs_tri[n]),
-                    "correction_cm": dt_cm[n] if is_refined[n] else 0.0,
-                    "correction_deg": dr_deg[n] if is_refined[n] else 0.0,
-                }
-                for n in names
-            ],
+            "photos": photo_records(names, poses, is_refined, obs_tri if fallback else obs_final, dt_cm, dr_deg),
         }
         out = output_path(ctx, "registration")
         out.write_text(json.dumps(result, indent=1), encoding="utf-8", newline="\n")
