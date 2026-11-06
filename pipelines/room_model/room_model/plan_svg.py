@@ -8,7 +8,9 @@ import shapely
 from shapely import affinity
 
 from room_model import shell
+from room_model.fmt import fr
 
+STATION_KINDS = ("width", "length")
 PX_PER_M = 100.0
 MARGIN_M = 0.9
 CHAR_PX = 6.8  # approximate glyph width of the 12 px label font
@@ -21,10 +23,6 @@ STYLE = (
     ".column{fill:#4a5568;stroke:#222;stroke-width:1}"
     ".dim{stroke:#c0392b;stroke-width:1.5;fill:none}.dimtext{fill:#c0392b}.scale{stroke:#000;stroke-width:3}"
 )
-
-
-def fr(value: float, digits: int = 1) -> str:
-    return f"{value:.{digits}f}".replace(".", ",")
 
 
 class _Plan:
@@ -80,7 +78,7 @@ class _Plan:
                 self._beam(el)
             elif el["kind"] == "column":
                 self._column(el)
-        stations = [d for d in self.doc["dimensions"] if d["id"].startswith("S") and d["at"] is not None]
+        stations = [d for d in self.doc["dimensions"] if d["kind"] in STATION_KINDS and d["at"] is not None]
         ends = {d["id"]: self._ends(d) for d in stations}
         self.segments = [shapely.LineString(e) for e in ends.values()]
         for dim in stations:
@@ -154,7 +152,7 @@ class _Plan:
         for x, y in ((xa, ya), (xb, yb)):
             parts.append(f"M{x - tick[0]:.1f},{y - tick[1]:.1f} L{x + tick[0]:.1f},{y + tick[1]:.1f}")
         self.out.append(f'<path id="dim-{dim["id"]}" class="dim" d="{" ".join(parts)}"/>')
-        content = f"{dim['id']} {fr(dim['value'] * 100)} ± {fr(dim['sigma'] * 100)} cm"
+        content = f"{dim['id']} {fr(dim['value'] * 100)} ± {fr(dim['sigma'] * 100)} cm" + (" ~" if "obstacle_or_uneven_wall" in dim["flags"] else "")
         box, c, angle = self._label_slot(pa, pb, len(content) * CHAR_PX)
         self.boxes.append(box)
         self.out.append(f'<text id="label-{dim["id"]}" class="dimtext" x="{c[0]:.1f}" y="{c[1] + 4:.1f}" text-anchor="middle" '

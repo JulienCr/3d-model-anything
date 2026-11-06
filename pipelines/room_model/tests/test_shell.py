@@ -209,3 +209,18 @@ def test_shift_needs_twice_the_support_of_a_competing_surface(tmp_root, default,
     true_offset = _line(doc, _labels(doc, truth, "wing_east")[0])["offset"]
     moved = abs(_line(odoc, label)["offset"] - true_offset)
     assert (moved < 0.01) if shifted else (0.15 < moved < 0.25)
+
+
+def test_room_without_ceiling_keeps_roomplan_tops_and_still_exports(tmp_root):
+    from room_model import export, model
+    from room_model.context import output_path
+
+    ctx, _ = _case(tmp_root, "no-ceiling", no_ceiling=True)
+    doc = json.loads(shell.run(ctx).read_text())
+    assert "columns:no_ceiling" in doc["diagnostics"]["flags"]
+    assert not [e for e in doc["elements"] if e["kind"] in ("ceiling", "beam", "column")]
+    tops = [doc["parameters"][e["params"]["top"]] for e in doc["elements"] if e["kind"] == "wall"]
+    assert tops and all(t["source"] == "roomplan" for t in tops)
+    model.run(ctx)
+    export.run(ctx)
+    assert output_path(ctx, "export").exists() and (ctx.out / "report.md").exists()

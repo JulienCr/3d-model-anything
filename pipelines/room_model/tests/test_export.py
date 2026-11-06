@@ -1,15 +1,17 @@
+import copy
 import csv
+import io
 import json
 import struct
 import xml.etree.ElementTree as ET
 
 import pytest
 
-from room_model import export, model, shell
+from room_model import export, model, plan_svg, report, shell
 from room_model.context import output_path
 from helpers import make_case
 
-HEADER = ["id", "kind", "label", "value_cm", "sigma_cm", "source", "elements"]
+HEADER = ["id", "kind", "label", "value_cm", "sigma_cm", "source", "elements", "flags"]
 
 
 def read_glb(path):
@@ -85,7 +87,7 @@ def test_plan_svg(scene):
     assert {el["id"] for el in doc["elements"]} <= ids
     texts = " ".join("".join(e.itertext()) for e in root.iter() if e.tag.endswith("text"))
     for d in doc["dimensions"]:
-        if d["id"].startswith("S"):
+        if d["kind"] in ("width", "length"):
             assert d["id"] in texts
     assert "±" in texts and "1 m" in texts
 
@@ -180,6 +182,11 @@ def test_wall_bodies_lie_behind_interior_face(scene):
         depth = meshes[el["id"]][0][:, [0, 2]] @ np.array([np.cos(az), np.sin(az)])
         assert depth.max() <= offset + 1e-6
         assert depth.min() == pytest.approx(offset - thick, abs=1e-3)
+        start, end = (np.array(el[k]) for k in ("start", "end"))
+        t = (end - start) / np.linalg.norm(end - start)
+        along = (meshes[el["id"]][0][:, [0, 2]] - start) @ t
+        assert along.min() == pytest.approx(0.0, abs=1e-3)
+        assert along.max() == pytest.approx(np.linalg.norm(end - start) + thick, abs=1e-3)
 
 
 def test_glb_binary_integrity_and_winding(scene):
@@ -219,3 +226,73 @@ def test_beam_to_verify_is_grouped_labelled_and_reported(tmp_path_factory):
     text = (ctx.out / "report.md").read_text(encoding="utf-8")
     assert "à vérifier" in section(text, "Poutres") and "poutre probable, à confirmer" in section(text, "Alertes")
     assert all(d["flags"] == ["to_verify"] for d in doc["dimensions"] if d["id"] in (f"B{k}-u", f"B{k}-w"))
+    assert "Station B" not in section(text, "Alertes")
+
+
+def _alerts(doc):
+    return section(report.render(doc), "Alertes")
+
+
+def test_obstructed_station_is_reported_but_not_a_beam_dimension(scene):
+    _, doc = scene
+    doc = copy.deepcopy(doc)
+    station = next(d for d in doc["dimensions"] if d["kind"] == "width")
+    station["flags"] = ["obstacle_or_uneven_wall"]
+    assert f"Station {station['id']}" in _alerts(doc)
+    assert "Station" not in _alerts(scene[1])
+
+
+def test_csv_and_plan_show_the_station_flags(scene):
+    _, doc = scene
+    doc = copy.deepcopy(doc)
+    station = next(d for d in doc["dimensions"] if d["kind"] == "width")
+    station["flags"] = ["obstacle_or_uneven_wall"]
+    rows = {r[0]: r for r in csv.reader(io.StringIO(export.dimensions_csv(doc)))}
+    assert rows[station["id"]][-1] == "obstacle_or_uneven_wall"
+    assert next(r for k, r in rows.items() if k != station["id"] and k != "id")[-1] == ""
+    texts = [t for t in ET.fromstring(plan_svg.render(doc)).itertext() if t.startswith(station["id"] + " ")]
+    assert len(texts) == 1 and texts[0].endswith(" ~")
+    assert not any(t.endswith("~") for t in ET.fromstring(plan_svg.render(scene[1])).itertext())
+
+
+def test_report_wording_and_thresholds(scene):
+    _, doc = scene
+    text = report.render(doc)
+    assert "LiDAR" in section(text, "Murs") and "lidar" not in section(text, "Murs")
+    assert "Écart à l'angle droit ou à l'alignement" in section(text, "Orthogonalité")
+    doc = copy.deepcopy(doc)
+    doc["diagnostics"]["ceiling_unobserved_fraction"] = 0.04
+    assert "du plafond non observé" not in _alerts(doc)
+    doc["diagnostics"]["ceiling_unobserved_fraction"] = 0.2
+    assert "20,0 % du plafond non observé" in _alerts(doc)
+
+
+def test_report_lists_every_engaged_wall_of_a_column(scene):
+    _, doc = scene
+    doc = copy.deepcopy(doc)
+    engaged = {e["id"] for e in doc["elements"] if e["kind"] == "column" and e["engaged_wall"]}
+    column = next(c for c in doc["diagnostics"]["columns"] if c["id"] in engaged)
+    column["engaged_walls"] = ["M1", "M2"]
+    row = next(r for r in section(report.render(doc), "Poteaux").splitlines() if r.startswith(f"| {column['id'].split('_')[1]} |"))
+    assert "M1, M2" in row
+
+
+def test_report_shows_registration_fallback_reason(scene):
+    _, doc = scene
+    summary = {"reprojection_px_arkit": 2.5, "reprojection_px_refined": 2.5, "sim3_scale": 1.0,
+               "points3d": 10, "refined": 0, "weak": 3, "seconds": 1.0}
+    text = report.render(doc, {"summary": summary, "fallback": "not all images registered"})
+    assert "not all images registered" in section(text, "Recalage")
+
+
+def test_door_on_a_wall_off_the_outline_is_reported(tmp_path_factory):
+    ctx, truth = make_case(tmp_path_factory.mktemp("orphan"), "orphan", extra_roomplan_wall=True)
+    path = ctx.capture / "rooms" / "room-0.json"
+    data = json.loads(path.read_text())
+    data["doors"][0]["parentIdentifier"] = truth.extra_ident
+    path.write_text(json.dumps(data))
+    shell.run(ctx)
+    model.run(ctx)
+    export.run(ctx)
+    alerts = section((ctx.out / "report.md").read_text(encoding="utf-8"), "Alertes")
+    assert "Porte rattachée à un mur hors contour, ignorée" in alerts

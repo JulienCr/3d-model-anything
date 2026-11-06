@@ -16,7 +16,7 @@ from PIL import Image
 from scipy.spatial.transform import Rotation
 
 from room_model.capture import ARKIT_TO_CV, Photo, invert_rigid, load_photos
-from room_model.context import StageContext, output_path
+from room_model.context import NoPhotos, StageContext, output_path
 
 MAX_DIST = 5.0
 MAX_ANGLE = 75.0
@@ -92,7 +92,8 @@ def photo_records(names, poses, is_refined, n_obs, dt_cm, dr_deg):
 
 def _strip_exif(data: bytes) -> bytes:
     """Drop every APP1 segment (EXIF/XMP, incl. Orientation) without touching the scan data."""
-    assert data[:2] == b"\xff\xd8"
+    if data[:2] != b"\xff\xd8":
+        raise ValueError("not a JPEG file")
     out, i = [data[:2]], 2
     while True:
         marker = data[i + 1]
@@ -111,7 +112,8 @@ def _copy_images(capture: Path, photos: list[Photo], images: Path) -> None:
     for p in photos:
         (images / p.name).write_bytes(_strip_exif((capture / p.rel_file).read_bytes()))
         with Image.open(images / p.name) as im:
-            assert im.size == (p.width, p.height), p.name
+            if im.size != (p.width, p.height):
+                raise ValueError(f"{p.name}: image is {im.size}, the capture says {(p.width, p.height)}")
 
 
 def _extract_and_write_prior(pycolmap, work: Path, photos: list[Photo]) -> Path:
@@ -144,6 +146,7 @@ def _extract_and_write_prior(pycolmap, work: Path, photos: list[Photo]) -> Path:
             x, y, z, w = Rotation.from_matrix(m[:3, :3]).as_quat()
             t = m[:3, 3]
             cams.append(f"{dbim.camera_id} PINHOLE {p.width} {p.height} " + " ".join(f"{v:.9f}" for v in params))
+            # the trailing newline leaves the empty POINTS2D line that COLMAP's images.txt format requires
             imgs.append(f"{dbim.image_id} {w:.12f} {x:.12f} {y:.12f} {z:.12f} {t[0]:.9f} {t[1]:.9f} {t[2]:.9f} "
                         f"{dbim.camera_id} {dbim.name}\n")
     prior = work / "prior"
@@ -208,7 +211,7 @@ def run(ctx: StageContext) -> Path:
     t0 = time.time()
     photos = load_photos(ctx.capture, ctx.room)
     if not photos:
-        raise ValueError(f"no photos for room {ctx.room} in {ctx.capture}")
+        raise NoPhotos(f"no photos for room {ctx.room} in {ctx.capture}")
     names = [p.name for p in photos]
     reg = ctx.out / "registration"
     work, sparse = reg / "work", reg / "sparse"
@@ -244,7 +247,8 @@ def run(ctx: StageContext) -> Path:
             after_ba_px = _mean_reprojection(rec)
             print(f"BA done {time.time() - t0:.0f}s")
 
-            c_ref = np.array([_poses(rec, good)[n][0] for n in good])
+            good_poses = _poses(rec, good)
+            c_ref = np.array([good_poses[n][0] for n in good])
             scale, R, t = umeyama(c_ref, np.array([ark[n][0] for n in good]))
             rec.transform(pycolmap.Sim3d(scale, pycolmap.Rotation3d(R), t))
             for n in weak:

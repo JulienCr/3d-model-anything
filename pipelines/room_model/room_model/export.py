@@ -12,7 +12,7 @@ from room_model.context import StageContext, output_path, require
 from room_model.gltf import GltfNode, write_glb
 
 KIND_ORDER = ["floor", "ceiling", "wall", "beam", "column"]
-CSV_HEADER = ["id", "kind", "label", "value_cm", "sigma_cm", "source", "elements"]
+CSV_HEADER = ["id", "kind", "label", "value_cm", "sigma_cm", "source", "elements", "flags"]
 
 
 def _extras(doc: dict, el: dict) -> dict:
@@ -53,7 +53,7 @@ def dimensions_csv(doc: dict) -> str:
     writer.writerow(CSV_HEADER)
     for d in doc["dimensions"]:
         writer.writerow([d["id"], d["kind"], d["label"], f"{d['value'] * 100:.1f}", f"{d['sigma'] * 100:.1f}",
-                         d["source"], ";".join(d["elements"])])
+                         d["source"], ";".join(d["elements"]), ";".join(d["flags"])])
     return buf.getvalue()
 
 

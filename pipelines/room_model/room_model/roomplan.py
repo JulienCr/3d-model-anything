@@ -47,11 +47,6 @@ class Wall:
             out = np.where(np.isfinite(best), best, self.h / 2)
         return float(out[0]) if scalar else out
 
-    @property
-    def plane(self):
-        """(n, d) with n.p = d on the wall."""
-        return self.n, float(self.n @ self.c)
-
 
 @dataclass
 class Door:
@@ -70,7 +65,7 @@ class Door:
 @dataclass
 class Station:
     sid: str
-    kind: str  # "largeur" | "longueur"
+    kind: str  # "width" | "length"
     wall_a: Wall
     wall_b: Wall
     along: float  # coordinate along wall_a.x relative to wall_a.c
@@ -79,7 +74,6 @@ class Station:
     door_labels: list
     corner_ref: str
     corner_dist: float
-    rp_height: float
     flag: str = ""
 
 
@@ -121,7 +115,6 @@ class Room:
         used = {raw[i]["identifier"] for i in matched.values()}
         self.off_outline = [w["identifier"] for w in raw if w["identifier"] not in used]
         self._attach_doors(data["doors"], w2r)
-        self.ceiling_top = max(w.c[1] + w.top_t(0.0) for w in self.walls)
 
     def _match_walls(self, raw: list, wall_t: list) -> dict[int, int]:
         """Outline edge index -> index of the RoomPlan wall standing on it (parallel, within MATCH_DISTANCE)."""
@@ -173,13 +166,6 @@ class Room:
             wall.doors.append(door)
             self.doors.append(door)
 
-    def plan(self, p: np.ndarray) -> np.ndarray:
-        """Plan coordinates [x, z] of room-frame points."""
-        return np.atleast_2d(p)[:, [0, 2]]
-
-    def outline_plan(self) -> np.ndarray:
-        return self.plan(self.outline)
-
     def _inside(self, pts_xz: np.ndarray) -> np.ndarray:
         return shapely.contains_xy(self._polygon, pts_xz[:, 0], pts_xz[:, 1])
 
@@ -189,10 +175,6 @@ class Room:
         o = self.outline[:, [0, 2]]
         d = np.min([_seg_dist(pts_xz, o[k], o[(k + 1) % len(o)]) for k in range(len(o))], axis=0)
         return np.where(inside, d, -d)
-
-    def in_roi(self, pts: np.ndarray, margin: float = 0.12, y_pad: float = 0.25) -> np.ndarray:
-        m = self.footprint_signed_margin(pts[:, [0, 2]]) > -margin
-        return m & (pts[:, 1] > self.floor_y - y_pad) & (pts[:, 1] < self.ceiling_top + y_pad)
 
     def corner_reference(self, wall: Wall, point: np.ndarray) -> tuple[str, float]:
         """Nearest end of the wall's outline edge to a point on the wall: ('M3/M4', distance along the wall)."""
@@ -218,9 +200,8 @@ class Room:
         doors = [dr.label for dr in self.doors
                  if dr.wall in (wa, wb) and abs((dr.centre() - wa.c) @ wa.x - s) < dr.w / 2 + 0.1]
         corner, cd = self.corner_reference(wa, base)
-        s_w, _, _ = wa.local(base)
         return Station(sid="", kind=kind, wall_a=wa, wall_b=wb, along=float(s), mid=mid, d_roomplan=d, door_labels=doors,
-                       corner_ref=corner, corner_dist=cd, rp_height=float(wa.c[1] + wa.top_t(float(s_w[0])) - self.floor_y))
+                       corner_ref=corner, corner_dist=cd)
 
     def station_candidates(self, spacing: float = 1.0, margin: float = 0.45, min_overlap: float = 0.6, max_width: float = 4.5):
         """Opposite wall pairs facing each other across the room: (wa, wb, kind, [along positions], (lo, hi))."""
@@ -237,12 +218,12 @@ class Room:
                 lo, hi = max(ia[0], ib[0]), min(ia[1], ib[1])
                 if hi - lo < min_overlap:
                     continue
-                kind = "largeur" if d <= max_width else "longueur"
-                if kind == "longueur" or hi - lo < 2 * margin + 0.1:
+                kind = "width" if d <= max_width else "length"
+                if kind == "length" or hi - lo < 2 * margin + 0.1:
                     positions = [(lo + hi) / 2]
                 else:
                     n_st = max(2, int(np.floor((hi - lo - 2 * margin) / spacing)) + 1)
                     positions = list(np.linspace(lo + margin, hi - margin, n_st))
                 out.append((wa, wb, kind, positions, (lo, hi)))
-        out.sort(key=lambda r: (r[2] != "largeur", r[0].label, r[1].label))
+        out.sort(key=lambda r: (r[2] != "width", r[0].label, r[1].label))
         return out

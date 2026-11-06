@@ -5,6 +5,12 @@ import pytest
 
 from room_model import __main__ as cli
 from room_model.context import STAGE_OUTPUTS, require
+from synthetic import make_capture
+
+
+@pytest.fixture(autouse=True)
+def _capture_folder(tmp_path):
+    make_capture(tmp_path / "cap")
 
 
 def _run(tmp_path, *args):
@@ -24,12 +30,6 @@ def test_model_before_shell_asks_for_shell(tmp_path, monkeypatch, capsys):
     assert "run shell first" in capsys.readouterr().err
 
 
-def test_unknown_stage_module_exits_2(tmp_path, monkeypatch, capsys):
-    monkeypatch.setitem(cli.STAGE_MODULES, "export", "room_model._not_written")
-    assert _run(tmp_path, "export") == 2
-    assert "not implemented" in capsys.readouterr().err
-
-
 def test_stage_skipped_when_output_exists_and_rerun_with_force(tmp_path, monkeypatch):
     calls = []
 
@@ -46,9 +46,9 @@ def test_stage_skipped_when_output_exists_and_rerun_with_force(tmp_path, monkeyp
     assert _run(tmp_path, "shell", "--force") == 0 and calls == [False, True]
 
 
-def test_all_runs_stages_in_order_and_stops_at_first_missing(tmp_path, monkeypatch, capsys):
+def test_all_runs_stages_in_order(tmp_path, monkeypatch):
     order = []
-    for stage in ("registration", "shell"):
+    for stage in STAGE_OUTPUTS:
         def run(ctx, stage=stage):
             order.append(stage)
             out = ctx.out / STAGE_OUTPUTS[stage]
@@ -57,10 +57,37 @@ def test_all_runs_stages_in_order_and_stops_at_first_missing(tmp_path, monkeypat
             return out
 
         _fake_stage(monkeypatch, stage, run)
-    monkeypatch.setitem(cli.STAGE_MODULES, "model", "room_model._not_written")
-    assert _run(tmp_path, "all") == 2
-    assert order == ["registration", "shell"]
-    assert "stage model not implemented" in capsys.readouterr().err
+    assert _run(tmp_path, "all") == 0
+    assert order == ["registration", "shell", "model", "export"]
+
+
+def _synthetic(build, tmp_path):
+    root, _ = build()
+    return ["--capture", str(root), "--out", str(tmp_path / "out")]
+
+
+def test_all_skips_registration_of_a_capture_without_photos(build, tmp_path, capsys):
+    assert cli.main(["all", *_synthetic(build, tmp_path)]) == 0
+    assert "registration skipped: no photos for room 0" in capsys.readouterr().out
+    for stage in ("shell", "model", "export"):
+        assert (tmp_path / "out" / STAGE_OUTPUTS[stage]).exists()
+    assert not (tmp_path / "out" / STAGE_OUTPUTS["registration"]).exists()
+
+
+def test_registration_alone_without_photos_exits_with_one_line(build, tmp_path, capsys):
+    assert cli.main(["registration", *_synthetic(build, tmp_path)]) == 1
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1 and "no photos for room 0" in err[0]
+
+
+@pytest.mark.parametrize("stage", ["registration", "shell", "all"])
+def test_missing_capture_or_room_exits_with_one_line(build, tmp_path, capsys, stage):
+    args = _synthetic(build, tmp_path)
+    assert cli.main([stage, "--capture", str(tmp_path / "nowhere"), "--out", args[3]]) == 1
+    assert len(capsys.readouterr().err.strip().splitlines()) == 1
+    assert cli.main([stage, *args, "--room", "7"]) == 1
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1 and "room 7" in err[0]
 
 
 def test_unknown_subcommand_is_rejected(tmp_path):

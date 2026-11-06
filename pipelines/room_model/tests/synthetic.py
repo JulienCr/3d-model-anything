@@ -54,6 +54,7 @@ class SyntheticOptions:
     suspended_tubes: bool = False
     wall_duct: bool = False
     offset_wall: str | None = None
+    no_ceiling: bool = False  # the mesh has no ceiling at all
 
 
 @dataclass
@@ -106,6 +107,8 @@ def _patch_z(opt: SyntheticOptions) -> tuple[float, float]:
 
 
 def _columns(opt: SyntheticOptions) -> list[dict]:
+    if opt.no_ceiling:
+        return []  # column tops would read as a ceiling patch
     return COLUMNS + ([CORNER_COLUMN] if opt.corner_column else []) + ([STEP_COLUMN] if opt.step_column else [])
 
 
@@ -228,7 +231,8 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
     (bx0, bx1), (bz0, bz1) = BEAM["x"], BEAM["z"]
     m.rect(np.array([bx0, 0, 0]), Z, Y, -X, 1, (bz0, bz1), (BEAM["underside"], BEAM["top"]))
     m.rect(np.array([bx1, 0, 0]), Z, Y, X, 1, (bz0, bz1), (BEAM["underside"], BEAM["top"]))
-    m.rect(np.array([0, BEAM["underside"], 0]), X, Z, -Y, 3, (bx0, bx1), (bz0, bz1))
+    if not opt.no_ceiling:
+        m.rect(np.array([0, BEAM["underside"], 0]), X, Z, -Y, 3, (bx0, bx1), (bz0, bz1))
 
     if opt.short_beam:
         (sx0, sx1), (sz0, sz1), under = _short_beam_x(opt), _short_beam_z(opt), opt.short_beam_underside
@@ -302,8 +306,9 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
         m.rect(np.array([0, H_MAIN - opt.patch_drop, 0]), X, Z, -Y, 3, _patch_x(opt), _patch_z(opt))
     if opt.ceiling_hole:
         holes.append(((4.6, 5.6), (1.0, 2.0)))
-    m.rect(np.array([0, H_MAIN, 0]), X, Z, -Y, 3, (0, 6), (0, 2.5), lambda u, v: ~_in_rects(u, v, holes))
-    m.rect(np.array([0, H_WING, 0]), X, Z, -Y, 3, (0, 2.5), (2.5, 4.5))
+    if not opt.no_ceiling:
+        m.rect(np.array([0, H_MAIN, 0]), X, Z, -Y, 3, (0, 6), (0, 2.5), lambda u, v: ~_in_rects(u, v, holes))
+        m.rect(np.array([0, H_WING, 0]), X, Z, -Y, 3, (0, 2.5), (2.5, 4.5))
     return m
 
 

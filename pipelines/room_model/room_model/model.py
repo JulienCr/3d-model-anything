@@ -10,13 +10,13 @@ import shapely
 from room_model import shell
 from room_model.capture import load_roomplan
 from room_model.context import StageContext, output_path, require
+from room_model.fmt import fr
 from room_model.lidar import Samples, load_samples
 from room_model.roomplan import Room, Station
 
 SCHEMA = "room-model/1"
 VERSION = "v1-scan"
 SOURCE_RANK = {"assumed": 0, "roomplan": 1, "lidar": 2}
-KIND_MAP = {"largeur": "width", "longueur": "length"}
 PARALLEL_COS = np.cos(np.radians(20.0))
 EXTENT_MARGIN = 0.10  # m past a wall end still counted as facing it
 AXES = {"x": np.array([1.0, 0.0]), "z": np.array([0.0, 1.0])}
@@ -74,7 +74,7 @@ def build_stations(room: Room, samples: Samples, d=None) -> list[Station]:
     fitted walls `d` (RoomPlan's width when absent). A station in a door is moved out of it, or dropped."""
     stations, number = [], 0
     for wa, wb, kind, positions, (lo, hi) in room.station_candidates():
-        tol = 0.07 if kind == "largeur" else 0.12
+        tol = 0.07 if kind == "width" else 0.12
         for s0 in positions:
             number += 1  # a dropped candidate leaves a gap: ids keep the numbering of the unfiltered candidates
             chosen = None
@@ -100,10 +100,6 @@ def build_stations(room: Room, samples: Samples, d=None) -> list[Station]:
             chosen.sid = f"S{number:02d}"
             stations.append(chosen)
     return stations
-
-
-def _fr(value: float, digits: int = 2) -> str:
-    return f"{value:.{digits}f}".replace(".", ",")
 
 
 class _Doc:
@@ -156,10 +152,10 @@ def _station_dimension(d: _Doc, st: Station) -> dict | None:
     t = (wb["offset"] - wb["normal"] @ p) / denom
     q = p + t * wa["normal"]
     sigma = np.hypot(d.line_sigma_at(la, p), d.line_sigma_at(lb, q))
-    word = "Largeur" if st.kind == "largeur" else "Longueur"
-    label = f"{word} {la}–{lb} à {_fr(st.corner_dist)} m de {st.corner_ref}"
+    word = "Largeur" if st.kind == "width" else "Longueur"
+    label = f"{word} {la}–{lb} à {fr(st.corner_dist, 2)} m de {st.corner_ref}"
     flags = ["obstacle_or_uneven_wall"] if st.flag else []
-    return _dimension(st.sid, KIND_MAP[st.kind], label, abs(t), sigma, [f"Wall_{la}", f"Wall_{lb}"], (p + q) / 2,
+    return _dimension(st.sid, st.kind, label, abs(t), sigma, [f"Wall_{la}", f"Wall_{lb}"], (p + q) / 2,
                       d.weakest(wa["params"] + wb["params"]), flags)
 
 

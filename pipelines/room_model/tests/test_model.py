@@ -31,7 +31,7 @@ def test_station_widths(scene):
         assert d["value"] == pytest.approx(2.50, abs=0.01)
         assert abs(d["value"] - 2.50) < 3 * d["sigma"]
         assert len(d["at"]) == 2
-    assert [d["id"] for d in doc["dimensions"] if d["id"].startswith("S")][0] == "S01"
+    assert [d["id"] for d in doc["dimensions"] if d["kind"] in ("width", "length")][0] == "S01"
 
 
 def test_heights_and_structures(scene):
@@ -70,7 +70,7 @@ def _run(root, name, **options):
 
 def _pair(doc, truth, a, b):
     ids = {f"Wall_{wall_labels(doc, truth, n)[0]}" for n in (a, b)}
-    return [d for d in doc["dimensions"] if d["id"].startswith("S") and set(d["elements"]) == ids]
+    return [d for d in doc["dimensions"] if d["kind"] in ("width", "length") and set(d["elements"]) == ids]
 
 
 def test_stations_follow_the_fitted_walls_not_roomplan(tmp_path_factory):

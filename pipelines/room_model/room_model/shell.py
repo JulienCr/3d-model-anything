@@ -31,7 +31,6 @@ WALL_TOP_STEP = 0.10  # m between the points sampling a wall top
 WALL_TOP_INSET = 0.15  # m from the wall into the room
 WALL_TOP_MIN_LENGTH = 0.30  # m of wall a level must lie over to give the wall its top
 FALLBACK_AZIMUTH_SIGMA = np.radians(2.0)
-EXCLUDED_CLASSES = (4, 5, 6, 7)  # table, seat, window, door
 
 
 def wall_candidates(s: Samples, room: Room, wall: Wall, margin_s: float = 0.10, margin_t: float = 0.20,
@@ -40,7 +39,7 @@ def wall_candidates(s: Samples, room: Room, wall: Wall, margin_s: float = 0.10, 
     along, up, dist = wall.local(s.P)
     t_floor = room.floor_y - wall.c[1]
     ok = (np.abs(dist - centre) < window) & (np.abs(along) < wall.w / 2 - margin_s) & (up > t_floor + margin_t)
-    ok &= (np.abs(s.N @ wall.n) > 0.75) & ~np.isin(s.cls, EXCLUDED_CLASSES)
+    ok &= (np.abs(s.N @ wall.n) > 0.75) & ~np.isin(s.cls, columns.EXCLUDED_CLASSES)
     idx = np.nonzero(ok)[0]
     keep = up[idx] < wall.top_t(np.clip(along[idx], -wall.w / 2, wall.w / 2)) - margin_t
     for dr in wall.doors:
@@ -135,6 +134,12 @@ def _wall_lines(room: Room, samples: Samples) -> tuple[list[dict], dict, dict]:
     return lines, params, diag
 
 
+def _wall_line(line: dict, polygon: list, k: int) -> dict:
+    """Same shape as an entry of `wall_lines`, built from the fitted line and the closed polygon."""
+    return {"label": line["wall"].label, "normal": line["n"], "offset": line["offset"],
+            "start": np.array(polygon[k]), "end": np.array(polygon[(k + 1) % len(polygon)])}
+
+
 def _corners(room: Room, lines: list[dict]) -> list[np.ndarray]:
     """Plan corner k joins wall k-1 and wall k; flags the walls around a near-parallel one."""
     sin_limit = np.sin(np.radians(NEAR_PARALLEL_DEG))
@@ -215,7 +220,7 @@ def _ceiling_elements(result: ceilings.CeilingResult) -> tuple[list[dict], dict,
 
 
 def build(ctx: StageContext) -> dict:
-    """The shell document (shell-1 format) for the context's capture; Tasks adding elements extend this dict."""
+    """The shell document (shell-1 format) for the context's capture; later stages extend this dict."""
     w2r = world_to_room(ctx.capture, ctx.room, ctx.turn)
     room = Room(load_roomplan(ctx.capture, ctx.room), w2r)
     samples = load_samples(ctx, w2r)
@@ -225,9 +230,7 @@ def build(ctx: StageContext) -> dict:
     level, floor_diag, floor_flags = _floor(room, samples, polygon)
     parameters["floor.level"] = level
     ceiling_result = ceilings.detect(samples, shapely.Polygon(polygon), level["value"])
-    wall_geometry = [{"label": ln["wall"].label, "normal": ln["n"], "offset": ln["offset"],
-                      "start": np.array(polygon[k]), "end": np.array(polygon[(k + 1) % len(polygon)])}
-                     for k, ln in enumerate(lines)]
+    wall_geometry = [_wall_line(ln, polygon, k) for k, ln in enumerate(lines)]
     flags = list(floor_flags)
     if ceiling_result.levels:
         column_result = columns.detect(samples, wall_geometry, shapely.Polygon(polygon), level["value"], ceiling_result.levels)
@@ -265,10 +268,15 @@ def build(ctx: StageContext) -> dict:
         "frame": {"world_to_room": [float(v) for v in w2r.T.ravel()], "turn": ctx.turn},
         "parameters": parameters,
         "elements": elements,
-        "diagnostics": {"walls": walls_diag, "floor": floor_diag, "ceilings": ceiling_diag, "ceiling_unobserved_fraction": ceiling_result.unobserved_fraction,
-                        "unexplained_horizontal": ceiling_result.unexplained, "columns": [{"id": f"Column_{k}", "engaged_walls": c["engaged_walls"]} for k, c in enumerate(column_result.columns, 1)],
-                        "unexplained_vertical": column_result.unexplained,
-                        "off_outline_walls": list(room.off_outline), "flags": flags},
+        "diagnostics": {
+            "walls": walls_diag, "floor": floor_diag, "ceilings": ceiling_diag,
+            "ceiling_unobserved_fraction": ceiling_result.unobserved_fraction,
+            "unexplained_horizontal": ceiling_result.unexplained,
+            "columns": [{"id": f"Column_{k}", "engaged_walls": c["engaged_walls"]}
+                        for k, c in enumerate(column_result.columns, 1)],
+            "unexplained_vertical": column_result.unexplained,
+            "off_outline_walls": list(room.off_outline), "orphan_doors": list(room.orphan_doors), "flags": flags,
+        },
     }
 
 

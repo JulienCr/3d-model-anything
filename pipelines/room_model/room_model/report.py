@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from room_model import shell
+from room_model import ceilings, shell
 from room_model.model import SOURCE_RANK
-from room_model.plan_svg import fr
+from room_model.fmt import fr
+from room_model.plan_svg import STATION_KINDS
 
 WALL_FLAGS = {
     "roomplan_fallback": "mur non vu par le LiDAR, position RoomPlan conservée",
@@ -25,10 +26,13 @@ UNEXPLAINED = {
 }
 HORIZONTAL = {
     "too_narrow": "trop étroit pour une poutre",
-    "too_shallow": "descend de moins de 14 cm sous le plafond",
+    "too_shallow": f"descend de moins de {fr(ceilings.MIN_BEAM_DROP * 100, 0)} cm sous le plafond",
     "suspended": "suspendu sous un plafond visible (luminaire, gaine, chemin de câbles)",
 }
 TO_VERIFY = "poutre probable, à confirmer (photos ou relevé)"
+SOURCES = {"lidar": "LiDAR", "roomplan": "RoomPlan", "assumed": "supposé"}
+OBSTRUCTED = "obstacle_or_uneven_wall"
+UNOBSERVED_ALERT = 0.05  # share of the ceiling the LiDAR never saw above which an alert is raised
 STATION_FLAG = "section de mur encombrée ou irrégulière, mesure à prendre avec réserve"
 DASH = "—"
 
@@ -59,7 +63,7 @@ class _Report:
         return f"{fr(v['value'] * 100)} ± {fr(v['sigma'] * 100)} cm"
 
     def source(self, pids: list[str]) -> str:
-        return min((self.p(x)["source"] for x in pids), key=SOURCE_RANK.__getitem__)
+        return SOURCES[min((self.p(x)["source"] for x in pids), key=SOURCE_RANK.__getitem__)]
 
     def sections(self) -> list[tuple[str, list[str]]]:
         return [("Entrées", self.inputs()), ("Repère", self.frame()), ("Recalage", self.registration()),
@@ -69,7 +73,7 @@ class _Report:
 
     def inputs(self) -> list[str]:
         src, n = self.doc["source"], self.doc
-        stations = [d for d in n["dimensions"] if d["id"].startswith("S")]
+        stations = [d for d in n["dimensions"] if d["kind"] in STATION_KINDS]
         counts = " ; ".join(f"{name} : {len(self.els[k])}" for name, k in
                             (("murs", "wall"), ("plafonds", "ceiling"), ("poutres", "beam"), ("poteaux", "column")))
         return [f"- Capture : `{src['capture']}`, pièce {src['room']}",
@@ -86,7 +90,8 @@ class _Report:
         if not self.poses:
             return ["non exécuté"]
         s = self.poses["summary"]
-        return [f"- Reprojection ARKit : {fr(s['reprojection_px_arkit'], 2)} px",
+        reason = [f"- Raffinement écarté, poses ARKit conservées : {self.poses['fallback']}"] if self.poses.get("fallback") else []
+        return reason + [f"- Reprojection ARKit : {fr(s['reprojection_px_arkit'], 2)} px",
                 f"- Reprojection après recalage : {fr(s['reprojection_px_refined'], 2)} px",
                 f"- Échelle Sim3 : {fr(s['sim3_scale'], 4)}",
                 f"- Points 3D : {s['points3d']}",
@@ -106,7 +111,7 @@ class _Report:
 
     def floor(self) -> list[str]:
         d = self.diag["floor"]
-        out = [f"- Niveau : y = {self.level('floor.level')} (source : {self.p('floor.level')['source']})"]
+        out = [f"- Niveau : y = {self.level('floor.level')} (source : {SOURCES[self.p('floor.level')['source']]})"]
         if d.get("rms_cm") is not None:
             out += [f"- RMS : {fr(d['rms_cm'], 2)} cm, appui {fr(d['support_m2'])} m², inclinaison {fr(d['tilt_deg'], 2)}°",
                     f"- Écart au sol RoomPlan : {fr(d['offset_vs_roomplan_cm'])} cm"]
@@ -135,10 +140,12 @@ class _Report:
 
     def columns(self) -> list[str]:
         rows = []
+        engaged = {c["id"]: c["engaged_walls"] for c in self.diag.get("columns", [])}
         for el in self.els["column"]:
             p = el["params"]
+            walls = engaged.get(el["id"]) or [w for w in [el["engaged_wall"]] if w]
             rows.append([el["id"].split("_")[1], f"({fr(self.p(p['center_x'])['value'], 2)} ; {fr(self.p(p['center_z'])['value'], 2)}) m",
-                         self.level(p["size_x"]), self.level(p["size_z"]), el["engaged_wall"] or "isolé"])
+                         self.level(p["size_x"]), self.level(p["size_z"]), ", ".join(walls) or "isolé"])
         return _table(["Poteau", "Centre [x ; z]", "Taille x", "Taille z", "Mur engagé"], rows)
 
     def unexplained(self) -> list[str]:
@@ -165,7 +172,7 @@ class _Report:
             angle = float(np.degrees(np.arccos(np.clip(a["normal"] @ b["normal"], -1, 1))))
             dev = min(abs(angle - ref) for ref in (0.0, 90.0, 180.0))
             rows.append([f"{a['label']} → {b['label']}", fr(angle) + "°", fr(dev) + "°"])
-        return _table(["Murs consécutifs", "Angle entre normales", "Écart à 90° ou 180°"], rows)
+        return _table(["Murs consécutifs", "Angle entre normales", "Écart à l'angle droit ou à l'alignement"], rows)
 
     def alerts(self) -> list[str]:
         out = []
@@ -176,9 +183,11 @@ class _Report:
         out += [f"- {f}" for f in self.diag["flags"] if f not in known]
         out += [f"- Poutre {e['id'].split('_')[1]} : {TO_VERIFY}" for e in self.els["beam"] if "to_verify" in e.get("flags", [])]
         out += [f"- Mur RoomPlan hors du contour du sol (cloison ?), ignoré : {i}" for i in self.diag["off_outline_walls"]]
-        if frac := self.diag.get("ceiling_unobserved_fraction"):
+        out += [f"- Porte rattachée à un mur hors contour, ignorée : {i}" for i in self.diag.get("orphan_doors", [])]
+        if (frac := self.diag.get("ceiling_unobserved_fraction")) and frac > UNOBSERVED_ALERT:
             out.append(f"- {fr(frac * 100)} % du plafond non observé par le LiDAR")
-        out += [f"- Station {d['id']} : {STATION_FLAG}" for d in self.doc["dimensions"] if d.get("flags")]
+        out += [f"- Station {d['id']} : {STATION_FLAG}" for d in self.doc["dimensions"]
+                if d["kind"] in STATION_KINDS and OBSTRUCTED in d.get("flags", [])]
         return out or ["Aucune."]
 
     def thickness(self) -> list[str]:

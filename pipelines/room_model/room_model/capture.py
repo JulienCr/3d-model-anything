@@ -7,6 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
+from room_model.context import InvalidCapture
+
 ARKIT_TO_CV = np.diag([1.0, -1.0, -1.0, 1.0])
 
 
@@ -48,7 +50,11 @@ class Photo:
 
 
 def load_manifest(capture: Path) -> dict:
-    return json.loads((Path(capture) / "manifest.json").read_text(encoding="utf-8"))
+    path = Path(capture) / "manifest.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise InvalidCapture(f"capture unreadable ({path}): {exc}") from exc
 
 
 def load_photos(capture: Path, room: int | None = None) -> list[Photo]:
@@ -72,19 +78,16 @@ def load_photos(capture: Path, room: int | None = None) -> list[Photo]:
     return sorted(photos, key=lambda p: p.name)
 
 
-def _room_entry(capture: Path, room: int) -> dict:
+def room_entry(capture: Path, room: int) -> dict:
     for r in load_manifest(capture)["rooms"]:
         if r["index"] == room:
             return r
-    raise KeyError(f"room {room} not in manifest")
+    raise InvalidCapture(f"room {room} not in the manifest of {capture}")
 
 
-def mesh_path(capture: Path, room: int | None = None) -> Path:
-    """LiDAR mesh of one room, or the manifest-level mesh when room is None."""
-    capture = Path(capture)
-    if room is None:
-        return capture / load_manifest(capture)["mesh"]["file"]
-    return capture / _room_entry(capture, room)["mesh"]["file"]
+def mesh_path(capture: Path, room: int) -> Path:
+    """LiDAR mesh of one room."""
+    return Path(capture) / room_entry(capture, room)["mesh"]["file"]
 
 
 def load_mesh_ply(path: Path) -> dict:
@@ -106,4 +109,4 @@ def load_mesh_ply(path: Path) -> dict:
 
 def load_roomplan(capture: Path, room: int = 0) -> dict:
     capture = Path(capture)
-    return json.loads((capture / _room_entry(capture, room)["file"]).read_text(encoding="utf-8"))
+    return json.loads((capture / room_entry(capture, room)["file"]).read_text(encoding="utf-8"))

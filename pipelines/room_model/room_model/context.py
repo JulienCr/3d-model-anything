@@ -16,6 +16,14 @@ class StageInputMissing(RuntimeError):
     """A stage was asked to run before the stage producing its input."""
 
 
+class NoPhotos(StageInputMissing, ValueError):
+    """The room has no photos, so registration has nothing to refine."""
+
+
+class InvalidCapture(StageInputMissing):
+    """The capture folder or the requested room cannot be read."""
+
+
 @dataclass(frozen=True)
 class StageContext:
     capture: Path
