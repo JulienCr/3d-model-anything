@@ -29,7 +29,7 @@ THICKNESS = 0.20
 FALLBACK_OFFSET_SIGMA = 0.05
 WALL_TOP_STEP = 0.10  # m between the points sampling a wall top
 WALL_TOP_INSET = 0.15  # m from the wall into the room
-WALL_TOP_MIN_SHARE = 0.10  # share of the sampled points a level must hold to give a wall its top
+WALL_TOP_MIN_LENGTH = 0.30  # m of wall a level must lie over to give the wall its top
 FALLBACK_AZIMUTH_SIGMA = np.radians(2.0)
 EXCLUDED_CLASSES = (4, 5, 6, 7)  # table, seat, window, door
 
@@ -186,8 +186,8 @@ def _region_json(region: shapely.MultiPolygon) -> list[dict]:
 
 
 def _wall_top(line: dict, start: np.ndarray, end: np.ndarray, levels: list[dict]) -> dict | None:
-    """Highest level holding WALL_TOP_MIN_SHARE of the points every WALL_TOP_STEP along the wall, WALL_TOP_INSET inside
-    the room (a wall rises to the highest ceiling it meets); None when no level does."""
+    """Highest level over at least WALL_TOP_MIN_LENGTH of the wall, sampled every WALL_TOP_STEP, WALL_TOP_INSET inside
+    the room (a wall rises to the highest ceiling it meets); None when no level is."""
     length = float(np.linalg.norm(end - start))
     count = max(int(length / WALL_TOP_STEP), 1)
     t = (np.arange(count) + 0.5) / count
@@ -195,7 +195,7 @@ def _wall_top(line: dict, start: np.ndarray, end: np.ndarray, levels: list[dict]
     if not levels:
         return None
     counts = [int(shapely.contains_xy(lv["region"], pts[:, 0], pts[:, 1]).sum()) for lv in levels]
-    held = [lv for lv, n in zip(levels, counts) if n >= WALL_TOP_MIN_SHARE * count]
+    held = [lv for lv, n in zip(levels, counts) if n * WALL_TOP_STEP >= WALL_TOP_MIN_LENGTH - 1e-9]
     return max(held, key=lambda lv: lv["level"]) if held else None
 
 
