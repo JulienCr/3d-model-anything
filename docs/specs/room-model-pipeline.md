@@ -128,6 +128,8 @@ viewer can load the enriched `room.json` via `room-runtime` without a hand-writt
 3. **M3 Photo refinement**: pipes and openings from photo edges.
 4. **M4 Measurement loop**: stage 5 (candidates, plan, Artifact with database) and stage 6.
 5. **M5 Squared variant + integration**: `model_squared.glb`, enriched `room.json`, `rooms.mjs` stage.
+6. **M6 Pipeline UI**: a local interface to run the stages on a capture and follow their progress
+   (stage state, timings, logs, links to the outputs), on top of the same Python stages; the CLI stays.
 
 ## Decisions (grilling rounds 1–3, 2026-11-06) — these override the sections above
 
