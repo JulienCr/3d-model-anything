@@ -2,7 +2,9 @@ import numpy as np
 import pytest
 import shapely
 
-from room_model import shell
+from room_model import ceilings, shell
+from room_model.frame import world_to_room
+from room_model.lidar import Samples, load_samples
 from helpers import make_case, plan_point, truth_to_room, wall_labels, wall_line
 
 
@@ -86,3 +88,28 @@ def test_ceiling_hole_creates_no_beam(default, hole):
     unobserved = doc["diagnostics"]["ceiling_unobserved_fraction"]
     assert unobserved > 0.04
     assert unobserved > default[2]["diagnostics"]["ceiling_unobserved_fraction"] + 0.03
+
+
+def _main_area(doc):
+    return _region(_elements(doc, "ceiling")[0]).area
+
+
+def test_unobserved_fraction_is_small_on_a_scanned_ceiling(default):
+    assert default[2]["diagnostics"]["ceiling_unobserved_fraction"] < 0.03
+
+
+def test_ceiling_hole_is_measured(default, hole):
+    gain = hole[2]["diagnostics"]["ceiling_unobserved_fraction"] - default[2]["diagnostics"]["ceiling_unobserved_fraction"]
+    assert 0.035 <= gain <= 0.065
+    assert 0.8 <= _main_area(default[2]) - _main_area(hole[2]) <= 1.2
+
+
+def test_no_ceiling_samples_gives_no_levels(default):
+    ctx, _, doc = default
+    samples = load_samples(ctx, world_to_room(ctx.capture, ctx.room, ctx.turn))
+    keep = samples.N[:, 1] >= -0.5
+    stripped = Samples(samples.P[keep], samples.N[keep], samples.cls[keep])
+    polygon = shapely.Polygon(next(e for e in doc["elements"] if e["kind"] == "floor")["polygon"])
+    result = ceilings.detect(stripped, polygon, doc["parameters"]["floor.level"]["value"])
+    assert result.levels == [] and result.beams == []
+    assert result.unobserved_fraction == 1.0

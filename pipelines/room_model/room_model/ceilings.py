@@ -7,10 +7,9 @@ import numpy as np
 import shapely
 from scipy import ndimage
 
-from room_model.lidar import Samples
+from room_model.lidar import SAMPLE_DENSITY, Samples
 from room_model.planes import fit_plane, offset_sigma
 
-SAMPLE_DENSITY = 4000.0  # samples per m2, the load_samples default
 MIN_HEIGHT = 1.6  # m above the floor
 POLYGON_MARGIN = 0.05
 LEVEL_WINDOW = 0.03
@@ -77,8 +76,8 @@ class _Grid:
         padded = np.pad(mask, ((0, 0), (1, 1)))
         edges = np.diff(padded.astype(np.int8), axis=1)
         (ri, rs), (_, re) = np.nonzero(edges == 1), np.nonzero(edges == -1)
-        x, z0, z1 = self.x0 + ri * GRID, self.z0 + rs * GRID, self.z0 + re * GRID
-        geom = shapely.union_all(shapely.box(x, z0, x + GRID, z1))
+        x0, x1 = self.x0 + ri * GRID, self.x0 + (ri + 1) * GRID  # same expression per edge: abutting boxes must share bits
+        geom = shapely.union_all(shapely.box(x0, self.z0 + rs * GRID, x1, self.z0 + re * GRID))
         return _as_multipolygon(geom)
 
 
@@ -200,4 +199,4 @@ def detect(samples: Samples, polygon: shapely.Polygon, floor_level: float) -> Ce
             levels.append({"level": lv["level"], "sigma": lv["sigma"], "region": region, "support_m2": lv["support_m2"]})
     beams.sort(key=lambda b: (-b["underside"], b["axis"][0]))
     covered = shapely.union_all([lv["region"] for lv in levels] + [_beam_footprint(b, polygon) for b in beams])
-    return CeilingResult(levels, beams, float(1.0 - covered.area / polygon.area))
+    return CeilingResult(levels, beams, float(1.0 - covered.intersection(inner).area / inner.area))

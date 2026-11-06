@@ -12,6 +12,7 @@ from room_model.capture import load_mesh_ply, mesh_path
 from room_model.context import StageContext
 
 MIN_COMPONENT_AREA = 0.25  # m2, after welding
+SAMPLE_DENSITY = 4000.0  # samples per m2 of mesh
 WELD = 0.01  # m; ARKit mesh anchors are separate chunks whose borders do not share vertices
 
 
@@ -40,7 +41,7 @@ def weld_components(v: np.ndarray, f: np.ndarray, weld: float = WELD) -> tuple[n
     return comp, np.bincount(comp, weights=triangle_areas(v, f))
 
 
-def load_samples(ctx: StageContext, world_to_room: np.ndarray, density: float = 4000.0, seed: int = 0) -> Samples:
+def load_samples(ctx: StageContext, world_to_room: np.ndarray, density: float = SAMPLE_DENSITY, seed: int = 0) -> Samples:
     """Samples (about `density` per m2) of the in-room faces of the room mesh, minus small floating components."""
     mesh = load_mesh_ply(mesh_path(ctx.capture, ctx.room))
     w2r = np.asarray(world_to_room, float)
