@@ -1,0 +1,203 @@
+"""Ceiling levels, their plan regions, and beams, from the upward-facing underside of the LiDAR mesh."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+import shapely
+from scipy import ndimage
+
+from room_model.lidar import Samples
+from room_model.planes import fit_plane, offset_sigma
+
+SAMPLE_DENSITY = 4000.0  # samples per m2, the load_samples default
+MIN_HEIGHT = 1.6  # m above the floor
+POLYGON_MARGIN = 0.05
+LEVEL_WINDOW = 0.03
+MIN_LEVEL_AREA = 0.3  # m2
+MAX_LEVELS = 8
+GRID = 0.02  # m, plan raster cell
+CLOSING_ITERATIONS = 2
+MIN_COMPONENT_AREA = 0.1  # m2
+BEAM_MINOR = (0.08, 0.80)
+BEAM_RATIO = 3.0
+ADJACENT = 0.15  # m, reach of the "higher level next to a long side" test
+MIN_ADJACENT_CELLS = 25
+SIDE_GROW = 0.10
+MIN_SIDE_AREA = 0.05  # m2 of beam side face needed to measure the width
+FALLBACK_WIDTH_SIGMA = 0.02
+WIDTH_AGREEMENT = 0.10  # m, a side-plane width further than this from the footprint is not trusted
+SIMPLIFY = 0.02
+
+
+@dataclass
+class CeilingResult:
+    levels: list[dict]  # {"level", "sigma", "region": MultiPolygon, "support_m2"}, highest first
+    beams: list[dict]  # {"axis", "underside", "underside_sigma", "width", "width_sigma", "top", "top_sigma"}
+    unobserved_fraction: float
+
+
+def _histogram_levels(y: np.ndarray) -> list[float]:
+    """Dominant heights, greedy over a 1 cm histogram."""
+    levels = []
+    for _ in range(MAX_LEVELS):
+        if len(y) < 100:
+            break
+        bins = np.arange(y.min() - 0.01, y.max() + 0.02, 0.01)
+        h, e = np.histogram(y, bins=bins)
+        k = np.convolve(h, np.ones(2 * round(LEVEL_WINDOW / 0.01) + 1), mode="same")
+        j = int(np.argmax(k))
+        yc = float(np.median(y[np.abs(y - (e[j] + 0.005)) < LEVEL_WINDOW]))
+        if (np.abs(y - yc) < LEVEL_WINDOW).sum() / SAMPLE_DENSITY < MIN_LEVEL_AREA:
+            break
+        levels.append(yc)
+        y = y[np.abs(y - yc) > 0.05]
+    return levels
+
+
+class _Grid:
+    def __init__(self, polygon: shapely.Polygon):
+        x0, z0, x1, z1 = polygon.bounds
+        pad = 6 * GRID
+        self.x0, self.z0 = x0 - pad, z0 - pad
+        self.shape = (int(np.ceil((x1 - x0 + 2 * pad) / GRID)) + 1, int(np.ceil((z1 - z0 + 2 * pad) / GRID)) + 1)
+
+    def occupancy(self, xz: np.ndarray) -> np.ndarray:
+        occ = np.zeros(self.shape, bool)
+        ij = np.floor((xz - [self.x0, self.z0]) / GRID).astype(int)
+        occ[ij[:, 0], ij[:, 1]] = True
+        return ndimage.binary_closing(occ, iterations=CLOSING_ITERATIONS)
+
+    def centres(self, mask: np.ndarray) -> np.ndarray:
+        ij = np.argwhere(mask)
+        return (ij + 0.5) * GRID + [self.x0, self.z0]
+
+    def polygon(self, mask: np.ndarray) -> shapely.MultiPolygon:
+        """Union of the mask's cells, merged along z into runs first to keep the union cheap."""
+        padded = np.pad(mask, ((0, 0), (1, 1)))
+        edges = np.diff(padded.astype(np.int8), axis=1)
+        (ri, rs), (_, re) = np.nonzero(edges == 1), np.nonzero(edges == -1)
+        x, z0, z1 = self.x0 + ri * GRID, self.z0 + rs * GRID, self.z0 + re * GRID
+        geom = shapely.union_all(shapely.box(x, z0, x + GRID, z1))
+        return _as_multipolygon(geom)
+
+
+def _as_multipolygon(geom) -> shapely.MultiPolygon:
+    parts = [g for g in getattr(geom, "geoms", [geom]) if isinstance(g, shapely.Polygon) and not g.is_empty]
+    return shapely.MultiPolygon(parts)
+
+
+def _component_frame(centres: np.ndarray) -> dict:
+    """Principal axes of a component and its 2nd-98th percentile spans along them."""
+    centre = centres.mean(0)
+    _, vecs = np.linalg.eigh(np.cov((centres - centre).T))
+    minor_axis, major_axis = vecs[:, 0], vecs[:, 1]
+    a, b = (centres - centre) @ major_axis, (centres - centre) @ minor_axis
+    a_lo, a_hi = np.percentile(a, [2, 98])
+    b_lo, b_hi = np.percentile(b, [2, 98])
+    return {"centre": centre, "u": major_axis, "v": minor_axis, "a": (a_lo, a_hi), "b": (b_lo, b_hi),
+            "major": a_hi - a_lo, "minor": b_hi - b_lo}
+
+
+def _adjacent_levels(frame: dict, higher: list[tuple[float, np.ndarray]]) -> list[float]:
+    """Levels with cells within ADJACENT of a long side of the component."""
+    found = []
+    for level, cells in higher:
+        rel = cells - frame["centre"]
+        ra, rb = rel @ frame["u"], rel @ frame["v"]
+        along = (ra >= frame["a"][0]) & (ra <= frame["a"][1])
+        near_hi = along & (rb >= frame["b"][1]) & (rb <= frame["b"][1] + ADJACENT)
+        near_lo = along & (rb <= frame["b"][0]) & (rb >= frame["b"][0] - ADJACENT)
+        if max(near_hi.sum(), near_lo.sum()) >= MIN_ADJACENT_CELLS:
+            found.append(level)
+    return found
+
+
+def _is_beam(frame: dict) -> bool:
+    return BEAM_MINOR[0] <= frame["minor"] <= BEAM_MINOR[1] and frame["major"] / frame["minor"] >= BEAM_RATIO
+
+
+def _side_planes(samples: Samples, frame: dict, underside: float, top: float):
+    """Fits of the two vertical side faces; (pos, neg) with None where the face is not seen."""
+    P = samples.P
+    rel = P[:, [0, 2]] - frame["centre"]
+    ra, rb = rel @ frame["u"], rel @ frame["v"]
+    ok = (np.abs(samples.N[:, 1]) < 0.2) & (P[:, 1] > underside + 0.03) & (P[:, 1] < top - 0.03)
+    ok &= (ra >= frame["a"][0]) & (ra <= frame["a"][1])
+    ok &= (rb >= frame["b"][0] - SIDE_GROW) & (rb <= frame["b"][1] + SIDE_GROW)
+    v3 = np.array([frame["v"][0], 0.0, frame["v"][1]])
+    mid = (frame["b"][0] + frame["b"][1]) / 2
+    out = []
+    for sign in (1.0, -1.0):
+        idx = np.nonzero(ok & (sign * (rb - mid) > 0))[0]
+        fit = None
+        if len(idx) >= 30:
+            fit = fit_plane(P[idx], sign * v3, P[idx].mean(0), SIDE_GROW)
+        if fit is not None and (fit.support_m2 < MIN_SIDE_AREA or abs(fit.normal @ v3) < 0.9):
+            fit = None
+        out.append(fit)
+    return out
+
+
+def _beam(samples: Samples, polygon: shapely.Polygon, frame: dict, level: dict, top: dict) -> dict:
+    v, centre = frame["v"], frame["centre"].copy()
+    width, width_sigma = frame["minor"], FALLBACK_WIDTH_SIGMA
+    pos, neg = _side_planes(samples, frame, level["level"], top["level"])
+    if pos is not None and neg is not None:
+        w = float((pos.centroid[[0, 2]] - neg.centroid[[0, 2]]) @ v)
+        if abs(w - frame["minor"]) < WIDTH_AGREEMENT:
+            width, width_sigma = w, float(np.hypot(offset_sigma(pos), offset_sigma(neg)))
+            centre += v * (((pos.centroid[[0, 2]] + neg.centroid[[0, 2]]) / 2 - centre) @ v)
+    line = shapely.LineString([centre - 50 * frame["u"], centre + 50 * frame["u"]])
+    inside = shapely.intersection(line, polygon)
+    pieces = [g for g in getattr(inside, "geoms", [inside]) if isinstance(g, shapely.LineString) and not g.is_empty]
+    piece = min(pieces, key=lambda g: g.distance(shapely.Point(centre))) if pieces else line
+    return {"axis": [[float(x), float(z)] for x, z in (piece.coords[0], piece.coords[-1])],
+            "underside": level["level"], "underside_sigma": level["sigma"],
+            "width": width, "width_sigma": width_sigma, "top": top["level"], "top_sigma": top["sigma"]}
+
+
+def _beam_footprint(beam: dict, polygon: shapely.Polygon):
+    return shapely.LineString(beam["axis"]).buffer(beam["width"] / 2, cap_style="flat").intersection(polygon)
+
+
+def detect(samples: Samples, polygon: shapely.Polygon, floor_level: float) -> CeilingResult:
+    """Ceiling levels with plan regions, beams, and the fraction of the plan neither covers."""
+    P = samples.P
+    inner = polygon.buffer(-POLYGON_MARGIN)
+    ok = (samples.N[:, 1] < -0.9) & (P[:, 1] > floor_level + MIN_HEIGHT) & shapely.contains_xy(inner, P[:, 0], P[:, 2])
+    cand = P[ok]
+    found = []
+    for yc in _histogram_levels(cand[:, 1]):
+        near = cand[np.abs(cand[:, 1] - yc) < LEVEL_WINDOW]
+        fit = fit_plane(near, [0.0, -1.0, 0.0], near.mean(0), LEVEL_WINDOW)
+        if fit is not None:
+            found.append({"level": float(fit.point[1]), "sigma": offset_sigma(fit), "support_m2": fit.support_m2})
+    found.sort(key=lambda lv: -lv["level"])
+
+    grid = _Grid(polygon)
+    for lv in found:
+        lv["mask"] = grid.occupancy(cand[np.abs(cand[:, 1] - lv["level"]) < LEVEL_WINDOW][:, [0, 2]])
+        lv["cells"] = grid.centres(lv["mask"])
+    levels, beams = [], []
+    for k, lv in enumerate(found):
+        higher = [(h["level"], h["cells"]) for h in found[:k]]
+        labels, count = ndimage.label(lv["mask"], structure=np.ones((3, 3)))
+        keep = np.zeros(lv["mask"].shape, bool)
+        for comp in range(1, count + 1):
+            mask = labels == comp
+            if mask.sum() * GRID**2 < MIN_COMPONENT_AREA:
+                continue
+            frame = _component_frame(grid.centres(mask))
+            adjacent = _adjacent_levels(frame, higher) if _is_beam(frame) else []
+            if adjacent:
+                top = next(h for h in found if h["level"] == min(adjacent))
+                beams.append(_beam(samples, polygon, frame, lv, top))
+            else:
+                keep |= mask
+        region = _as_multipolygon(grid.polygon(keep).simplify(SIMPLIFY).intersection(polygon)) if keep.any() else None
+        if region is not None and not region.is_empty:
+            levels.append({"level": lv["level"], "sigma": lv["sigma"], "region": region, "support_m2": lv["support_m2"]})
+    beams.sort(key=lambda b: (-b["underside"], b["axis"][0]))
+    covered = shapely.union_all([lv["region"] for lv in levels] + [_beam_footprint(b, polygon) for b in beams])
+    return CeilingResult(levels, beams, float(1.0 - covered.area / polygon.area))

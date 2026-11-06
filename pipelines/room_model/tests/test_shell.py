@@ -4,22 +4,14 @@ import numpy as np
 import pytest
 
 from room_model import shell
-from room_model.context import StageContext
 from room_model.frame import world_to_room
 from room_model.lidar import load_samples
-from synthetic import SyntheticOptions, make_capture
+from helpers import make_case as _case, truth_to_room as _truth_to_room, wall_labels as _labels, wall_line as _line
 
 
 @pytest.fixture(scope="module")
 def tmp_root(tmp_path_factory):
     return tmp_path_factory.mktemp("shell")
-
-
-def _case(root, name, **options):
-    capture = root / name
-    truth = make_capture(capture, SyntheticOptions(**options))
-    ctx = StageContext(capture, root / f"{name}-out")
-    return ctx, truth
 
 
 @pytest.fixture(scope="module")
@@ -47,15 +39,6 @@ def split(tmp_root):
     return ctx, truth, shell.build(ctx)
 
 
-def _labels(doc, truth, name):
-    ids = truth.wall_ident[name]
-    return [e["label"] for e in doc["elements"] if e["kind"] == "wall" and e["roomplan_id"] in ids]
-
-
-def _line(doc, label):
-    return next(w for w in shell.wall_lines(doc) if w["label"] == label)
-
-
 def _distance(doc, truth, name_a, name_b):
     """Distance between two fitted walls, measured at the middle of their overlap."""
     a, b = (_line(doc, _labels(doc, truth, n)[0]) for n in (name_a, name_b))
@@ -68,10 +51,6 @@ def _distance(doc, truth, name_a, name_b):
 
 def _sigma(doc, label, what):
     return doc["parameters"][f"wall.{label}.{what}"]["sigma"]
-
-
-def _truth_to_room(ctx, truth):
-    return world_to_room(ctx.capture, ctx.room, ctx.turn) @ truth.world_from_local
 
 
 def test_widths_recovered(default):
@@ -154,7 +133,7 @@ def test_shell_document_format(default):
     assert doc["schema"] == "room-model/shell-1"
     assert len(doc["frame"]["world_to_room"]) == 16
     kinds = [e["kind"] for e in doc["elements"]]
-    assert kinds == ["floor"] + ["wall"] * 6
+    assert kinds == ["floor"] + ["wall"] * 6 + ["ceiling"] * 2 + ["beam"]
     for el in doc["elements"]:
         for name in el["params"].values():
             assert name in doc["parameters"]

@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import shapely
 
+from room_model import ceilings
 from room_model.capture import load_roomplan
 from room_model.context import StageContext, output_path
 from room_model.frame import world_to_room
@@ -21,6 +22,8 @@ LOW_SUPPORT_M2 = 0.5
 NEAR_PARALLEL_DEG = 10.0
 THICKNESS = 0.20
 FALLBACK_OFFSET_SIGMA = 0.05
+WALL_TOP_STEP = 0.10  # m between the points sampling a wall top
+WALL_TOP_INSET = 0.15  # m from the wall into the room
 FALLBACK_AZIMUTH_SIGMA = np.radians(2.0)
 EXCLUDED_CLASSES = (4, 5, 6, 7)  # table, seat, window, door
 
@@ -140,6 +143,38 @@ def _floor(room: Room, samples: Samples, polygon: list) -> tuple[dict, dict, lis
     return _param(y, offset_sigma(fit), "m", "lidar"), diag, []
 
 
+def _region_json(region: shapely.MultiPolygon) -> list[dict]:
+    def ring(r):
+        return [[float(x), float(z)] for x, z in r.coords[:-1]]
+
+    return [{"exterior": ring(g.exterior), "holes": [ring(h) for h in g.interiors]} for g in region.geoms]
+
+
+def _wall_top(line: dict, start: np.ndarray, end: np.ndarray, levels: list[dict]) -> dict | None:
+    """Highest ceiling level over points every WALL_TOP_STEP along the wall, WALL_TOP_INSET inside the room."""
+    length = float(np.linalg.norm(end - start))
+    count = max(int(length / WALL_TOP_STEP), 1)
+    t = (np.arange(count) + 0.5) / count
+    pts = start + np.outer(t, end - start) + WALL_TOP_INSET * line["n"]
+    hit = [lv for lv in levels if shapely.contains_xy(lv["region"], pts[:, 0], pts[:, 1]).any()]
+    return max(hit, key=lambda lv: lv["level"]) if hit else None
+
+
+def _ceiling_elements(result: ceilings.CeilingResult) -> tuple[list[dict], dict, list[dict]]:
+    elements, params, diag = [], {}, []
+    for k, lv in enumerate(result.levels, 1):
+        params[f"ceiling.{k}.level"] = _param(lv["level"], lv["sigma"], "m", "lidar")
+        elements.append({"id": f"Ceiling_{k}", "kind": "ceiling", "params": {"level": f"ceiling.{k}.level"},
+                         "region": _region_json(lv["region"])})
+        diag.append({"id": f"Ceiling_{k}", "support_m2": lv["support_m2"], "area_m2": float(lv["region"].area)})
+    for k, b in enumerate(result.beams, 1):
+        for name in ("underside", "width", "top"):
+            params[f"beam.{k}.{name}"] = _param(b[name], b[f"{name}_sigma"], "m", "lidar")
+        elements.append({"id": f"Beam_{k}", "kind": "beam", "axis": b["axis"],
+                         "params": {n: f"beam.{k}.{n}" for n in ("underside", "width", "top")}})
+    return elements, params, diag
+
+
 def build(ctx: StageContext) -> dict:
     """The shell document (shell-1 format) for the context's capture; Tasks adding elements extend this dict."""
     w2r = world_to_room(ctx.capture, ctx.room, ctx.turn)
@@ -150,6 +185,7 @@ def build(ctx: StageContext) -> dict:
     polygon = [[float(c[0]), float(c[1])] for c in corners]
     level, floor_diag, floor_flags = _floor(room, samples, polygon)
     parameters["floor.level"] = level
+    ceiling_result = ceilings.detect(samples, shapely.Polygon(polygon), level["value"])
 
     elements = [{"id": "Floor", "kind": "floor", "params": {"level": "floor.level"}, "polygon": polygon}]
     flags = list(floor_flags)
@@ -162,13 +198,19 @@ def build(ctx: StageContext) -> dict:
             "params": {name: f"{key}.{name}" for name in ("azimuth", "offset", "thickness", "top")},
         })
         flags += [f"{wall.label}:{f}" for f in line["flags"]]
+        top = _wall_top(line, np.array(polygon[k]), np.array(polygon[(k + 1) % len(polygon)]), ceiling_result.levels)
+        if top is not None:
+            parameters[f"{key}.top"] = _param(top["level"], top["sigma"], "m", "lidar")
+    ceiling_elements, ceiling_params, ceiling_diag = _ceiling_elements(ceiling_result)
+    elements += ceiling_elements
+    parameters.update(ceiling_params)
     return {
         "schema": SCHEMA,
         "source": {"capture": Path(ctx.capture).name, "room": ctx.room},
         "frame": {"world_to_room": [float(v) for v in w2r.T.ravel()], "turn": ctx.turn},
         "parameters": parameters,
         "elements": elements,
-        "diagnostics": {"walls": walls_diag, "floor": floor_diag, "ceilings": [], "unexplained_vertical": [],
+        "diagnostics": {"walls": walls_diag, "floor": floor_diag, "ceilings": ceiling_diag, "ceiling_unobserved_fraction": ceiling_result.unobserved_fraction, "unexplained_vertical": [],
                         "off_outline_walls": list(room.off_outline), "flags": flags},
     }
 
