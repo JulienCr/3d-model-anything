@@ -50,6 +50,12 @@ def panel(tmp_root):
 
 
 @pytest.fixture(scope="module")
+def raised(tmp_root):
+    ctx, truth = make_case(tmp_root, "raised", ceiling_patch=True, patch_drop=-0.07, patch_length=3.0, patch_width=0.6)
+    return ctx, truth, shell.build(ctx)
+
+
+@pytest.fixture(scope="module")
 def ripple(tmp_root):
     ctx, truth = make_case(tmp_root, "ripple", ceiling_patch=True, patch_drop=0.04, patch_length=1.62)
     return ctx, truth, shell.build(ctx)
@@ -242,4 +248,11 @@ def test_lowered_panel_of_ratio_1_8_is_not_a_beam(panel):
     _, _, doc = panel
     assert len(_elements(doc, "beam")) == 1
     assert doc["diagnostics"]["unexplained_horizontal"] == []
+    assert len(_elements(doc, "ceiling")) == 3
+
+
+def test_strip_of_the_highest_level_is_ceiling_not_unexplained(raised):
+    _, _, doc = raised
+    assert doc["diagnostics"]["unexplained_horizontal"] == []
+    assert len(_elements(doc, "beam")) == 1
     assert len(_elements(doc, "ceiling")) == 3

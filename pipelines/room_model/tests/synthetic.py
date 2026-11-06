@@ -42,6 +42,7 @@ class SyntheticOptions:
     ceiling_patch: bool = False
     patch_drop: float = 0.032
     patch_length: float = 1.0
+    patch_width: float = 0.9
     short_beam_underside: float = 2.00
     short_beam_width: float = 0.30
     suspended_tubes: bool = False
@@ -68,7 +69,7 @@ COLUMNS = [
     {"x": (5.00, 5.50), "z": (0.00, 0.25), "top": 2.50, "engaged": "south"},
 ]
 CORNER_COLUMN = {"x": (0.0, 0.35), "z": (0.0, 0.30), "top": 2.50, "engaged": "south", "flush": ("x0",)}
-CEILING_PATCH = {"x0": 2.00, "z": (1.50, 2.40)}  # a slightly lower flat ceiling panel
+CEILING_PATCH = {"x0": 2.00, "z0": 1.50}  # a slightly lower flat ceiling panel
 SHORT_BEAM = {"x": (4.90, 5.20), "z": (0.50, 1.90), "top": 2.50}  # hangs free from the main ceiling
 TUBES = {"z": [2.10, 2.10, 2.10, 0.40, 0.40], "x0": [0.30, 1.80, 4.40, 0.50, 2.00], "length": 1.20, "width": 0.08,
          "drop": 0.25, "height": 0.06}  # light tubes hanging on rods: no side face reaches the ceiling
@@ -85,6 +86,10 @@ def _short_beam_x(opt: SyntheticOptions) -> tuple[float, float]:
 
 def _patch_x(opt: SyntheticOptions) -> tuple[float, float]:
     return (CEILING_PATCH["x0"], CEILING_PATCH["x0"] + opt.patch_length)
+
+
+def _patch_z(opt: SyntheticOptions) -> tuple[float, float]:
+    return (CEILING_PATCH["z0"], CEILING_PATCH["z0"] + opt.patch_width)
 
 
 def _columns(opt: SyntheticOptions) -> list[dict]:
@@ -253,9 +258,9 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
     l_shape = [((0, 6), (0, 2.5)), ((0, 2.5), (2.5, 4.5))]
     m.rect(o, X, Z, Y, 2, (0, 6), (0, 4.5),
            lambda u, v: _in_rects(u, v, l_shape) & ~_in_rects(u, v, solid))
-    holes = col_rects + ([(_patch_x(opt), CEILING_PATCH["z"])] if opt.ceiling_patch else []) + [(BEAM["x"], BEAM["z"])] + ([(_short_beam_x(opt), SHORT_BEAM["z"])] if opt.short_beam else [])
+    holes = col_rects + ([(_patch_x(opt), _patch_z(opt))] if opt.ceiling_patch else []) + [(BEAM["x"], BEAM["z"])] + ([(_short_beam_x(opt), SHORT_BEAM["z"])] if opt.short_beam else [])
     if opt.ceiling_patch:
-        m.rect(np.array([0, H_MAIN - opt.patch_drop, 0]), X, Z, -Y, 3, _patch_x(opt), CEILING_PATCH["z"])
+        m.rect(np.array([0, H_MAIN - opt.patch_drop, 0]), X, Z, -Y, 3, _patch_x(opt), _patch_z(opt))
     if opt.ceiling_hole:
         holes.append(((4.6, 5.6), (1.0, 2.0)))
     m.rect(np.array([0, H_MAIN, 0]), X, Z, -Y, 3, (0, 6), (0, 2.5), lambda u, v: ~_in_rects(u, v, holes))

@@ -277,7 +277,7 @@ def detect(samples: Samples, polygon: shapely.Polygon, floor_level: float) -> Ce
             if mask.sum() * GRID**2 < MIN_COMPONENT_AREA:
                 continue
             frame = _component_frame(grid.centres(mask))
-            if not _is_strip(frame):
+            if not higher or not _is_strip(frame):  # nothing is above the highest level: its strips are ceiling
                 keep |= mask
                 continue
             top_level, reason = _classify_strip(samples, polygon, frame, lv["level"], higher)
