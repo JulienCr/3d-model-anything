@@ -10,6 +10,7 @@ CELL = 0.02  # m, raster cell turning inlier points into a supported area
 INLIER = 0.03  # m
 SIGMA_SYS_OFFSET = 0.01  # m, systematic floor of any fitted offset
 SIGMA_SYS_AZIMUTH = np.radians(0.25)
+SIGMA_SUPPORT = 0.014  # m * sqrt(m2): a patch of 0.5 m2 claims 2 cm
 
 
 @dataclass
@@ -70,7 +71,8 @@ def _effective_samples(fit: PlaneFit) -> float:
 
 
 def offset_sigma(fit: PlaneFit) -> float:
-    return float(np.hypot(fit.rms / _effective_samples(fit), SIGMA_SYS_OFFSET))
+    support_term = SIGMA_SUPPORT / np.sqrt(max(fit.support_m2, 0.01))
+    return float(np.sqrt((fit.rms / _effective_samples(fit)) ** 2 + SIGMA_SYS_OFFSET**2 + support_term**2))
 
 
 def azimuth_sigma(fit: PlaneFit) -> float:

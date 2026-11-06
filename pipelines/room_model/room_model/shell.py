@@ -68,6 +68,7 @@ def _wall_lines(room: Room, samples: Samples) -> tuple[list[dict], dict, dict]:
         seed_h = _horizontal(wall.n)
         fit = _fit_wall(samples, room, wall)
         flags = []
+        az_source = "roomplan"
         if fit is None:
             n_h, offset, source = seed_h, float(seed_h @ wall.c[[0, 2]]), "roomplan"
             sig_off, sig_az = FALLBACK_OFFSET_SIGMA, FALLBACK_AZIMUTH_SIGMA
@@ -77,22 +78,23 @@ def _wall_lines(room: Room, samples: Samples) -> tuple[list[dict], dict, dict]:
                 "tilt_deg": None, "n_points": 0, "centroid": [float(wall.c[0]), float(wall.c[2])],
             }
         else:
-            n_h = _horizontal(fit.normal)
-            offset, source = float(n_h @ fit.point[[0, 2]]), "lidar"
-            sig_off, sig_az = offset_sigma(fit), azimuth_sigma(fit)
+            fit_h = n_h = _horizontal(fit.normal)
+            sig_off, sig_az, az_source = offset_sigma(fit), azimuth_sigma(fit), "lidar"
             if fit.support_m2 < LOW_SUPPORT_M2:
+                n_h, sig_az, az_source = seed_h, FALLBACK_AZIMUTH_SIGMA, "roomplan"
                 flags.append("low_support")
+            offset, source = float(n_h @ fit.centroid[[0, 2]]), "lidar"
             diag[wall.label] = {
                 "rms_cm": fit.rms * 100, "support_m2": fit.support_m2,
                 "offset_vs_roomplan_cm": float((fit.point - wall.c) @ wall.n * 100),
-                "angle_vs_roomplan_deg": _angle_deg(n_h, seed_h),
+                "angle_vs_roomplan_deg": _angle_deg(fit_h, seed_h),
                 "tilt_deg": float(np.degrees(np.arcsin(min(abs(fit.normal[1]), 1.0)))),
                 "n_points": fit.n_inliers, "centroid": [float(fit.centroid[0]), float(fit.centroid[2])],
             }
         if wall.ident in room.seeded_from_outline:
             flags.append("seeded_from_outline")
         key = f"wall.{wall.label}"
-        params[f"{key}.azimuth"] = _param(np.arctan2(n_h[1], n_h[0]), sig_az, "rad", source)
+        params[f"{key}.azimuth"] = _param(np.arctan2(n_h[1], n_h[0]), sig_az, "rad", az_source)
         params[f"{key}.offset"] = _param(offset, sig_off, "m", source)
         params[f"{key}.thickness"] = _param(THICKNESS, 0.05, "m", "assumed")
         params[f"{key}.top"] = _param(wall.c[1] + wall.top_t(0.0), 0.05, "m", "roomplan")

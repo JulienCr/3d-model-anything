@@ -15,6 +15,8 @@ WALL_NAMES = ["south", "east", "step", "wing_east", "north", "west"]
 WALL_OFFSETS = [0.02, -0.015, 0.03, -0.02, 0.01, -0.025]
 WALL_TURN_DEG = 0.8
 WALL_HEIGHT = 2.45
+THIN_WALL_TURN_DEG = 3.0  # a thin wall keeps one narrow mesh patch, turned by this angle
+THIN_WALL_HALF_WIDTH = 0.125
 FLOOR_OFFSET = 0.01
 H_MAIN, H_WING = 2.5, 2.3
 YAW, SHIFT = 0.5, (1.2, -1.45, -0.8)
@@ -32,6 +34,7 @@ class SyntheticOptions:
     drop_wall_faces: str | None = None
     ceiling_hole: bool = False
     other_room_panel: bool = True
+    thin_wall: str | None = None
 
 
 @dataclass
@@ -137,6 +140,11 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
 
     def wall(name, origin, U, normal, u_range, v_top, excl=()):
         if drop == name:
+            return
+        if opt.thin_wall == name:
+            mid = (u_range[0] + u_range[1]) / 2
+            R = _rot_y(np.radians(THIN_WALL_TURN_DEG))
+            m.rect(origin + mid * U, R @ U, Y, R @ normal, 1, (-THIN_WALL_HALF_WIDTH, THIN_WALL_HALF_WIDTH), (0, v_top))
             return
         m.rect(origin, U, Y, normal, 1, u_range, (0, v_top), lambda u, v: ~_in_rects(u, v, excl))
 

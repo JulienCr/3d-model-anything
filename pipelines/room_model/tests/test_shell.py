@@ -6,6 +6,8 @@ import pytest
 from room_model import shell
 from room_model.frame import world_to_room
 from room_model.lidar import load_samples
+from room_model.capture import load_roomplan
+from room_model.roomplan import Room
 from helpers import make_case as _case, truth_to_room as _truth_to_room, wall_labels as _labels, wall_line as _line
 
 
@@ -30,6 +32,12 @@ def no_panel(tmp_root):
 @pytest.fixture(scope="module")
 def no_wing(tmp_root):
     ctx, truth = _case(tmp_root, "no-wing", drop_wall_faces="wing_east")
+    return ctx, truth, shell.build(ctx)
+
+
+@pytest.fixture(scope="module")
+def thin(tmp_root):
+    ctx, truth = _case(tmp_root, "thin", thin_wall="wing_east")
     return ctx, truth, shell.build(ctx)
 
 
@@ -152,3 +160,21 @@ def test_samples_drop_other_room_faces(default):
     panel = (np.abs(local[:, 2] + 0.05) < 0.03) & (local[:, 0] > 1) & (local[:, 0] < 3) & (local[:, 1] < 2)
     assert not panel.any()
     assert len(samples.P) > 100_000
+
+
+def test_low_support_wall_takes_roomplan_azimuth(thin):
+    ctx, truth, doc = thin
+    label = _labels(doc, truth, "wing_east")[0]
+    entry = doc["diagnostics"]["walls"][label]
+    assert entry["support_m2"] < 0.5 and entry["angle_vs_roomplan_deg"] > 1.5
+    room = Room(load_roomplan(ctx.capture, ctx.room), world_to_room(ctx.capture, ctx.room, ctx.turn))
+    seed = next(w for w in room.walls if w.label == label).n
+    azimuth, offset = (doc["parameters"][f"wall.{label}.{k}"] for k in ("azimuth", "offset"))
+    assert azimuth["value"] == pytest.approx(np.arctan2(seed[2], seed[0]), abs=1e-6)
+    assert azimuth["sigma"] == pytest.approx(np.radians(2.0)) and azimuth["source"] == "roomplan"
+    assert offset["source"] == "lidar" and offset["sigma"] >= 0.02
+    assert abs(_distance(doc, truth, "west", "wing_east") - 2.50) < 0.01
+    line = _line(doc, label)
+    ends = np.array([line["start"], line["end"]])
+    assert np.abs(ends @ line["normal"] - line["offset"]).max() < 0.05
+
