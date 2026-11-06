@@ -9,6 +9,7 @@ from room_model.plan_svg import fr
 
 WALL_FLAGS = {
     "roomplan_fallback": "mur non vu par le LiDAR, position RoomPlan conservée",
+    "shifted_seed": "plan RoomPlan à plus de 8 cm de la surface, ajusté sur la surface trouvée dans ±30 cm",
     "low_support": "appui LiDAR faible, ajustement peu fiable",
     "seeded_from_outline": "mur absent de la liste RoomPlan, initialisé depuis le contour du sol",
     "near_parallel_corner": "angle quasi plat avec un mur voisin, coin obtenu par projection",

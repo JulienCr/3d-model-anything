@@ -51,6 +51,8 @@ Every parameter carries `value`, `sigma`, `unit` and `source` (`lidar`, `roompla
 
 Constants: `SIGMA_SYS_OFFSET = 0.01 m`, `SIGMA_SYS_AZIMUTH = 0.25 deg`, `SIGMA_SUPPORT = 0.014 m` (the support term: 2 cm at 0.5 m2, 4.5 cm at 0.1 m2, below 0.5 cm from 8 m2). When a wall has too little LiDAR support, the RoomPlan plane is kept with a fallback sigma of 5 cm and 2 deg (flag `roomplan_fallback`). Wall thickness is assumed: 20 cm, sigma 5 cm.
 
+Misplaced walls (flag `shifted_seed`): RoomPlan walls can sit 20-30 cm from the surface. The wall-facing vertical samples inside the wall rectangle within 30 cm of the RoomPlan plane are histogrammed in 1 cm bins; the mode with the most support (at least 0.3 m2 within 4 cm; modes within 10 % of the best tie and the outer one wins, walls being behind furniture) is refitted inside 8 cm. It replaces the fit on the RoomPlan plane only when it is more than 8 cm away and has twice the support, or when the RoomPlan plane has no fit. Walls shorter than about 0.5 m keep the RoomPlan plane: there is nothing to measure.
+
 Low-support walls (support under 0.5 m2, flag `low_support`): the azimuth of a patch that small is not trustworthy, so the wall keeps the RoomPlan azimuth (source `roomplan`, sigma 2 deg). Its offset is the LiDAR fit evaluated at the fit centroid along the RoomPlan normal (source `lidar`), with the support term above dominating the offset sigma. `diagnostics.walls[*].angle_vs_roomplan_deg` still reports the fitted angle.
 
 ## Detection rules

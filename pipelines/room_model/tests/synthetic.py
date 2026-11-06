@@ -15,6 +15,7 @@ WALL_NAMES = ["south", "east", "step", "wing_east", "north", "west"]
 WALL_OFFSETS = [0.02, -0.015, 0.03, -0.02, 0.01, -0.025]
 WALL_TURN_DEG = 0.8
 WALL_HEIGHT = 2.45
+ROOMPLAN_OFFSET = 0.20  # m an `offset_wall` is moved into the room in RoomPlan, away from the mesh
 THIN_WALL_TURN_DEG = 3.0  # a thin wall keeps one narrow mesh patch, turned by this angle
 THIN_WALL_HALF_WIDTH = 0.125
 FLOOR_OFFSET = 0.01
@@ -43,6 +44,7 @@ class SyntheticOptions:
     short_beam_width: float = 0.30
     suspended_tubes: bool = False
     wall_duct: bool = False
+    offset_wall: str | None = None
 
 
 @dataclass
@@ -302,7 +304,7 @@ def _roomplan(opt: SyntheticOptions, world: np.ndarray) -> tuple[dict, dict[str,
         n = np.array([-d[1], d[0]])
         phi = np.radians(WALL_TURN_DEG) * (1 if k % 2 == 0 else -1)
         rot = np.array([[np.cos(phi), -np.sin(phi)], [np.sin(phi), np.cos(phi)]])
-        c = (a + b) / 2 + WALL_OFFSETS[k] * n
+        c = (a + b) / 2 + (WALL_OFFSETS[k] + (ROOMPLAN_OFFSET if opt.offset_wall == WALL_NAMES[k] else 0.0)) * n
         lines.append((c, rot @ d))
         info.append((name, c, rot @ d, rot @ n, length))
     corners = [_intersect(*lines[k - 1], *lines[k]) for k in range(n_edges)]

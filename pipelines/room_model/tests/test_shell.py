@@ -47,6 +47,12 @@ def split(tmp_root):
     return ctx, truth, shell.build(ctx)
 
 
+@pytest.fixture(scope="module")
+def offset(tmp_root):
+    ctx, truth = _case(tmp_root, "offset", offset_wall="wing_east")
+    return ctx, truth, shell.build(ctx)
+
+
 def _distance(doc, truth, name_a, name_b):
     """Distance between two fitted walls, measured at the middle of their overlap."""
     a, b = (_line(doc, _labels(doc, truth, n)[0]) for n in (name_a, name_b))
@@ -178,3 +184,15 @@ def test_low_support_wall_takes_roomplan_azimuth(thin):
     ends = np.array([line["start"], line["end"]])
     assert np.abs(ends @ line["normal"] - line["offset"]).max() < 0.05
 
+
+
+def test_wall_far_from_roomplan_is_found_by_its_mode(default, offset):
+    _, truth, doc, _ = default
+    ctx, otruth, odoc = offset
+    label = _labels(odoc, otruth, "wing_east")[0]
+    el = next(e for e in odoc["elements"] if e["kind"] == "wall" and e["label"] == label)
+    assert "roomplan_fallback" not in el["flags"] and "shifted_seed" in el["flags"]
+    expected = _line(doc, _labels(doc, truth, "wing_east")[0])["offset"]
+    assert _line(odoc, label)["offset"] == pytest.approx(expected, abs=0.01)
+    assert odoc["parameters"][f"wall.{label}.offset"]["source"] == "lidar"
+    assert all("shifted_seed" not in e["flags"] for e in doc["elements"] if e["kind"] == "wall")

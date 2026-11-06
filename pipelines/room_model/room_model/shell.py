@@ -11,12 +11,17 @@ from room_model import ceilings, columns
 from room_model.capture import load_roomplan
 from room_model.context import StageContext, output_path
 from room_model.frame import world_to_room
-from room_model.lidar import Samples, load_samples
+from room_model.lidar import SAMPLE_DENSITY, Samples, load_samples
 from room_model.planes import PlaneFit, azimuth_sigma, fit_plane, offset_sigma
 from room_model.roomplan import Room, Wall
 
 SCHEMA = "room-model/shell-1"
 FIT_WINDOW = 0.08  # m around the seed plane
+SEARCH_WINDOW = 0.30  # m around the RoomPlan plane searched for a wall that RoomPlan misplaced
+MODE_MIN_AREA = 0.3  # m2 of wall-facing surface within MODE_HALF_WIDTH of a mode
+MODE_HALF_WIDTH = 0.04
+SHIFT_GAIN = 2.0  # support ratio a surface away from RoomPlan's plane needs to replace the fit on that plane
+MODE_TIE = 0.9  # a mode with this share of the best support ties with it, and the outer one wins
 MIN_CANDIDATES = 200
 LOW_SUPPORT_M2 = 0.5
 NEAR_PARALLEL_DEG = 10.0
@@ -28,11 +33,12 @@ FALLBACK_AZIMUTH_SIGMA = np.radians(2.0)
 EXCLUDED_CLASSES = (4, 5, 6, 7)  # table, seat, window, door
 
 
-def wall_candidates(s: Samples, room: Room, wall: Wall, margin_s: float = 0.10, margin_t: float = 0.20) -> np.ndarray:
-    """Indices of samples on the wall rectangle (doors excluded) within the window of the RoomPlan plane."""
+def wall_candidates(s: Samples, room: Room, wall: Wall, margin_s: float = 0.10, margin_t: float = 0.20,
+                    centre: float = 0.0, window: float = FIT_WINDOW) -> np.ndarray:
+    """Indices of samples on the wall rectangle (doors excluded) within `window` of the plane moved by `centre` along the normal."""
     along, up, dist = wall.local(s.P)
     t_floor = room.floor_y - wall.c[1]
-    ok = (np.abs(dist) < FIT_WINDOW) & (np.abs(along) < wall.w / 2 - margin_s) & (up > t_floor + margin_t)
+    ok = (np.abs(dist - centre) < window) & (np.abs(along) < wall.w / 2 - margin_s) & (up > t_floor + margin_t)
     ok &= (np.abs(s.N @ wall.n) > 0.75) & ~np.isin(s.cls, EXCLUDED_CLASSES)
     idx = np.nonzero(ok)[0]
     keep = up[idx] < wall.top_t(np.clip(along[idx], -wall.w / 2, wall.w / 2)) - margin_t
@@ -54,11 +60,37 @@ def _angle_deg(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.degrees(np.arccos(np.clip(a @ b, -1.0, 1.0))))
 
 
-def _fit_wall(samples: Samples, room: Room, wall: Wall) -> PlaneFit | None:
-    idx = wall_candidates(samples, room, wall)
+def _fit_wall(samples: Samples, room: Room, wall: Wall, centre: float = 0.0) -> PlaneFit | None:
+    idx = wall_candidates(samples, room, wall, centre=centre)
     if len(idx) < MIN_CANDIDATES:
         return None
-    return fit_plane(samples.P[idx], wall.n, wall.c, FIT_WINDOW)
+    return fit_plane(samples.P[idx], wall.n, wall.c + centre * wall.n, FIT_WINDOW)
+
+
+def _wall_mode(samples: Samples, room: Room, wall: Wall) -> float | None:
+    """Signed distance (m, + into the room) of the strongest wall-facing surface within SEARCH_WINDOW of the RoomPlan plane."""
+    idx = wall_candidates(samples, room, wall, window=SEARCH_WINDOW)
+    dist = wall.local(samples.P[idx])[2]
+    counts, edges = np.histogram(dist, bins=np.round(np.arange(-SEARCH_WINDOW, SEARCH_WINDOW + 0.005, 0.01), 3))
+    half = round(MODE_HALF_WIDTH / 0.01)
+    support = np.convolve(counts, np.ones(2 * half + 1), mode="same") / SAMPLE_DENSITY
+    peaks = [j for j in range(len(counts)) if support[j] >= MODE_MIN_AREA and support[j] == support[max(j - half, 0):j + half + 1].max()]
+    if not peaks:
+        return None
+    best = max(support[j] for j in peaks)
+    return float(min((edges[j] + 0.005 for j in peaks if support[j] >= MODE_TIE * best)))
+
+
+def _fit_wall_or_shifted(samples: Samples, room: Room, wall: Wall) -> tuple[PlaneFit | None, bool]:
+    """Fit on the RoomPlan plane; the surface found further away within SEARCH_WINDOW wins when it has SHIFT_GAIN times the support."""
+    fit = _fit_wall(samples, room, wall)
+    mode = _wall_mode(samples, room, wall)
+    if mode is None or abs(mode) <= FIT_WINDOW:
+        return fit, False
+    moved = _fit_wall(samples, room, wall, centre=mode)
+    if moved is None or (fit is not None and moved.support_m2 < SHIFT_GAIN * fit.support_m2):
+        return fit, False
+    return moved, True
 
 
 def _wall_lines(room: Room, samples: Samples) -> tuple[list[dict], dict, dict]:
@@ -66,8 +98,8 @@ def _wall_lines(room: Room, samples: Samples) -> tuple[list[dict], dict, dict]:
     lines, params, diag = [], {}, {}
     for wall in room.walls:
         seed_h = _horizontal(wall.n)
-        fit = _fit_wall(samples, room, wall)
-        flags = []
+        fit, shifted = _fit_wall_or_shifted(samples, room, wall)
+        flags = ["shifted_seed"] if shifted else []
         az_source = "roomplan"
         if fit is None:
             n_h, offset, source = seed_h, float(seed_h @ wall.c[[0, 2]]), "roomplan"
