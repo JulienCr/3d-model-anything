@@ -134,3 +134,67 @@ def test_report_flags_fallback(tmp_path_factory):
     alerts = section((ctx.out / "report.md").read_text(encoding="utf-8"), "Alertes")
     line = next(ln for ln in alerts.splitlines() if f"Mur {label}" in ln)
     assert "non vu par le LiDAR" in line
+
+
+def decode_glb(path):
+    """(gltf, bin bytes, {node name: (positions Nx3, indices)}) read from the BIN chunk."""
+    import numpy as np
+
+    data = path.read_bytes()
+    n, _ = struct.unpack_from("<I4s", data, 12)
+    gltf = json.loads(data[20:20 + n])
+    start = 20 + n
+    m, kind = struct.unpack_from("<I4s", data, start)
+    assert kind == b"BIN\0"
+    blob = data[start + 8:start + 8 + m]
+    sizes = {5126: 4, 5125: 4}
+    comps = {"VEC3": 3, "SCALAR": 1}
+
+    def read(acc_i):
+        acc = gltf["accessors"][acc_i]
+        view = gltf["bufferViews"][acc["bufferView"]]
+        nbytes = acc["count"] * comps[acc["type"]] * sizes[acc["componentType"]]
+        assert nbytes <= view["byteLength"]
+        dtype = np.float32 if acc["componentType"] == 5126 else np.uint32
+        arr = np.frombuffer(blob, dtype, acc["count"] * comps[acc["type"]], view["byteOffset"])
+        return arr.reshape(-1, comps[acc["type"]]) if comps[acc["type"]] > 1 else arr
+
+    meshes = {}
+    for node in gltf["nodes"]:
+        if "mesh" in node:
+            prim = gltf["meshes"][node["mesh"]]["primitives"][0]
+            meshes[node["name"]] = (read(prim["attributes"]["POSITION"]), read(prim["indices"]), prim["attributes"]["POSITION"])
+    return gltf, blob, meshes
+
+
+def test_wall_bodies_lie_behind_interior_face(scene):
+    import numpy as np
+
+    ctx, doc = scene
+    _, _, meshes = decode_glb(ctx.out / "model_measured.glb")
+    value = lambda pid: doc["parameters"][pid]["value"]  # noqa: E731
+    for el in doc["elements"]:
+        if el["kind"] != "wall":
+            continue
+        az, offset, thick = (value(el["params"][k]) for k in ("azimuth", "offset", "thickness"))
+        depth = meshes[el["id"]][0][:, [0, 2]] @ np.array([np.cos(az), np.sin(az)])
+        assert depth.max() <= offset + 1e-6
+        assert depth.min() == pytest.approx(offset - thick, abs=1e-3)
+
+
+def test_glb_binary_integrity_and_winding(scene):
+    import numpy as np
+
+    ctx, _ = scene
+    gltf, blob, meshes = decode_glb(ctx.out / "model_measured.glb")
+    for view in gltf["bufferViews"]:
+        assert view["byteOffset"] % 4 == 0 and view["byteOffset"] + view["byteLength"] <= len(blob)
+    for name, (pos, idx, acc_i) in meshes.items():
+        acc = gltf["accessors"][acc_i]
+        assert np.allclose(pos.min(0), acc["min"]) and np.allclose(pos.max(0), acc["max"])
+        assert idx.max() < len(pos)
+        if name.split("_")[0] not in ("Wall", "Beam", "Column"):
+            continue
+        tri = pos[idx.reshape(-1, 3)].astype(np.float64)
+        normals = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+        assert ((tri.mean(1) - pos.mean(0)) * normals).sum(1).min() > 0
