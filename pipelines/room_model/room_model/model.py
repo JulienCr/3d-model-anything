@@ -226,6 +226,8 @@ def _column_dimensions(d: _Doc) -> list[dict]:
             if hit is None:
                 continue
             value, sigma, label = hit
+            if label == el["engaged_wall"]:
+                continue
             wall = d.walls[label]
             out.append(_dimension(f"COL{k}-d{axis}", "column_offset", f"Colonne {k} : écart au mur {label} selon {axis}", value,
                                   sigma, [el["id"], f"Wall_{label}"], centre, d.weakest([size, c] + wall["params"])))

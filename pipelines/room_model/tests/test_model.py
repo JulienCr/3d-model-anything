@@ -34,16 +34,18 @@ def test_station_widths(scene):
 
 
 def test_heights_and_structures(scene):
-    _, dims, _ = scene
+    doc, dims, _ = scene
     assert dims["H1"]["value"] == pytest.approx(2.50, abs=0.01)
     assert dims["H2"]["value"] == pytest.approx(2.30, abs=0.01)
     assert dims["B1-u"]["value"] == pytest.approx(2.20, abs=0.01)
     assert dims["B1-w"]["value"] == pytest.approx(0.30, abs=0.02)
-    for k in (1, 2):
-        kinds = sorted(dims[f"COL{k}-{s}"]["kind"] for s in ("x", "z", "dx", "dz"))
-        assert kinds == ["column_offset", "column_offset", "column_size", "column_size"]
+    columns = [e for e in doc["elements"] if e["kind"] == "column"]
+    free, engaged = (next(c for c in columns if (c["engaged_wall"] is None) == want) for want in (True, False))
+    for col, count in ((free, 4), (engaged, 3)):
+        assert len([d for d in doc["dimensions"] if col["id"] in d["elements"]]) == count
+    assert not [d for d in doc["dimensions"] if d["kind"] == "column_offset" and engaged["id"] in d["elements"] and f"Wall_{engaged['engaged_wall']}" in d["elements"]]
     assert dims["COL1-x"]["value"] == pytest.approx(0.40, abs=0.01)
-    assert dims["COL2-dz"]["value"] == pytest.approx(0.0, abs=0.02)
+    assert "COL2-dz" not in dims
     assert dims["COL2-dx"]["value"] == pytest.approx(0.50, abs=0.02)
 
 
