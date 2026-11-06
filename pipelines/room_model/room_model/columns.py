@@ -25,11 +25,15 @@ CEILING_REACH = 0.15
 FACE_SIGMA = 0.01
 BBOX_PAD = 0.03
 AXIS_TOLERANCE_DEG = 20.0
+FACE_WINDOW = 0.03  # m around a raster side searched for its face samples
+FACE_NORMAL = 0.7
+MIN_FACE_SAMPLES = 30
+UNMEASURED_FACE_SIGMA = 0.02
 
 
 @dataclass
 class ColumnResult:
-    columns: list[dict]  # {"center", "size", "engaged_wall", "top", "top_sigma"} ordered by x then z
+    columns: list[dict]  # {"center", "size", "center_sigma", "size_sigma", "engaged_wall", "top", "top_sigma"} ordered by x then z
     unexplained: list[dict]  # {"bbox", "height_max", "reason"}
 
 
@@ -78,6 +82,26 @@ def _engaged_wall(bbox: np.ndarray, walls: list[dict]) -> tuple[dict, str, float
     return best[:3] if best else None
 
 
+def _measure_faces(P: np.ndarray, N: np.ndarray, in_band: np.ndarray, bbox: np.ndarray, fixed: str | None):
+    """Median face position per bbox side, and per-side sigma; raster sides without enough samples keep the raster value."""
+    bbox = bbox.copy()
+    sigma = {}
+    for side in ("x0", "x1", "z0", "z1"):
+        axis, hi = (0 if side[0] == "x" else 1), side.endswith("1")
+        if side == fixed:
+            sigma[side] = FACE_SIGMA
+            continue
+        other = 1 - axis
+        near = in_band & (np.abs(P[:, 2 * axis] - bbox[int(hi), axis]) < FACE_WINDOW) & (np.abs(N[:, 2 * axis]) > FACE_NORMAL)
+        near &= (P[:, 2 * other] >= bbox[0, other]) & (P[:, 2 * other] <= bbox[1, other])
+        if near.sum() < MIN_FACE_SAMPLES:
+            sigma[side] = UNMEASURED_FACE_SIGMA
+        else:
+            bbox[int(hi), axis] = np.median(P[near, 2 * axis])
+            sigma[side] = FACE_SIGMA
+    return bbox, sigma
+
+
 def _ceiling_above(centre: np.ndarray, ceilings: list[dict]) -> dict:
     point = shapely.Point(centre)
     return min(ceilings, key=lambda lv: (lv["region"].distance(point), lv["level"]))
@@ -121,6 +145,7 @@ def detect(samples: Samples, walls: list[dict], polygon: shapely.Polygon, floor_
             wall, side, coord = engaged
             required.remove(side)
             bbox[0 if side.endswith("0") else 1, 0 if side[0] == "x" else 1] = coord
+        bbox, faces = _measure_faces(P, samples.N, band, bbox, side if engaged else None)
         filled = [_side_filled(occupied, box, s) for s in required]
         size = bbox[1] - bbox[0]
         centre = bbox.mean(axis=0)
@@ -139,7 +164,9 @@ def detect(samples: Samples, walls: list[dict], polygon: shapely.Polygon, floor_
         else:
             columns.append({"center": [float(c) for c in centre], "size": [float(s) for s in size],
                             "engaged_wall": wall["label"] if engaged else None,
-                            "top": float(above["level"]), "top_sigma": float(above["sigma"])})
+                            "top": float(above["level"]), "top_sigma": float(above["sigma"]),
+                            "center_sigma": [float(np.hypot(faces["x0"], faces["x1"]) / 2), float(np.hypot(faces["z0"], faces["z1"]) / 2)],
+                            "size_sigma": [float(np.hypot(faces["x0"], faces["x1"])), float(np.hypot(faces["z0"], faces["z1"]))]})
             continue
         unexplained.append({"bbox": [[float(v) for v in bbox[0]], [float(v) for v in bbox[1]]],
                             "height_max": height_max, "reason": reason})

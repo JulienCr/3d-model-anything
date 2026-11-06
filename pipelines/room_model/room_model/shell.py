@@ -8,7 +8,6 @@ import numpy as np
 import shapely
 
 from room_model import ceilings, columns
-from room_model.columns import FACE_SIGMA
 from room_model.capture import load_roomplan
 from room_model.context import StageContext, output_path
 from room_model.frame import world_to_room
@@ -214,8 +213,8 @@ def build(ctx: StageContext) -> dict:
     elements += ceiling_elements
     parameters.update(ceiling_params)
     for k, col in enumerate(column_result.columns, 1):
-        values = {"center_x": (col["center"][0], FACE_SIGMA / 2**0.5), "center_z": (col["center"][1], FACE_SIGMA / 2**0.5),
-                  "size_x": (col["size"][0], np.hypot(FACE_SIGMA, FACE_SIGMA)), "size_z": (col["size"][1], np.hypot(FACE_SIGMA, FACE_SIGMA)),
+        values = {"center_x": (col["center"][0], col["center_sigma"][0]), "center_z": (col["center"][1], col["center_sigma"][1]),
+                  "size_x": (col["size"][0], col["size_sigma"][0]), "size_z": (col["size"][1], col["size_sigma"][1]),
                   "top": (col["top"], col["top_sigma"])}
         for name, (value, sigma) in values.items():
             parameters[f"column.{k}.{name}"] = _param(value, sigma, "m", "lidar")
