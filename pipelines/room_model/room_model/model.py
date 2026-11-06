@@ -210,6 +210,7 @@ def _column_offset(d: _Doc, axis: str, centre: np.ndarray, half: float, sig_c: f
 
 def _column_dimensions(d: _Doc) -> list[dict]:
     out = []
+    engaged = {c["id"]: c["engaged_walls"] for c in d.doc["diagnostics"].get("columns", [])}
     for el in d.doc["elements"]:
         if el["kind"] != "column":
             continue
@@ -226,7 +227,7 @@ def _column_dimensions(d: _Doc) -> list[dict]:
             if hit is None:
                 continue
             value, sigma, label = hit
-            if label == el["engaged_wall"]:
+            if label in engaged.get(el["id"], [el["engaged_wall"]]):
                 continue
             wall = d.walls[label]
             out.append(_dimension(f"COL{k}-d{axis}", "column_offset", f"Colonne {k} : écart au mur {label} selon {axis}", value,

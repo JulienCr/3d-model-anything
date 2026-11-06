@@ -228,7 +228,8 @@ def build(ctx: StageContext) -> dict:
         "frame": {"world_to_room": [float(v) for v in w2r.T.ravel()], "turn": ctx.turn},
         "parameters": parameters,
         "elements": elements,
-        "diagnostics": {"walls": walls_diag, "floor": floor_diag, "ceilings": ceiling_diag, "ceiling_unobserved_fraction": ceiling_result.unobserved_fraction, "unexplained_vertical": column_result.unexplained,
+        "diagnostics": {"walls": walls_diag, "floor": floor_diag, "ceilings": ceiling_diag, "ceiling_unobserved_fraction": ceiling_result.unobserved_fraction, "columns": [{"id": f"Column_{k}", "engaged_walls": c["engaged_walls"]} for k, c in enumerate(column_result.columns, 1)],
+                        "unexplained_vertical": column_result.unexplained,
                         "off_outline_walls": list(room.off_outline), "flags": flags},
     }
 

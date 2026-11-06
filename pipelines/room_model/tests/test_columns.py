@@ -12,6 +12,18 @@ def scene(tmp_path_factory):
     return ctx, truth, shell.build(ctx)
 
 
+@pytest.fixture(scope="module")
+def corner(tmp_path_factory):
+    ctx, truth = make_case(tmp_path_factory.mktemp("corner"), "corner", corner_column=True)
+    return ctx, truth, shell.build(ctx)
+
+
+@pytest.fixture(scope="module")
+def step(tmp_path_factory):
+    ctx, truth = make_case(tmp_path_factory.mktemp("step"), "step", step_column=True)
+    return ctx, truth, shell.build(ctx)
+
+
 def _columns(doc):
     return [e for e in doc["elements"] if e["kind"] == "column"]
 
@@ -93,3 +105,33 @@ def test_no_ceiling_level_skips_detection(scene):
     polygon = shapely.Polygon(next(e for e in doc["elements"] if e["kind"] == "floor")["polygon"])
     result = columns.detect(samples, shell.wall_lines(doc), polygon, doc["parameters"]["floor.level"]["value"], [])
     assert result.columns == [] and result.unexplained == []
+
+
+def test_corner_column_is_engaged_on_both_walls(corner):
+    ctx, truth, doc = corner
+    south, west = wall_labels(doc, truth, "south")[0], wall_labels(doc, truth, "west")[0]
+    target = plan_point(truth_to_room(ctx, truth), 0.175, 0.15)
+    col = min(_columns(doc), key=lambda c: np.linalg.norm(_center(doc, c) - target))
+    assert np.linalg.norm(_center(doc, col) - target) < 0.05
+    labels = [e["label"] for e in doc["elements"] if e["kind"] == "wall"]
+    assert col["engaged_wall"] == min((south, west), key=labels.index)
+    entry = next(c for c in doc["diagnostics"]["columns"] if c["id"] == col["id"])
+    assert sorted(entry["engaged_walls"]) == sorted([south, west])
+    sizes = sorted(abs(w["normal"] @ [_p(doc, col, "size_x")["value"], _p(doc, col, "size_z")["value"]])
+                   for w in (wall_line(doc, south), wall_line(doc, west)))
+    assert sizes == pytest.approx([0.30, 0.35], abs=0.01)
+    c = _center(doc, col)
+    assert _dist(doc, truth, "south", c) == pytest.approx(0.15, abs=0.02)
+    assert _dist(doc, truth, "west", c) == pytest.approx(0.175, abs=0.02)
+    assert not any(_bbox(u).contains(shapely.Point(target)) for u in doc["diagnostics"]["unexplained_vertical"])
+
+
+def test_column_flush_with_the_back_of_a_perpendicular_wall(step):
+    ctx, truth, doc = step
+    target = plan_point(truth_to_room(ctx, truth), 2.325, 2.675)
+    col = min(_columns(doc), key=lambda c: np.linalg.norm(_center(doc, c) - target))
+    assert np.linalg.norm(_center(doc, col) - target) < 0.05
+    entry = next(c for c in doc["diagnostics"]["columns"] if c["id"] == col["id"])
+    assert sorted(entry["engaged_walls"]) == sorted([wall_labels(doc, truth, "wing_east")[0], wall_labels(doc, truth, "step")[0]])
+    sizes = sorted([_p(doc, col, "size_x")["value"], _p(doc, col, "size_z")["value"]])
+    assert sizes == pytest.approx([0.35, 0.35], abs=0.015)

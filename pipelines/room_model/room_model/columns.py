@@ -33,7 +33,7 @@ UNMEASURED_FACE_SIGMA = 0.02
 
 @dataclass
 class ColumnResult:
-    columns: list[dict]  # {"center", "size", "center_sigma", "size_sigma", "engaged_wall", "top", "top_sigma"} ordered by x then z
+    columns: list[dict]  # {"center", "size", "center_sigma", "size_sigma", "engaged_wall", "engaged_walls", "top", "top_sigma"}, by x then z
     unexplained: list[dict]  # {"bbox", "height_max", "reason"}
 
 
@@ -58,37 +58,38 @@ def _side_filled(mask: np.ndarray, box: tuple[int, int, int, int], side: str) ->
     return bool(strips[side].mean() >= SIDE_FILL)
 
 
-def _engaged_wall(bbox: np.ndarray, walls: list[dict]) -> tuple[dict, str, float] | None:
-    """The wall whose line passes within ENGAGED_TOLERANCE of one bbox side: (wall, side, snapped coordinate)."""
-    best = None
-    for w in walls:
+def _engaged_walls(bbox: np.ndarray, walls: list[dict]) -> list[tuple[int, dict, str, float]]:
+    """Walls whose line passes within ENGAGED_TOLERANCE of a bbox side, one per axis: (index, wall, side, snapped coordinate)."""
+    best: dict[int, tuple] = {}
+    for k, w in enumerate(walls):
         n = w["normal"]
         axis = 0 if abs(n[0]) > abs(n[1]) else 1
         if np.degrees(np.arccos(min(abs(n[axis]), 1.0))) > AXIS_TOLERANCE_DEG:
             continue
-        side = ("x0" if n[0] > 0 else "x1") if axis == 0 else ("z0" if n[1] > 0 else "z1")
         other = 1 - axis
         mid = (bbox[0, other] + bbox[1, other]) / 2
-        coord = bbox[0 if side.endswith("0") else 1, axis]
-        point = np.zeros(2)
-        point[axis], point[other] = coord, mid
-        dist = abs(n @ point - w["offset"])
         d = w["end"] - w["start"]
         length = float(np.linalg.norm(d))
         along = bbox @ (d / length) - w["start"] @ (d / length)
-        if dist < ENGAGED_TOLERANCE and along.max() > -WALL_EXTENT_PAD and along.min() < length + WALL_EXTENT_PAD:
-            if best is None or dist < best[3]:
-                best = (w, side, float((w["offset"] - n[other] * mid) / n[axis]), dist)
-    return best[:3] if best else None
+        if not (along.max() > -WALL_EXTENT_PAD and along.min() < length + WALL_EXTENT_PAD):
+            continue
+        for hi in (0, 1):
+            point = np.zeros(2)
+            point[axis], point[other] = bbox[hi, axis], mid
+            dist = abs(n @ point - w["offset"])
+            if dist < ENGAGED_TOLERANCE and (axis not in best or dist < best[axis][0]):
+                side = ("x" if axis == 0 else "z") + str(hi)
+                best[axis] = (dist, k, w, side, float((w["offset"] - n[other] * mid) / n[axis]))
+    return sorted((b[1:] for b in best.values()), key=lambda b: b[0])
 
 
-def _measure_faces(P: np.ndarray, N: np.ndarray, in_band: np.ndarray, bbox: np.ndarray, fixed: str | None):
+def _measure_faces(P: np.ndarray, N: np.ndarray, in_band: np.ndarray, bbox: np.ndarray, fixed: list[str]):
     """Median face position per bbox side, and per-side sigma; raster sides without enough samples keep the raster value."""
     bbox = bbox.copy()
     sigma = {}
     for side in ("x0", "x1", "z0", "z1"):
         axis, hi = (0 if side[0] == "x" else 1), side.endswith("1")
-        if side == fixed:
+        if side in fixed:
             sigma[side] = FACE_SIGMA
             continue
         other = 1 - axis
@@ -138,14 +139,13 @@ def detect(samples: Samples, walls: list[dict], polygon: shapely.Polygon, floor_
             continue
         lo, hi = cells.min(axis=0), cells.max(axis=0)
         bbox = np.array([origin + (lo + 1) * CELL, origin + (hi + 1) * CELL])
-        engaged = _engaged_wall(bbox, walls)
+        engaged = _engaged_walls(bbox, walls)
         box = (int(lo[0]), int(hi[0]), int(lo[1]), int(hi[1]))
         required = ["x0", "x1", "z0", "z1"]
-        if engaged:
-            wall, side, coord = engaged
+        for _, _, side, coord in engaged:
             required.remove(side)
             bbox[0 if side.endswith("0") else 1, 0 if side[0] == "x" else 1] = coord
-        bbox, faces = _measure_faces(P, samples.N, band, bbox, side if engaged else None)
+        bbox, faces = _measure_faces(P, samples.N, band, bbox, [side for _, _, side, _ in engaged])
         filled = [_side_filled(occupied, box, s) for s in required]
         size = bbox[1] - bbox[0]
         centre = bbox.mean(axis=0)
@@ -163,7 +163,8 @@ def detect(samples: Samples, walls: list[dict], polygon: shapely.Polygon, floor_
             reason = "not_full_height"
         else:
             columns.append({"center": [float(c) for c in centre], "size": [float(s) for s in size],
-                            "engaged_wall": wall["label"] if engaged else None,
+                            "engaged_wall": engaged[0][1]["label"] if engaged else None,
+                            "engaged_walls": [wall["label"] for _, wall, _, _ in engaged],
                             "top": float(above["level"]), "top_sigma": float(above["sigma"]),
                             "center_sigma": [float(np.hypot(faces["x0"], faces["x1"]) / 2), float(np.hypot(faces["z0"], faces["z1"]) / 2)],
                             "size_sigma": [float(np.hypot(faces["x0"], faces["x1"])), float(np.hypot(faces["z0"], faces["z1"]))]})

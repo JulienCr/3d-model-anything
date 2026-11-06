@@ -35,6 +35,8 @@ class SyntheticOptions:
     ceiling_hole: bool = False
     other_room_panel: bool = True
     thin_wall: str | None = None
+    corner_column: bool = False
+    step_column: bool = False
 
 
 @dataclass
@@ -55,9 +57,15 @@ COLUMNS = [
     {"x": (1.30, 1.70), "z": (1.00, 1.40), "top": 2.50, "engaged": None},
     {"x": (5.00, 5.50), "z": (0.00, 0.25), "top": 2.50, "engaged": "south"},
 ]
+CORNER_COLUMN = {"x": (0.0, 0.35), "z": (0.0, 0.30), "top": 2.50, "engaged": "south", "flush": ("x0",)}
+STEP_COLUMN = {"x": (2.15, 2.50), "z": (2.50, 2.85), "top": H_WING, "engaged": "wing_east", "flush": ("x1",)}
 TABLE = {"x": (0.0, 0.6), "z": (0.5, 1.7), "h": 0.75}
 CABINET = {"x": (0.0, 0.6), "z": (3.0, 4.0), "h": 1.90}
 DOOR = {"z": 1.25, "w": 0.90, "h": 2.05}
+
+
+def _columns(opt: SyntheticOptions) -> list[dict]:
+    return COLUMNS + ([CORNER_COLUMN] if opt.corner_column else []) + ([STEP_COLUMN] if opt.step_column else [])
 
 
 def _world_from_local() -> np.ndarray:
@@ -133,7 +141,8 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
     m = _Mesh(opt.cell_m, opt.noise_m, np.random.default_rng(opt.seed))
     X, Y, Z = np.eye(3)
     o = np.zeros(3)
-    col_rects = [(c["x"], c["z"]) for c in COLUMNS]
+    columns = _columns(opt)
+    col_rects = [(c["x"], c["z"]) for c in columns]
     furniture = [(TABLE["x"], TABLE["z"]), (CABINET["x"], CABINET["z"])]
     beam_xy = (BEAM["x"], (BEAM["underside"], BEAM["top"]))
     drop = opt.drop_wall_faces
@@ -148,7 +157,7 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
             return
         m.rect(origin, U, Y, normal, 1, u_range, (0, v_top), lambda u, v: ~_in_rects(u, v, excl))
 
-    wall("south", o, X, Z, (0, 6), H_MAIN, [(COLUMNS[1]["x"], (0, 9)), beam_xy])
+    wall("south", o, X, Z, (0, 6), H_MAIN, [(c["x"], (0, 9)) for c in columns if c["engaged"] == "south"] + [beam_xy])
     door_z = (DOOR["z"] - DOOR["w"] / 2, DOOR["z"] + DOOR["w"] / 2)
     if drop != "east":
         m.rect(np.array([6.0, 0, 0]), Z, Y, -X, 1, (0, 2.5), (0, H_MAIN),
@@ -160,14 +169,17 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
     wall("north", np.array([0, 0, 4.5]), X, -Z, (0, 2.5), H_WING)
     if drop != "west":
         behind = [(TABLE["z"], (0, TABLE["h"])), (CABINET["z"], (0, CABINET["h"]))]
+        behind += [(c["z"], (0, 9)) for c in columns if "x0" in c.get("flush", ())]
         m.rect(o, Z, Y, X, 1, (0, 4.5), (0, H_MAIN),
                lambda u, v: (v < np.where(u < 2.5, H_MAIN, H_WING)) & ~_in_rects(u, v, behind))
 
-    for c in COLUMNS:
+    for c in columns:
         (x0, x1), (z0, z1) = c["x"], c["z"]
         h = c["top"]
-        m.rect(np.array([x0, 0, 0]), Z, Y, -X, 1, (z0, z1), (0, h))
-        m.rect(np.array([x1, 0, 0]), Z, Y, X, 1, (z0, z1), (0, h))
+        if "x0" not in c.get("flush", ()):
+            m.rect(np.array([x0, 0, 0]), Z, Y, -X, 1, (z0, z1), (0, h))
+        if "x1" not in c.get("flush", ()):
+            m.rect(np.array([x1, 0, 0]), Z, Y, X, 1, (z0, z1), (0, h))
         m.rect(np.array([0, 0, z1]), X, Y, Z, 1, (x0, x1), (0, h))
         if c["engaged"] is None:
             m.rect(np.array([0, 0, z0]), X, Y, -Z, 1, (x0, x1), (0, h))
@@ -331,6 +343,6 @@ def make_capture(root: Path, options: SyntheticOptions | None = None) -> Synthet
         widths={("south", "step"): 2.50, ("west", "east"): 6.00, ("west", "wing_east"): 2.50, ("south", "north"): 4.50},
         ceilings=[H_MAIN, H_WING], beam=dict(BEAM),
         columns=[{**c, "center": [sum(c["x"]) / 2, sum(c["z"]) / 2], "size": [c["x"][1] - c["x"][0], c["z"][1] - c["z"][0]]}
-                 for c in COLUMNS],
+                 for c in _columns(opt)],
         extra_ident=extra,
     )
