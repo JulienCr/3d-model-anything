@@ -27,6 +27,7 @@ MIN_SIDE_AREA = 0.05  # m2 of beam side face needed to measure the width
 FALLBACK_WIDTH_SIGMA = 0.02
 WIDTH_AGREEMENT = 0.10  # m, a side-plane width further than this from the footprint is not trusted
 SIMPLIFY = 0.02
+BEAM_SNAP = 0.10  # m, an end this close to the floor outline is extended onto it
 
 
 @dataclass
@@ -95,6 +96,7 @@ def _component_frame(centres: np.ndarray) -> dict:
     a_lo, a_hi = np.percentile(a, [2, 98])
     b_lo, b_hi = np.percentile(b, [2, 98])
     return {"centre": centre, "u": major_axis, "v": minor_axis, "a": (a_lo, a_hi), "b": (b_lo, b_hi),
+            "extent": (float(a.min() - GRID / 2), float(a.max() + GRID / 2)),
             "major": a_hi - a_lo, "minor": b_hi - b_lo}
 
 
@@ -138,6 +140,21 @@ def _side_planes(samples: Samples, frame: dict, underside: float, top: float):
     return out
 
 
+def _beam_axis(frame: dict, centre: np.ndarray, polygon: shapely.Polygon) -> list[list[float]]:
+    """Axis endpoints at the component's own extent; an end within BEAM_SNAP of the outline moves onto it."""
+    u, (lo, hi) = frame["u"], frame["extent"]
+    probe = shapely.LineString([centre + (lo - BEAM_SNAP) * u, centre + (hi + BEAM_SNAP) * u])
+    inside = shapely.intersection(probe, polygon)
+    pieces = [g for g in getattr(inside, "geoms", [inside]) if isinstance(g, shapely.LineString) and not g.is_empty]
+    start, end = lo, hi
+    if pieces:
+        piece = min(pieces, key=lambda g: g.distance(shapely.Point(centre)))
+        t = sorted(float((np.array(c) - centre) @ u) for c in (piece.coords[0], piece.coords[-1]))
+        start = t[0] if t[0] > lo - BEAM_SNAP + 1e-6 else lo
+        end = t[1] if t[1] < hi + BEAM_SNAP - 1e-6 else hi
+    return [[float(x), float(z)] for x, z in (centre + start * u, centre + end * u)]
+
+
 def _beam(samples: Samples, polygon: shapely.Polygon, frame: dict, level: dict, top: dict) -> dict:
     v, centre = frame["v"], frame["centre"].copy()
     width, width_sigma = frame["minor"], FALLBACK_WIDTH_SIGMA
@@ -147,11 +164,7 @@ def _beam(samples: Samples, polygon: shapely.Polygon, frame: dict, level: dict, 
         if abs(w - frame["minor"]) < WIDTH_AGREEMENT:
             width, width_sigma = w, float(np.hypot(offset_sigma(pos), offset_sigma(neg)))
             centre += v * (((pos.centroid[[0, 2]] + neg.centroid[[0, 2]]) / 2 - centre) @ v)
-    line = shapely.LineString([centre - 50 * frame["u"], centre + 50 * frame["u"]])
-    inside = shapely.intersection(line, polygon)
-    pieces = [g for g in getattr(inside, "geoms", [inside]) if isinstance(g, shapely.LineString) and not g.is_empty]
-    piece = min(pieces, key=lambda g: g.distance(shapely.Point(centre))) if pieces else line
-    return {"axis": [[float(x), float(z)] for x, z in (piece.coords[0], piece.coords[-1])],
+    return {"axis": _beam_axis(frame, centre, polygon),
             "underside": level["level"], "underside_sigma": level["sigma"],
             "width": width, "width_sigma": width_sigma, "top": top["level"], "top_sigma": top["sigma"]}
 

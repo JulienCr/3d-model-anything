@@ -25,6 +25,12 @@ def hole(tmp_root):
     return ctx, truth, shell.build(ctx)
 
 
+@pytest.fixture(scope="module")
+def short(tmp_root):
+    ctx, truth = make_case(tmp_root, "short", short_beam=True)
+    return ctx, truth, shell.build(ctx)
+
+
 def _floor(doc):
     return doc["parameters"]["floor.level"]["value"]
 
@@ -113,3 +119,20 @@ def test_no_ceiling_samples_gives_no_levels(default):
     result = ceilings.detect(stripped, polygon, doc["parameters"]["floor.level"]["value"])
     assert result.levels == [] and result.beams == []
     assert result.unobserved_fraction == 1.0
+
+
+def _beam_near(doc, truth, ctx, x, z):
+    point = plan_point(truth_to_room(ctx, truth), x, z)
+    return min(_elements(doc, "beam"), key=lambda b: np.linalg.norm(np.mean(b["axis"], axis=0) - point))
+
+
+def test_beam_length_is_its_own_extent(short):
+    ctx, truth, doc = short
+    assert len(_elements(doc, "beam")) == 2
+    beam = _beam_near(doc, truth, ctx, 5.05, 1.20)
+    a, b = (np.array(pt) for pt in beam["axis"])
+    assert np.linalg.norm(b - a) == pytest.approx(1.40, abs=0.05)
+    assert np.linalg.norm((a + b) / 2 - plan_point(truth_to_room(ctx, truth), 5.05, 1.20)) < 0.05
+    assert doc["parameters"][beam["params"]["underside"]]["value"] - _floor(doc) == pytest.approx(2.00, abs=0.01)
+    full = _beam_near(doc, truth, ctx, 4.0, 1.25)
+    assert np.linalg.norm(np.array(full["axis"][1]) - full["axis"][0]) >= 2.3

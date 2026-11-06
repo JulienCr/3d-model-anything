@@ -37,6 +37,8 @@ class SyntheticOptions:
     thin_wall: str | None = None
     corner_column: bool = False
     step_column: bool = False
+    short_beam: bool = False
+    short_beam_underside: float = 2.00
 
 
 @dataclass
@@ -58,6 +60,7 @@ COLUMNS = [
     {"x": (5.00, 5.50), "z": (0.00, 0.25), "top": 2.50, "engaged": "south"},
 ]
 CORNER_COLUMN = {"x": (0.0, 0.35), "z": (0.0, 0.30), "top": 2.50, "engaged": "south", "flush": ("x0",)}
+SHORT_BEAM = {"x": (4.90, 5.20), "z": (0.50, 1.90), "top": 2.50}  # hangs free from the main ceiling
 STEP_COLUMN = {"x": (2.15, 2.50), "z": (2.50, 2.85), "top": H_WING, "engaged": "wing_east", "flush": ("x1",)}
 TABLE = {"x": (0.0, 0.6), "z": (0.5, 1.7), "h": 0.75}
 CABINET = {"x": (0.0, 0.6), "z": (3.0, 4.0), "h": 1.90}
@@ -189,6 +192,12 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
     m.rect(np.array([bx1, 0, 0]), Z, Y, X, 1, (bz0, bz1), (BEAM["underside"], BEAM["top"]))
     m.rect(np.array([0, BEAM["underside"], 0]), X, Z, -Y, 3, (bx0, bx1), (bz0, bz1))
 
+    if opt.short_beam:
+        (sx0, sx1), (sz0, sz1), under = SHORT_BEAM["x"], SHORT_BEAM["z"], opt.short_beam_underside
+        m.rect(np.array([sx0, 0, 0]), Z, Y, -X, 1, (sz0, sz1), (under, SHORT_BEAM["top"]))
+        m.rect(np.array([sx1, 0, 0]), Z, Y, X, 1, (sz0, sz1), (under, SHORT_BEAM["top"]))
+        m.rect(np.array([0, under, 0]), X, Z, -Y, 3, (sx0, sx1), (sz0, sz1))
+
     for box, cls in ((TABLE, 4), (CABINET, 1)):
         (x0, x1), (z0, z1), h = box["x"], box["z"], box["h"]
         m.rect(np.array([0, h, 0]), X, Z, Y, cls, (x0, x1), (z0, z1))
@@ -203,7 +212,7 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
     l_shape = [((0, 6), (0, 2.5)), ((0, 2.5), (2.5, 4.5))]
     m.rect(o, X, Z, Y, 2, (0, 6), (0, 4.5),
            lambda u, v: _in_rects(u, v, l_shape) & ~_in_rects(u, v, solid))
-    holes = col_rects + [(BEAM["x"], BEAM["z"])]
+    holes = col_rects + [(BEAM["x"], BEAM["z"])] + ([(SHORT_BEAM["x"], SHORT_BEAM["z"])] if opt.short_beam else [])
     if opt.ceiling_hole:
         holes.append(((4.6, 5.6), (1.0, 2.0)))
     m.rect(np.array([0, H_MAIN, 0]), X, Z, -Y, 3, (0, 6), (0, 2.5), lambda u, v: ~_in_rects(u, v, holes))
