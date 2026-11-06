@@ -55,7 +55,7 @@ Low-support walls (support under 0.5 m2, flag `low_support`): the azimuth of a p
 
 ## Detection rules
 
-- Ceilings: height histogram of upward-facing LiDAR samples above 1.6 m; every level covering at least 0.3 m2 becomes a ceiling, so a patch the LiDAR never saw makes none.
+- Ceilings: height histogram of upward-facing LiDAR samples above 1.6 m; every level covering at least 0.3 m2 becomes a ceiling, so a patch the LiDAR never saw makes none. Once a level is picked, samples within 3 cm of it are removed from the histogram, so two levels 3 cm or more apart stay separate; a sample belongs to its nearest level only, which keeps the region of a level from absorbing the tail of its neighbour.
 - Beams: a lower-level region that is long and narrow (minor side 8-80 cm, ratio at least 3) with a higher level next to a long side. The axis spans the component's own extent along its long axis (not the room chord); an end within 10 cm of the floor outline is extended onto it.
 - Columns: vertical wall-class surface that reaches the ceiling, outside the fitted wall bands, with a plausible size (10-150 cm). A rectangle within 6 cm of a wall line (whichever side the wall faces) is engaged on it, on up to two non-parallel walls (a corner column); engaged sides are snapped to the wall and only the remaining sides must be seen. `engaged_wall` is the first engaged wall in outline order and `diagnostics.columns` lists all of them; a cabinet not reaching the ceiling is listed as an unexplained vertical surface.
 - Walls are never moved by faces of an earlier room (`inroom == 0`); RoomPlan walls off the floor outline are listed in `diagnostics.off_outline_walls`.

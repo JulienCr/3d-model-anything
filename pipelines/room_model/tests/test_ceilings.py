@@ -31,6 +31,12 @@ def short(tmp_root):
     return ctx, truth, shell.build(ctx)
 
 
+@pytest.fixture(scope="module")
+def patch(tmp_root):
+    ctx, truth = make_case(tmp_root, "patch", ceiling_patch=True, short_beam=True, short_beam_underside=2.16)
+    return ctx, truth, shell.build(ctx)
+
+
 def _floor(doc):
     return doc["parameters"]["floor.level"]["value"]
 
@@ -136,3 +142,16 @@ def test_beam_length_is_its_own_extent(short):
     assert doc["parameters"][beam["params"]["underside"]]["value"] - _floor(doc) == pytest.approx(2.00, abs=0.01)
     full = _beam_near(doc, truth, ctx, 4.0, 1.25)
     assert np.linalg.norm(np.array(full["axis"][1]) - full["axis"][0]) >= 2.3
+
+
+def test_levels_a_few_centimetres_apart_stay_separate(patch):
+    ctx, truth, doc = patch
+    heights = sorted(_value(doc, c["params"]["level"]) - _floor(doc) for c in _elements(doc, "ceiling"))
+    assert heights == pytest.approx([2.30, 2.468, 2.50], abs=0.008)
+    T = truth_to_room(ctx, truth)
+    panel = shapely.Polygon([plan_point(T, x, z) for x, z in ((2.0, 1.5), (3.0, 1.5), (3.0, 2.4), (2.0, 2.4))])
+    region = _region(next(c for c in _elements(doc, "ceiling") if abs(_value(doc, c["params"]["level"]) - _floor(doc) - 2.468) < 0.01))
+    assert region.intersection(panel).area / panel.area >= 0.85
+    assert region.area < 1.3
+    undersides = sorted(_value(doc, b["params"]["underside"]) - _floor(doc) for b in _elements(doc, "beam"))
+    assert undersides == pytest.approx([2.16, 2.20], abs=0.01)

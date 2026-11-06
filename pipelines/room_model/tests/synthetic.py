@@ -38,6 +38,7 @@ class SyntheticOptions:
     corner_column: bool = False
     step_column: bool = False
     short_beam: bool = False
+    ceiling_patch: bool = False
     short_beam_underside: float = 2.00
 
 
@@ -60,6 +61,7 @@ COLUMNS = [
     {"x": (5.00, 5.50), "z": (0.00, 0.25), "top": 2.50, "engaged": "south"},
 ]
 CORNER_COLUMN = {"x": (0.0, 0.35), "z": (0.0, 0.30), "top": 2.50, "engaged": "south", "flush": ("x0",)}
+CEILING_PATCH = {"x": (2.00, 3.00), "z": (1.50, 2.40), "y": H_MAIN - 0.032}  # a slightly lower flat ceiling panel
 SHORT_BEAM = {"x": (4.90, 5.20), "z": (0.50, 1.90), "top": 2.50}  # hangs free from the main ceiling
 STEP_COLUMN = {"x": (2.15, 2.50), "z": (2.50, 2.85), "top": H_WING, "engaged": "wing_east", "flush": ("x1",)}
 TABLE = {"x": (0.0, 0.6), "z": (0.5, 1.7), "h": 0.75}
@@ -212,7 +214,9 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
     l_shape = [((0, 6), (0, 2.5)), ((0, 2.5), (2.5, 4.5))]
     m.rect(o, X, Z, Y, 2, (0, 6), (0, 4.5),
            lambda u, v: _in_rects(u, v, l_shape) & ~_in_rects(u, v, solid))
-    holes = col_rects + [(BEAM["x"], BEAM["z"])] + ([(SHORT_BEAM["x"], SHORT_BEAM["z"])] if opt.short_beam else [])
+    holes = col_rects + ([(CEILING_PATCH["x"], CEILING_PATCH["z"])] if opt.ceiling_patch else []) + [(BEAM["x"], BEAM["z"])] + ([(SHORT_BEAM["x"], SHORT_BEAM["z"])] if opt.short_beam else [])
+    if opt.ceiling_patch:
+        m.rect(np.array([0, CEILING_PATCH["y"], 0]), X, Z, -Y, 3, CEILING_PATCH["x"], CEILING_PATCH["z"])
     if opt.ceiling_hole:
         holes.append(((4.6, 5.6), (1.0, 2.0)))
     m.rect(np.array([0, H_MAIN, 0]), X, Z, -Y, 3, (0, 6), (0, 2.5), lambda u, v: ~_in_rects(u, v, holes))

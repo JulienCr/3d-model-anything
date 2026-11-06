@@ -51,7 +51,7 @@ def _histogram_levels(y: np.ndarray) -> list[float]:
         if (np.abs(y - yc) < LEVEL_WINDOW).sum() / SAMPLE_DENSITY < MIN_LEVEL_AREA:
             break
         levels.append(yc)
-        y = y[np.abs(y - yc) > 0.05]
+        y = y[np.abs(y - yc) > LEVEL_WINDOW]
     return levels
 
 
@@ -188,8 +188,10 @@ def detect(samples: Samples, polygon: shapely.Polygon, floor_level: float) -> Ce
     found.sort(key=lambda lv: -lv["level"])
 
     grid = _Grid(polygon)
-    for lv in found:
-        lv["mask"] = grid.occupancy(cand[np.abs(cand[:, 1] - lv["level"]) < LEVEL_WINDOW][:, [0, 2]])
+    gap = np.abs(cand[:, 1:2] - np.array([lv["level"] for lv in found])) if found else np.zeros((len(cand), 0))
+    for k, lv in enumerate(found):
+        own = (gap.argmin(axis=1) == k) & (gap[:, k] < LEVEL_WINDOW)  # a sample serves its nearest level only
+        lv["mask"] = grid.occupancy(cand[own][:, [0, 2]])
         lv["cells"] = grid.centres(lv["mask"])
     levels, beams = [], []
     for k, lv in enumerate(found):
