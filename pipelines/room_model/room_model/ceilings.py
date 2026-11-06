@@ -18,10 +18,16 @@ MAX_LEVELS = 8
 GRID = 0.02  # m, plan raster cell
 CLOSING_ITERATIONS = 2
 MIN_COMPONENT_AREA = 0.1  # m2
-BEAM_MINOR = (0.08, 0.80)
+BEAM_MINOR = (0.15, 0.80)
 BEAM_RATIO = 2.0
 ADJACENT = 0.15  # m, reach of the "higher level next to a long side" test
+TOP_REACH = 0.30  # m, band beside the long sides in which a higher level's area ranks it as the beam top
 MIN_ADJACENT_CELLS = 25
+FACE_NORMAL_Y = 0.65  # a side face is any surface steeper than this: meshes bevel the edge of a beam
+MIN_BEAM_DROP = 0.14  # m between the underside and the level it hangs from: shallower reliefs are not beams
+MIN_FACE_AREA = 0.05  # m2 of vertical samples a beam side face needs
+FACE_TOP_TOLERANCE = 0.05  # m, between the top of a side face and the higher level next to it
+WALL_SIDE = 0.06  # m, a long side this close to a wall needs no face of its own
 SIDE_GROW = 0.10
 MIN_SIDE_AREA = 0.05  # m2 of beam side face needed to measure the width
 FALLBACK_WIDTH_SIGMA = 0.02
@@ -35,6 +41,7 @@ class CeilingResult:
     levels: list[dict]  # {"level", "sigma", "region": MultiPolygon, "support_m2"}, highest first
     beams: list[dict]  # {"axis", "underside", "underside_sigma", "width", "width_sigma", "top", "top_sigma"}
     unobserved_fraction: float
+    unexplained: list[dict]  # {"bbox", "underside", "width", "length", "reason"}: strips that are not beams
 
 
 def _histogram_levels(y: np.ndarray) -> list[float]:
@@ -95,27 +102,70 @@ def _component_frame(centres: np.ndarray) -> dict:
     a, b = (centres - centre) @ major_axis, (centres - centre) @ minor_axis
     a_lo, a_hi = np.percentile(a, [2, 98])
     b_lo, b_hi = np.percentile(b, [2, 98])
+    tail = (a_hi - a_lo) * 0.02 / 0.96  # the trimmed 2 % on each end of an evenly filled strip
     return {"centre": centre, "u": major_axis, "v": minor_axis, "a": (a_lo, a_hi), "b": (b_lo, b_hi),
-            "extent": (float(a.min() - GRID / 2), float(a.max() + GRID / 2)),
-            "major": a_hi - a_lo, "minor": b_hi - b_lo}
+            "extent": (float(a_lo - tail - GRID / 2), float(a_hi + tail + GRID / 2)),
+            "cells": centres, "major": a_hi - a_lo, "minor": b_hi - b_lo}
 
 
-def _adjacent_levels(frame: dict, higher: list[tuple[float, np.ndarray]]) -> list[float]:
-    """Levels with cells within ADJACENT of a long side of the component."""
-    found = []
-    for level, cells in higher:
-        rel = cells - frame["centre"]
-        ra, rb = rel @ frame["u"], rel @ frame["v"]
-        along = (ra >= frame["a"][0]) & (ra <= frame["a"][1])
-        near_hi = along & (rb >= frame["b"][1]) & (rb <= frame["b"][1] + ADJACENT)
-        near_lo = along & (rb <= frame["b"][0]) & (rb >= frame["b"][0] - ADJACENT)
-        if max(near_hi.sum(), near_lo.sum()) >= MIN_ADJACENT_CELLS:
-            found.append(level)
-    return found
+def _band(frame: dict, cells: np.ndarray, sign: float, reach: float) -> int:
+    """Number of cells within `reach` of the long side of the component on the `sign` side."""
+    rel = cells - frame["centre"]
+    ra, rb = rel @ frame["u"], rel @ frame["v"]
+    edge = frame["b"][1] if sign > 0 else frame["b"][0]
+    along = (ra >= frame["a"][0]) & (ra <= frame["a"][1])
+    return int((along & (sign * (rb - edge) >= 0) & (sign * (rb - edge) <= reach)).sum())
 
 
-def _is_beam(frame: dict) -> bool:
-    return BEAM_MINOR[0] <= frame["minor"] <= BEAM_MINOR[1] and frame["major"] / frame["minor"] >= BEAM_RATIO
+def _is_strip(frame: dict) -> bool:
+    return frame["minor"] <= BEAM_MINOR[1] and frame["major"] / max(frame["minor"], GRID) >= BEAM_RATIO
+
+
+def _side_evidence(samples: Samples, polygon: shapely.Polygon, frame: dict, underside: float,
+                   higher: list[tuple[float, np.ndarray]], sign: float) -> dict:
+    """What stands beside one long side: vertical face area and top, neighbouring higher levels, wall distance."""
+    P = samples.P
+    rel = P[:, [0, 2]] - frame["centre"]
+    ra, rb = rel @ frame["u"], rel @ frame["v"]
+    edge = frame["b"][1] if sign > 0 else frame["b"][0]
+    mid = (frame["b"][0] + frame["b"][1]) / 2
+    face = (np.abs(samples.N[:, 1]) < FACE_NORMAL_Y) & (P[:, 1] > underside + 0.03) & (ra >= frame["a"][0]) & (ra <= frame["a"][1])
+    face &= (sign * (rb - mid) > 0) & (sign * (rb - edge) < SIDE_GROW)
+    rel_c = frame["cells"] - frame["centre"]
+    span = frame["a"][1] - frame["a"][0]
+    along_c = rel_c @ frame["u"]  # the ends of a strip often touch a wall, its long side does not
+    middle = (along_c > frame["a"][0] + 0.15 * span) & (along_c < frame["a"][1] - 0.15 * span)
+    near = frame["cells"][middle & (sign * (rel_c @ frame["v"] - edge) > -0.04)]
+    wall_gap = float(shapely.distance(shapely.points(near), polygon.exterior).min()) - GRID / 2 if len(near) else np.inf
+    return {"area": float(face.sum() / SAMPLE_DENSITY), "top": float(np.percentile(P[face, 1], 95)) if face.any() else None,
+            "levels": {lv: _band(frame, cells, sign, ADJACENT) for lv, cells in higher},
+            "reach": {lv: _band(frame, cells, sign, TOP_REACH) for lv, cells in higher},
+            "wall": wall_gap <= WALL_SIDE}
+
+
+def _classify_strip(samples, polygon, frame, underside, higher) -> tuple[float | None, str]:
+    """(top level, "") when the strip is a beam, else (None, reason); a beam has a face or a wall on both long sides."""
+    sides = [_side_evidence(samples, polygon, frame, underside, higher, sign) for sign in (1.0, -1.0)]
+    if frame["minor"] < BEAM_MINOR[0]:
+        return None, "too_narrow"
+    matched, walls = set(), 0
+    for side in sides:
+        near = [lv for lv, count in side["levels"].items() if count >= MIN_ADJACENT_CELLS]
+        if side["area"] >= MIN_FACE_AREA and side["top"] is not None:
+            hit = [lv for lv in near if abs(side["top"] - lv) <= FACE_TOP_TOLERANCE]
+            if hit:
+                matched.update(hit)
+                continue
+            if not side["wall"]:
+                return None, "face_below_ceiling" if near else "no_higher_level"
+        if side["wall"]:
+            walls += 1
+        else:
+            return None, "no_side_face"
+    if walls == 2 or not matched:
+        return None, "no_side_face"
+    top = max(matched, key=lambda lv: sum(side["reach"][lv] for side in sides))
+    return (top, "") if top - underside >= MIN_BEAM_DROP else (None, "too_shallow")
 
 
 def _side_planes(samples: Samples, frame: dict, underside: float, top: float):
@@ -169,6 +219,12 @@ def _beam(samples: Samples, polygon: shapely.Polygon, frame: dict, level: dict, 
             "width": width, "width_sigma": width_sigma, "top": top["level"], "top_sigma": top["sigma"]}
 
 
+def _unexplained(frame: dict, underside: float, reason: str) -> dict:
+    lo, hi = frame["cells"].min(0) - GRID / 2, frame["cells"].max(0) + GRID / 2
+    return {"bbox": [[float(lo[0]), float(lo[1])], [float(hi[0]), float(hi[1])]], "underside": float(underside),
+            "width": float(frame["minor"]), "length": float(frame["major"]), "reason": reason}
+
+
 def _beam_footprint(beam: dict, polygon: shapely.Polygon):
     return shapely.LineString(beam["axis"]).buffer(beam["width"] / 2, cap_style="flat").intersection(polygon)
 
@@ -193,7 +249,7 @@ def detect(samples: Samples, polygon: shapely.Polygon, floor_level: float) -> Ce
         own = (gap.argmin(axis=1) == k) & (gap[:, k] < LEVEL_WINDOW)  # a sample serves its nearest level only
         lv["mask"] = grid.occupancy(cand[own][:, [0, 2]])
         lv["cells"] = grid.centres(lv["mask"])
-    levels, beams = [], []
+    levels, beams, unexplained = [], [], []
     for k, lv in enumerate(found):
         higher = [(h["level"], h["cells"]) for h in found[:k]]
         labels, count = ndimage.label(lv["mask"], structure=np.ones((3, 3)))
@@ -203,15 +259,17 @@ def detect(samples: Samples, polygon: shapely.Polygon, floor_level: float) -> Ce
             if mask.sum() * GRID**2 < MIN_COMPONENT_AREA:
                 continue
             frame = _component_frame(grid.centres(mask))
-            adjacent = _adjacent_levels(frame, higher) if _is_beam(frame) else []
-            if adjacent:
-                top = next(h for h in found if h["level"] == min(adjacent))
-                beams.append(_beam(samples, polygon, frame, lv, top))
-            else:
+            if not _is_strip(frame):
                 keep |= mask
+                continue
+            top_level, reason = _classify_strip(samples, polygon, frame, lv["level"], higher)
+            if top_level is None:
+                unexplained.append(_unexplained(frame, lv["level"], reason))
+            else:
+                beams.append(_beam(samples, polygon, frame, lv, next(h for h in found if h["level"] == top_level)))
         region = _as_multipolygon(grid.polygon(keep).simplify(SIMPLIFY).intersection(polygon)) if keep.any() else None
         if region is not None and not region.is_empty:
             levels.append({"level": lv["level"], "sigma": lv["sigma"], "region": region, "support_m2": lv["support_m2"]})
     beams.sort(key=lambda b: (-b["underside"], b["axis"][0]))
     covered = shapely.union_all([lv["region"] for lv in levels] + [_beam_footprint(b, polygon) for b in beams])
-    return CeilingResult(levels, beams, float(1.0 - covered.intersection(inner).area / inner.area))
+    return CeilingResult(levels, beams, float(1.0 - covered.intersection(inner).area / inner.area), unexplained)

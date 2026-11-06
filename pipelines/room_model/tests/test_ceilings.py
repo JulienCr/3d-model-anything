@@ -43,6 +43,18 @@ def stout(tmp_root):
     return ctx, truth, shell.build(ctx)
 
 
+@pytest.fixture(scope="module")
+def shallow(tmp_root):
+    ctx, truth = make_case(tmp_root, "shallow", short_beam=True, short_beam_underside=2.40)
+    return ctx, truth, shell.build(ctx)
+
+
+@pytest.fixture(scope="module")
+def fixtures(tmp_root):
+    ctx, truth = make_case(tmp_root, "fixtures", suspended_tubes=True, wall_duct=True)
+    return ctx, truth, shell.build(ctx)
+
+
 def _floor(doc):
     return doc["parameters"]["floor.level"]["value"]
 
@@ -85,7 +97,7 @@ def test_beam_recovered(default):
     east = wall_line(doc, wall_labels(doc, truth, "east")[0])
     direction = np.array([-east["normal"][1], east["normal"][0]])
     assert np.degrees(np.arccos(abs((b - a) @ direction) / np.linalg.norm(b - a))) < 1.0
-    assert np.linalg.norm(b - a) >= 2.3
+    assert np.linalg.norm(b - a) == pytest.approx(2.50, abs=0.05)
     west = wall_line(doc, wall_labels(doc, truth, "west")[0])
     assert abs(west["normal"] @ ((a + b) / 2) - west["offset"]) == pytest.approx(4.00, abs=0.02)
 
@@ -147,7 +159,7 @@ def test_beam_length_is_its_own_extent(short):
     assert np.linalg.norm((a + b) / 2 - plan_point(truth_to_room(ctx, truth), 5.05, 1.20)) < 0.05
     assert doc["parameters"][beam["params"]["underside"]]["value"] - _floor(doc) == pytest.approx(2.00, abs=0.01)
     full = _beam_near(doc, truth, ctx, 4.0, 1.25)
-    assert np.linalg.norm(np.array(full["axis"][1]) - full["axis"][0]) >= 2.3
+    assert np.linalg.norm(np.array(full["axis"][1]) - full["axis"][0]) == pytest.approx(2.50, abs=0.05)
 
 
 def test_levels_a_few_centimetres_apart_stay_separate(patch):
@@ -171,3 +183,29 @@ def test_stout_beam_is_still_a_beam(stout):
     assert np.linalg.norm(b - a) == pytest.approx(1.40, abs=0.05)
     assert doc["parameters"][beam["params"]["width"]]["value"] == pytest.approx(0.55, abs=0.03)
     assert len(_elements(doc, "ceiling")) == 2
+
+
+def test_fixtures_and_ducts_are_not_beams(fixtures):
+    ctx, truth, doc = fixtures
+    (beam,) = _elements(doc, "beam")
+    assert doc["parameters"][beam["params"]["width"]]["value"] == pytest.approx(0.30, abs=0.02)
+    items = doc["diagnostics"]["unexplained_horizontal"]
+    assert len(items) == 6
+    assert all(set(i) == {"bbox", "underside", "width", "length", "reason"} for i in items)
+    T = truth_to_room(ctx, truth)
+    duct = plan_point(T, 0.145, 1.30)
+    hits = [i for i in items if shapely.box(*i["bbox"][0], *i["bbox"][1]).distance(shapely.Point(duct)) < 0.1]
+    assert len(hits) == 1 and hits[0]["length"] == pytest.approx(2.0, abs=0.15)
+    tubes = [i for i in items if i not in hits]
+    assert all(i["length"] == pytest.approx(1.2, abs=0.1) and i["underside"] - _floor(doc) == pytest.approx(2.25, abs=0.02) for i in tubes)
+
+
+def test_default_scene_has_no_unexplained_horizontal(default):
+    assert default[2]["diagnostics"]["unexplained_horizontal"] == []
+
+
+def test_shallow_strip_is_not_a_beam(shallow):
+    _, _, doc = shallow
+    assert len(_elements(doc, "beam")) == 1
+    (item,) = doc["diagnostics"]["unexplained_horizontal"]
+    assert item["reason"] == "too_shallow"

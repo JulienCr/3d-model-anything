@@ -22,6 +22,13 @@ UNEXPLAINED = {
     "open_sides": "faces non fermées, pas un poteau",
     "size_out_of_range": "dimensions hors de la plage d'un poteau",
 }
+HORIZONTAL = {
+    "too_narrow": "trop étroit pour une poutre",
+    "too_shallow": "descend de moins de 14 cm sous le plafond",
+    "no_side_face": "pas de face latérale sur un côté",
+    "face_below_ceiling": "face latérale qui n'atteint pas le plafond",
+    "no_higher_level": "aucun plafond plus haut à côté",
+}
 STATION_FLAG = "section de mur encombrée ou irrégulière, mesure à prendre avec réserve"
 DASH = "—"
 
@@ -57,7 +64,7 @@ class _Report:
     def sections(self) -> list[tuple[str, list[str]]]:
         return [("Entrées", self.inputs()), ("Repère", self.frame()), ("Recalage", self.registration()),
                 ("Murs", self.walls()), ("Sol", self.floor()), ("Plafonds", self.ceilings()), ("Poutres", self.beams()),
-                ("Poteaux", self.columns()), ("Surfaces verticales non expliquées", self.unexplained()),
+                ("Poteaux", self.columns()), ("Surfaces verticales non expliquées", self.unexplained()), ("Éléments horizontaux non expliqués (réseaux, luminaires ?)", self.horizontal()),
                 ("Orthogonalité", self.orthogonality()), ("Alertes", self.alerts()), ("Épaisseurs", self.thickness())]
 
     def inputs(self) -> list[str]:
@@ -140,6 +147,15 @@ class _Report:
             rows.append([f"[{fr(x0, 2)} ; {fr(z0, 2)}] à [{fr(x1, 2)} ; {fr(z1, 2)}]", fr(u["height_max"], 2) + " m",
                          UNEXPLAINED.get(u["reason"], u["reason"])])
         return _table(["Emprise", "Hauteur max", "Raison"], rows)
+
+    def horizontal(self) -> list[str]:
+        rows = []
+        for u in self.diag.get("unexplained_horizontal", []):
+            (x0, z0), (x1, z1) = u["bbox"]
+            rows.append([f"[{fr(x0, 2)} ; {fr(z0, 2)}] à [{fr(x1, 2)} ; {fr(z1, 2)}]",
+                         fr((u["underside"] - self.floor_y) * 100) + " cm", fr(u["width"] * 100, 0) + " cm",
+                         fr(u["length"], 2) + " m", HORIZONTAL.get(u["reason"], u["reason"])])
+        return _table(["Emprise", "Hauteur dessous", "Largeur", "Longueur", "Raison"], rows)
 
     def orthogonality(self) -> list[str]:
         lines = shell.wall_lines(self.doc)

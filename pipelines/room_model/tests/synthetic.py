@@ -41,6 +41,8 @@ class SyntheticOptions:
     ceiling_patch: bool = False
     short_beam_underside: float = 2.00
     short_beam_width: float = 0.30
+    suspended_tubes: bool = False
+    wall_duct: bool = False
 
 
 @dataclass
@@ -64,6 +66,9 @@ COLUMNS = [
 CORNER_COLUMN = {"x": (0.0, 0.35), "z": (0.0, 0.30), "top": 2.50, "engaged": "south", "flush": ("x0",)}
 CEILING_PATCH = {"x": (2.00, 3.00), "z": (1.50, 2.40), "y": H_MAIN - 0.032}  # a slightly lower flat ceiling panel
 SHORT_BEAM = {"x": (4.90, 5.20), "z": (0.50, 1.90), "top": 2.50}  # hangs free from the main ceiling
+TUBES = {"z": [2.10, 2.10, 2.10, 0.40, 0.40], "x0": [0.30, 1.80, 4.40, 0.50, 2.00], "length": 1.20, "width": 0.08,
+         "drop": 0.25, "height": 0.06}  # light tubes hanging on rods: no side face reaches the ceiling
+DUCT = {"x": 0.145, "z": (0.30, 2.30), "diameter": 0.25, "gap": 0.05}  # octagonal stand-in for a round duct along the west wall
 STEP_COLUMN = {"x": (2.15, 2.50), "z": (2.50, 2.85), "top": H_WING, "engaged": "wing_east", "flush": ("x1",)}
 TABLE = {"x": (0.0, 0.6), "z": (0.5, 1.7), "h": 0.75}
 CABINET = {"x": (0.0, 0.6), "z": (3.0, 4.0), "h": 1.90}
@@ -204,6 +209,27 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
         m.rect(np.array([sx0, 0, 0]), Z, Y, -X, 1, (sz0, sz1), (under, SHORT_BEAM["top"]))
         m.rect(np.array([sx1, 0, 0]), Z, Y, X, 1, (sz0, sz1), (under, SHORT_BEAM["top"]))
         m.rect(np.array([0, under, 0]), X, Z, -Y, 3, (sx0, sx1), (sz0, sz1))
+
+    if opt.suspended_tubes:
+        for z, x0 in zip(TUBES["z"], TUBES["x0"]):
+            top = H_MAIN - TUBES["drop"] + TUBES["height"]
+            under = H_MAIN - TUBES["drop"]
+            ux, vz = (x0, x0 + TUBES["length"]), (z, z + TUBES["width"])
+            m.rect(np.array([0, under, 0]), X, Z, -Y, 0, ux, vz)
+            m.rect(np.array([0, top, 0]), X, Z, Y, 0, ux, vz)
+            m.rect(np.array([0, 0, vz[0]]), X, Y, -Z, 0, ux, (under, top))
+            m.rect(np.array([0, 0, vz[1]]), X, Y, Z, 0, ux, (under, top))
+
+    if opt.wall_duct:
+        r = DUCT["diameter"] / 2
+        cy = H_MAIN - DUCT["gap"] - r
+        side = DUCT["diameter"] * np.tan(np.pi / 8)
+        for k in range(8):
+            phi = k * np.pi / 4
+            n = np.array([np.cos(phi), np.sin(phi), 0.0])
+            t = np.array([-np.sin(phi), np.cos(phi), 0.0])
+            centre = np.array([DUCT["x"], cy, 0.0]) + r * n
+            m.rect(centre - side / 2 * t, Z, t, n, 0, DUCT["z"], (0, side))
 
     for box, cls in ((TABLE, 4), (CABINET, 1)):
         (x0, x1), (z0, z1), h = box["x"], box["z"], box["h"]

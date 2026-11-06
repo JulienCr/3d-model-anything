@@ -104,7 +104,7 @@ def test_report_sections(scene):
     ctx, doc = scene
     text = (ctx.out / "report.md").read_text(encoding="utf-8")
     for title in ("Entrées", "Repère", "Recalage", "Murs", "Sol", "Plafonds", "Poutres", "Poteaux",
-                  "Surfaces verticales non expliquées", "Orthogonalité", "Alertes", "Épaisseurs"):
+                  "Surfaces verticales non expliquées", "Éléments horizontaux non expliqués (réseaux, luminaires ?)", "Orthogonalité", "Alertes", "Épaisseurs"):
         assert f"## {title}\n" in text
     assert "non exécuté" in section(text, "Recalage")
     assert "supposées à 20 cm" in section(text, "Épaisseurs")
