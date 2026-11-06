@@ -7,7 +7,8 @@ from pathlib import Path
 import numpy as np
 import shapely
 
-from room_model import ceilings
+from room_model import ceilings, columns
+from room_model.columns import FACE_SIGMA
 from room_model.capture import load_roomplan
 from room_model.context import StageContext, output_path
 from room_model.frame import world_to_room
@@ -186,9 +187,17 @@ def build(ctx: StageContext) -> dict:
     level, floor_diag, floor_flags = _floor(room, samples, polygon)
     parameters["floor.level"] = level
     ceiling_result = ceilings.detect(samples, shapely.Polygon(polygon), level["value"])
+    wall_geometry = [{"label": ln["wall"].label, "normal": ln["n"], "offset": ln["offset"],
+                      "start": np.array(polygon[k]), "end": np.array(polygon[(k + 1) % len(polygon)])}
+                     for k, ln in enumerate(lines)]
+    flags = list(floor_flags)
+    if ceiling_result.levels:
+        column_result = columns.detect(samples, wall_geometry, shapely.Polygon(polygon), level["value"], ceiling_result.levels)
+    else:
+        column_result = columns.ColumnResult([], [])
+        flags.append("columns:no_ceiling")
 
     elements = [{"id": "Floor", "kind": "floor", "params": {"level": "floor.level"}, "polygon": polygon}]
-    flags = list(floor_flags)
     for k, line in enumerate(lines):
         wall = line["wall"]
         key = f"wall.{wall.label}"
@@ -204,13 +213,21 @@ def build(ctx: StageContext) -> dict:
     ceiling_elements, ceiling_params, ceiling_diag = _ceiling_elements(ceiling_result)
     elements += ceiling_elements
     parameters.update(ceiling_params)
+    for k, col in enumerate(column_result.columns, 1):
+        values = {"center_x": (col["center"][0], FACE_SIGMA / 2**0.5), "center_z": (col["center"][1], FACE_SIGMA / 2**0.5),
+                  "size_x": (col["size"][0], np.hypot(FACE_SIGMA, FACE_SIGMA)), "size_z": (col["size"][1], np.hypot(FACE_SIGMA, FACE_SIGMA)),
+                  "top": (col["top"], col["top_sigma"])}
+        for name, (value, sigma) in values.items():
+            parameters[f"column.{k}.{name}"] = _param(value, sigma, "m", "lidar")
+        elements.append({"id": f"Column_{k}", "kind": "column", "engaged_wall": col["engaged_wall"],
+                         "params": {name: f"column.{k}.{name}" for name in values}})
     return {
         "schema": SCHEMA,
         "source": {"capture": Path(ctx.capture).name, "room": ctx.room},
         "frame": {"world_to_room": [float(v) for v in w2r.T.ravel()], "turn": ctx.turn},
         "parameters": parameters,
         "elements": elements,
-        "diagnostics": {"walls": walls_diag, "floor": floor_diag, "ceilings": ceiling_diag, "ceiling_unobserved_fraction": ceiling_result.unobserved_fraction, "unexplained_vertical": [],
+        "diagnostics": {"walls": walls_diag, "floor": floor_diag, "ceilings": ceiling_diag, "ceiling_unobserved_fraction": ceiling_result.unobserved_fraction, "unexplained_vertical": column_result.unexplained,
                         "off_outline_walls": list(room.off_outline), "flags": flags},
     }
 

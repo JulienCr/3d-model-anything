@@ -133,7 +133,7 @@ def test_shell_document_format(default):
     assert doc["schema"] == "room-model/shell-1"
     assert len(doc["frame"]["world_to_room"]) == 16
     kinds = [e["kind"] for e in doc["elements"]]
-    assert kinds == ["floor"] + ["wall"] * 6 + ["ceiling"] * 2 + ["beam"]
+    assert kinds == ["floor"] + ["wall"] * 6 + ["ceiling"] * 2 + ["beam"] + ["column"] * 2
     for el in doc["elements"]:
         for name in el["params"].values():
             assert name in doc["parameters"]
