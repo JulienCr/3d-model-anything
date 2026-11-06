@@ -44,6 +44,12 @@ def stout(tmp_root):
 
 
 @pytest.fixture(scope="module")
+def corner(tmp_root):
+    ctx, truth = make_case(tmp_root, "corner", ceiling_patch=True, patch_drop=-0.07)
+    return ctx, truth, shell.build(ctx)
+
+
+@pytest.fixture(scope="module")
 def panel(tmp_root):
     ctx, truth = make_case(tmp_root, "panel", ceiling_patch=True, patch_drop=0.07, patch_length=1.62)
     return ctx, truth, shell.build(ctx)
@@ -57,7 +63,7 @@ def raised(tmp_root):
 
 @pytest.fixture(scope="module")
 def ripple(tmp_root):
-    ctx, truth = make_case(tmp_root, "ripple", ceiling_patch=True, patch_drop=0.04, patch_length=1.62)
+    ctx, truth = make_case(tmp_root, "ripple", ceiling_patch=True, patch_drop=0.035, patch_length=1.62)
     return ctx, truth, shell.build(ctx)
 
 
@@ -203,17 +209,18 @@ def test_stout_beam_is_still_a_beam(stout):
     assert len(_elements(doc, "ceiling")) == 2
 
 
-def test_fixtures_and_ducts_are_not_beams(fixtures):
+def test_fixtures_and_ducts_are_suspended(fixtures):
     ctx, truth, doc = fixtures
     (beam,) = _elements(doc, "beam")
+    assert beam["flags"] == []
     assert doc["parameters"][beam["params"]["width"]]["value"] == pytest.approx(0.30, abs=0.02)
     items = doc["diagnostics"]["unexplained_horizontal"]
     assert len(items) == 6
-    assert all(set(i) == {"bbox", "underside", "width", "length", "reason"} for i in items)
+    assert all(set(i) == {"bbox", "underside", "width", "length", "reason"} and i["reason"] == "suspended" for i in items)
     T = truth_to_room(ctx, truth)
-    duct = plan_point(T, 0.145, 1.30)
+    duct = plan_point(T, 0.27, 1.30)
     hits = [i for i in items if shapely.box(*i["bbox"][0], *i["bbox"][1]).distance(shapely.Point(duct)) < 0.1]
-    assert len(hits) == 1 and hits[0]["length"] == pytest.approx(2.0, abs=0.15)
+    assert len(hits) == 1 and hits[0]["length"] == pytest.approx(2.0, abs=0.15) and hits[0]["width"] >= 0.15
     tubes = [i for i in items if i not in hits]
     assert all(i["length"] == pytest.approx(1.2, abs=0.1) and i["underside"] - _floor(doc) == pytest.approx(2.25, abs=0.02) for i in tubes)
 
@@ -229,13 +236,14 @@ def test_shallow_strip_is_not_a_beam(shallow):
     assert item["reason"] == "too_shallow"
 
 
+
 def test_ripple_of_a_few_centimetres_is_one_level(ripple, default):
     _, _, doc = ripple
     levels = _elements(doc, "ceiling")
     assert len(levels) == 2
     assert not _elements(doc, "beam")[1:] and not doc["diagnostics"]["unexplained_horizontal"]
     top = _value(doc, levels[0]["params"]["level"]) - _floor(doc)
-    assert top == pytest.approx(2.50 - 0.04 * 0.1, abs=0.015)
+    assert top == pytest.approx(2.50 - 0.035 * 0.1, abs=0.015)
     assert len(_elements(default[2], "ceiling")) == 2
 
 
@@ -256,3 +264,50 @@ def test_strip_of_the_highest_level_is_ceiling_not_unexplained(raised):
     assert doc["diagnostics"]["unexplained_horizontal"] == []
     assert len(_elements(doc, "beam")) == 1
     assert len(_elements(doc, "ceiling")) == 3
+
+
+def _verdict(tmp_root, name, **options):
+    ctx, truth = make_case(tmp_root, name, short_beam=True, **options)
+    doc = shell.build(ctx)
+    beams = [b for b in _elements(doc, "beam") if abs(_value(doc, b["params"]["underside"]) - _floor(doc) - options.get("short_beam_underside", 2.0)) < 0.02]
+    return doc, beams, doc["diagnostics"]["unexplained_horizontal"]
+
+
+def test_hanging_strip_with_visible_ceiling_is_suspended(tmp_root):
+    ctx, _ = make_case(tmp_root, "hanging", hanging_strip=True)
+    doc = shell.build(ctx)
+    (item,) = doc["diagnostics"]["unexplained_horizontal"]
+    assert item["reason"] == "suspended" and item["width"] >= 0.2
+    assert len(_elements(doc, "beam")) == 1
+
+
+def test_beam_with_an_unseen_side_is_to_verify(tmp_root, default):
+    doc, beams, unexplained = _verdict(tmp_root, "oneside", short_beam_sides=1)
+    (beam,) = beams
+    assert beam["flags"] == ["to_verify"] and unexplained == []
+    assert all(doc["parameters"][v]["source"] == "lidar" for v in beam["params"].values())
+    assert default[2]["diagnostics"]["unexplained_horizontal"] == [] and _elements(default[2], "beam")[0]["flags"] == []
+
+
+def test_narrow_strip_without_ceiling_above_is_too_narrow(tmp_root):
+    _, beams, unexplained = _verdict(tmp_root, "narrow", short_beam_width=0.13, short_beam_long=True)
+    assert not beams and [u["reason"] for u in unexplained] == ["too_narrow"]
+
+
+@pytest.mark.parametrize("angle, flags", [(25.0, []), (55.0, ["to_verify"])])
+def test_bevelled_faces_bracket_the_steepness_limit(tmp_root, angle, flags):
+    _, beams, unexplained = _verdict(tmp_root, f"bevel{int(angle)}", short_beam_underside=2.35, short_beam_bevel_deg=angle)
+    assert unexplained == [] and [b["flags"] for b in beams] == [flags]
+
+
+def test_chain_of_small_steps_does_not_merge_into_one_level(tmp_root):
+    ctx, _ = make_case(tmp_root, "stairs", staircase=True)
+    doc = shell.build(ctx)
+    assert len(_elements(doc, "ceiling")) == 4
+    assert max(abs(_value(doc, c["params"]["level"]) - _floor(doc) - 2.37) for c in _elements(doc, "ceiling")) < 0.2
+
+
+def test_wall_top_is_the_level_over_most_of_the_wall(corner):
+    _, truth, doc = corner
+    top = doc["parameters"][f"wall.{wall_labels(doc, truth, 'step')[0]}.top"]
+    assert top["value"] - _floor(doc) == pytest.approx(2.50, abs=0.01)

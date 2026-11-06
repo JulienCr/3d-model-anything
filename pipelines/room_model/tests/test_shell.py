@@ -196,3 +196,16 @@ def test_wall_far_from_roomplan_is_found_by_its_mode(default, offset):
     assert _line(odoc, label)["offset"] == pytest.approx(expected, abs=0.01)
     assert odoc["parameters"][f"wall.{label}.offset"]["source"] == "lidar"
     assert all("shifted_seed" not in e["flags"] for e in doc["elements"] if e["kind"] == "wall")
+
+
+@pytest.mark.parametrize("panel, shifted", [((0.8, 1.4), True), ((1.8, 2.0), False)])
+def test_shift_needs_twice_the_support_of_a_competing_surface(tmp_root, default, panel, shifted):
+    _, truth, doc, _ = default
+    ctx, otruth = _case(tmp_root, f"panel-{panel[0]}", offset_wall="wing_east", rp_panel=panel)
+    odoc = shell.build(ctx)
+    label = _labels(odoc, otruth, "wing_east")[0]
+    el = next(e for e in odoc["elements"] if e["kind"] == "wall" and e["label"] == label)
+    assert ("shifted_seed" in el["flags"]) is shifted
+    true_offset = _line(doc, _labels(doc, truth, "wing_east")[0])["offset"]
+    moved = abs(_line(odoc, label)["offset"] - true_offset)
+    assert (moved < 0.01) if shifted else (0.15 < moved < 0.25)

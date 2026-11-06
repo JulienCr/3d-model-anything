@@ -198,3 +198,24 @@ def test_glb_binary_integrity_and_winding(scene):
         tri = pos[idx.reshape(-1, 3)].astype(np.float64)
         normals = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
         assert ((tri.mean(1) - pos.mean(0)) * normals).sum(1).min() > 0
+
+
+def test_beam_to_verify_is_grouped_labelled_and_reported(tmp_path_factory):
+    ctx, _ = make_case(tmp_path_factory.mktemp("verify"), "verify", short_beam=True, short_beam_sides=1)
+    shell.run(ctx)
+    model.run(ctx)
+    export.run(ctx)
+    doc = json.loads(output_path(ctx, "model").read_text(encoding="utf-8"))
+    (unsure,) = [e["id"] for e in doc["elements"] if e["kind"] == "beam" and e["flags"]]
+    gltf = read_glb(ctx.out / "model_measured.glb")
+    names = [n["name"] for n in gltf["nodes"]]
+    group = next(n for n in gltf["nodes"] if n["name"] == "À vérifier")
+    shell_root = next(n for n in gltf["nodes"] if n["name"] == "Coque")
+    assert [names[i] for i in group["children"]] == [unsure]
+    assert unsure not in [names[i] for i in shell_root["children"]]
+    k = unsure.split("_")[1]
+    assert f"B{k} s/p" in (ctx.out / "plan.svg").read_text(encoding="utf-8")
+    assert any(t.endswith("?") for t in ET.fromstring((ctx.out / "plan.svg").read_text(encoding="utf-8")).itertext())
+    text = (ctx.out / "report.md").read_text(encoding="utf-8")
+    assert "à vérifier" in section(text, "Poutres") and "poutre probable, à confirmer" in section(text, "Alertes")
+    assert all(d["flags"] == ["to_verify"] for d in doc["dimensions"] if d["id"] in (f"B{k}-u", f"B{k}-w"))

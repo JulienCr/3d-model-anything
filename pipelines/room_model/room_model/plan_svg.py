@@ -116,7 +116,7 @@ class _Plan:
         self.out.append(f'<polygon id="{el["id"]}" class="beam" points="{self.points([a - side, b - side, b + side, a + side])}"/>')
         under = self.value(el["params"]["underside"]) - self.floor_y
         near_start = a + 0.2 * (b - a) + (width / 2 + 0.1) * np.array([-t[1], t[0]])
-        self.text(near_start, f"B{k} s/p {fr(under * 100, 0)} cm", "beamtext", anchor="end")
+        self.text(near_start, f"B{k} s/p {fr(under * 100, 0)} cm" + (" ?" if "to_verify" in el.get("flags", []) else ""), "beamtext", anchor="end")
 
     def _column(self, el: dict) -> None:
         p = el["params"]

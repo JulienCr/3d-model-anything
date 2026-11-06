@@ -15,6 +15,7 @@ POLYGON_MARGIN = 0.05
 LEVEL_WINDOW = 0.03
 MIN_LEVEL_AREA = 0.3  # m2
 MAX_LEVELS = 8
+MAX_MERGE_SPAN = 0.04  # m, total height spread of one merged level: a chain of small steps must not walk across a real step
 MERGE_SIGMAS = 3.0  # neighbouring levels closer than this many sigmas (the larger one) are one rough surface
 GRID = 0.02  # m, plan raster cell
 CLOSING_ITERATIONS = 2
@@ -26,6 +27,8 @@ TOP_REACH = 0.30  # m, band beside the long sides in which a higher level's area
 MIN_ADJACENT_CELLS = 25
 FACE_NORMAL_Y = 0.65  # a side face is any surface steeper than this: meshes bevel the edge of a beam
 MIN_BEAM_DROP = 0.14  # m between the underside and the level it hangs from: shallower reliefs are not beams
+REASONS = {"suspended": "suspended", "narrow": "too_narrow", "shallow": "too_shallow"}
+SEEN_ABOVE = 0.30  # share of a strip's cells with ceiling samples above them: it hangs below a visible ceiling
 MIN_FACE_AREA = 0.05  # m2 of vertical samples a beam side face needs
 FACE_TOP_TOLERANCE = 0.05  # m, between the top of a side face and the higher level next to it
 WALL_SIDE = 0.06  # m, a long side this close to a wall needs no face of its own
@@ -144,29 +147,36 @@ def _side_evidence(samples: Samples, polygon: shapely.Polygon, frame: dict, unde
             "wall": wall_gap <= WALL_SIDE}
 
 
-def _classify_strip(samples, polygon, frame, underside, higher) -> tuple[float | None, str]:
-    """(top level, "") when the strip is a beam, else (None, reason); a beam has a face or a wall on both long sides."""
-    sides = [_side_evidence(samples, polygon, frame, underside, higher, sign) for sign in (1.0, -1.0)]
-    if frame["minor"] < BEAM_MINOR[0]:
-        return None, "too_narrow"
+def _confirmed_tops(sides: list[dict]) -> set[float]:
+    """Higher levels matched by the side faces when both long sides have a face (or one a wall); empty otherwise."""
     matched, walls = set(), 0
     for side in sides:
         near = [lv for lv, count in side["levels"].items() if count >= MIN_ADJACENT_CELLS]
-        if side["area"] >= MIN_FACE_AREA and side["top"] is not None:
-            hit = [lv for lv in near if abs(side["top"] - lv) <= FACE_TOP_TOLERANCE]
-            if hit:
-                matched.update(hit)
-                continue
-            if not side["wall"]:
-                return None, "face_below_ceiling" if near else "no_higher_level"
-        if side["wall"]:
+        hit = [lv for lv in near if side["top"] is not None and abs(side["top"] - lv) <= FACE_TOP_TOLERANCE]
+        if side["area"] >= MIN_FACE_AREA and hit:
+            matched.update(hit)
+        elif side["wall"]:
             walls += 1
         else:
-            return None, "no_side_face"
-    if walls == 2 or not matched:
-        return None, "no_side_face"
-    top = max(matched, key=lambda lv: sum(side["reach"][lv] for side in sides))
-    return (top, "") if top - underside >= MIN_BEAM_DROP else (None, "too_shallow")
+            return set()
+    return matched if walls < 2 else set()
+
+
+def _classify_strip(samples, polygon, frame, underside, higher, seen_above) -> tuple[str, float | None]:
+    """(verdict, top level): "suspended" and "narrow" are unexplained, "shallow" is a relief under 14 cm, "beam" has side
+    faces (or a wall) on both long sides, "verify" is a probable beam whose sides are not both seen."""
+    if seen_above >= SEEN_ABOVE:
+        return "suspended", None
+    if frame["minor"] < BEAM_MINOR[0]:
+        return "narrow", None
+    sides = [_side_evidence(samples, polygon, frame, underside, higher, sign) for sign in (1.0, -1.0)]
+    matched = _confirmed_tops(sides)
+    reach = {lv: sum(side["reach"][lv] for side in sides) for lv, _ in higher}
+    pool = matched or [lv for lv, count in reach.items() if count] or [min(lv for lv, _ in higher)]
+    top = max(pool, key=lambda lv: reach.get(lv, 0))
+    if top - underside < MIN_BEAM_DROP:
+        return "shallow", None
+    return ("beam" if matched else "verify"), top
 
 
 def _side_planes(samples: Samples, frame: dict, underside: float, top: float):
@@ -207,18 +217,20 @@ def _beam_axis(frame: dict, centre: np.ndarray, polygon: shapely.Polygon) -> lis
 
 
 def _merge_rough_levels(levels: list[dict]) -> list[dict]:
-    """Merge levels (highest first) closer than MERGE_SIGMAS sigmas whose regions touch; the level is support-weighted."""
-    levels = list(levels)
+    """Merge levels (highest first) closer than MERGE_SIGMAS sigmas whose regions touch, within MAX_MERGE_SPAN in all."""
+    levels = [{**lv, "low": lv["level"], "high": lv["level"]} for lv in levels]
     k = 0
     while k < len(levels) - 1:
         a, b = levels[k], levels[k + 1]
         gap = a["level"] - b["level"]
-        if gap >= MERGE_SIGMAS * max(a["sigma"], b["sigma"]) or not a["region"].buffer(CLOSING_ITERATIONS * GRID + 1e-6).intersects(b["region"]):
+        touch = a["region"].buffer(CLOSING_ITERATIONS * GRID + 1e-6).intersects(b["region"])
+        if gap >= MERGE_SIGMAS * max(a["sigma"], b["sigma"]) or a["high"] - b["low"] > MAX_MERGE_SPAN or not touch:
             k += 1
             continue
         support = a["support_m2"] + b["support_m2"]
         levels[k:k + 2] = [{"level": (a["level"] * a["support_m2"] + b["level"] * b["support_m2"]) / support,
                             "sigma": float(np.hypot(max(a["sigma"], b["sigma"]), gap / 2)), "support_m2": support,
+                            "low": b["low"], "high": a["high"],
                             "region": _as_multipolygon(shapely.union_all([a["region"], b["region"]]))}]
     return levels
 
@@ -280,11 +292,13 @@ def detect(samples: Samples, polygon: shapely.Polygon, floor_level: float) -> Ce
             if not higher or not _is_strip(frame):  # nothing is above the highest level: its strips are ceiling
                 keep |= mask
                 continue
-            top_level, reason = _classify_strip(samples, polygon, frame, lv["level"], higher)
-            if top_level is None:
-                unexplained.append(_unexplained(frame, lv["level"], reason))
+            above = np.logical_or.reduce([h["mask"] for h in found[:k]])
+            verdict, top_level = _classify_strip(samples, polygon, frame, lv["level"], higher, float(above[mask].mean()))
+            if verdict in ("beam", "verify"):
+                beam = _beam(samples, polygon, frame, lv, next(h for h in found if h["level"] == top_level))
+                beams.append({**beam, "to_verify": verdict == "verify"})
             else:
-                beams.append(_beam(samples, polygon, frame, lv, next(h for h in found if h["level"] == top_level)))
+                unexplained.append(_unexplained(frame, lv["level"], REASONS[verdict]))
         region = _as_multipolygon(grid.polygon(keep).simplify(SIMPLIFY).intersection(polygon)) if keep.any() else None
         if region is not None and not region.is_empty:
             levels.append({"level": lv["level"], "sigma": lv["sigma"], "region": region, "support_m2": lv["support_m2"]})

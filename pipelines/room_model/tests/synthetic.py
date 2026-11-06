@@ -45,6 +45,12 @@ class SyntheticOptions:
     patch_width: float = 0.9
     short_beam_underside: float = 2.00
     short_beam_width: float = 0.30
+    short_beam_sides: int = 2  # 1 leaves the east side face unseen
+    short_beam_bevel_deg: float = 0.0  # side faces lean outwards by this angle from the vertical
+    short_beam_long: bool = False
+    hanging_strip: bool = False
+    staircase: bool = False
+    rp_panel: tuple[float, float] | None = None  # (width, height) of a partition standing on the RoomPlan plane of `offset_wall`
     suspended_tubes: bool = False
     wall_duct: bool = False
     offset_wall: str | None = None
@@ -70,14 +76,21 @@ COLUMNS = [
 ]
 CORNER_COLUMN = {"x": (0.0, 0.35), "z": (0.0, 0.30), "top": 2.50, "engaged": "south", "flush": ("x0",)}
 CEILING_PATCH = {"x0": 2.00, "z0": 1.50}  # a slightly lower flat ceiling panel
-SHORT_BEAM = {"x": (4.90, 5.20), "z": (0.50, 1.90), "top": 2.50}  # hangs free from the main ceiling
+SHORT_BEAM = {"x": (4.90, 5.20), "z": (0.50, 1.90), "z_long": (0.30, 2.45), "top": 2.50}  # hangs free from the main ceiling
 TUBES = {"z": [2.10, 2.10, 2.10, 0.40, 0.40], "x0": [0.30, 1.80, 4.40, 0.50, 2.00], "length": 1.20, "width": 0.08,
          "drop": 0.25, "height": 0.06}  # light tubes hanging on rods: no side face reaches the ceiling
-DUCT = {"x": 0.145, "z": (0.30, 2.30), "diameter": 0.25, "gap": 0.05}  # octagonal stand-in for a round duct along the west wall
+DUCT = {"x": 0.27, "z": (0.30, 2.30), "diameter": 0.50, "gap": 0.05}  # octagonal stand-in for a round duct along the west wall
+HANGING_STRIP = {"x": (4.40, 5.80), "z": (1.20, 1.50), "drop": 0.25, "height": 0.06}
+STAIRS = [((4.2, 4.8), 0.07), ((4.8, 5.4), 0.105), ((5.4, 6.0), 0.14)]  # bands stepping down by 3.5 cm: the level histogram cannot see 3 cm steps
+STAIRS_Z = (0.40, 1.30)
 STEP_COLUMN = {"x": (2.15, 2.50), "z": (2.50, 2.85), "top": H_WING, "engaged": "wing_east", "flush": ("x1",)}
 TABLE = {"x": (0.0, 0.6), "z": (0.5, 1.7), "h": 0.75}
 CABINET = {"x": (0.0, 0.6), "z": (3.0, 4.0), "h": 1.90}
 DOOR = {"z": 1.25, "w": 0.90, "h": 2.05}
+
+
+def _short_beam_z(opt: SyntheticOptions) -> tuple[float, float]:
+    return SHORT_BEAM["z_long"] if opt.short_beam_long else SHORT_BEAM["z"]
 
 
 def _short_beam_x(opt: SyntheticOptions) -> tuple[float, float]:
@@ -218,10 +231,36 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
     m.rect(np.array([0, BEAM["underside"], 0]), X, Z, -Y, 3, (bx0, bx1), (bz0, bz1))
 
     if opt.short_beam:
-        (sx0, sx1), (sz0, sz1), under = _short_beam_x(opt), SHORT_BEAM["z"], opt.short_beam_underside
-        m.rect(np.array([sx0, 0, 0]), Z, Y, -X, 1, (sz0, sz1), (under, SHORT_BEAM["top"]))
-        m.rect(np.array([sx1, 0, 0]), Z, Y, X, 1, (sz0, sz1), (under, SHORT_BEAM["top"]))
+        (sx0, sx1), (sz0, sz1), under = _short_beam_x(opt), _short_beam_z(opt), opt.short_beam_underside
+        top, lean = SHORT_BEAM["top"], np.tan(np.radians(opt.short_beam_bevel_deg)) * (SHORT_BEAM["top"] - under)
+        for x, sign, normal in ((sx0, -1.0, -X), (sx1, 1.0, X)):
+            if opt.short_beam_sides == 1 and sign > 0:
+                continue
+            if lean == 0.0:
+                m.rect(np.array([x, 0, 0]), Z, Y, normal, 1, (sz0, sz1), (under, top))
+                continue
+            V = np.array([sign * lean, top - under, 0.0])
+            length = float(np.linalg.norm(V))
+            m.rect(np.array([x, under, 0]), Z, V / length, np.array([sign * (top - under), -lean, 0.0]) / length, 1,
+                   (sz0, sz1), (0, length))
         m.rect(np.array([0, under, 0]), X, Z, -Y, 3, (sx0, sx1), (sz0, sz1))
+
+    if opt.hanging_strip:
+        (hx0, hx1), (hz0, hz1) = HANGING_STRIP["x"], HANGING_STRIP["z"]
+        under = H_MAIN - HANGING_STRIP["drop"]
+        top = under + HANGING_STRIP["height"]
+        m.rect(np.array([0, under, 0]), X, Z, -Y, 0, (hx0, hx1), (hz0, hz1))
+        m.rect(np.array([0, top, 0]), X, Z, Y, 0, (hx0, hx1), (hz0, hz1))
+        m.rect(np.array([0, 0, hz0]), X, Y, -Z, 0, (hx0, hx1), (under, top))
+        m.rect(np.array([0, 0, hz1]), X, Y, Z, 0, (hx0, hx1), (under, top))
+
+    if opt.staircase:
+        for (x0, x1), drop in STAIRS:
+            m.rect(np.array([0, H_MAIN - drop, 0]), X, Z, -Y, 3, (x0, x1), STAIRS_Z)
+
+    if opt.rp_panel:
+        width, height = opt.rp_panel
+        m.rect(np.array([2.5 - ROOMPLAN_OFFSET, 0, 0]), Z, Y, -X, 1, (2.6, 2.6 + width), (0, height))
 
     if opt.suspended_tubes:
         for z, x0 in zip(TUBES["z"], TUBES["x0"]):
@@ -258,7 +297,7 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
     l_shape = [((0, 6), (0, 2.5)), ((0, 2.5), (2.5, 4.5))]
     m.rect(o, X, Z, Y, 2, (0, 6), (0, 4.5),
            lambda u, v: _in_rects(u, v, l_shape) & ~_in_rects(u, v, solid))
-    holes = col_rects + ([(_patch_x(opt), _patch_z(opt))] if opt.ceiling_patch else []) + [(BEAM["x"], BEAM["z"])] + ([(_short_beam_x(opt), SHORT_BEAM["z"])] if opt.short_beam else [])
+    holes = col_rects + ([(_patch_x(opt), _patch_z(opt))] if opt.ceiling_patch else []) + [(BEAM["x"], BEAM["z"])] + ([(_short_beam_x(opt), _short_beam_z(opt))] if opt.short_beam else []) + ([(x, STAIRS_Z) for x, _ in STAIRS] if opt.staircase else [])
     if opt.ceiling_patch:
         m.rect(np.array([0, H_MAIN - opt.patch_drop, 0]), X, Z, -Y, 3, _patch_x(opt), _patch_z(opt))
     if opt.ceiling_hole:

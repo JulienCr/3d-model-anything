@@ -29,6 +29,7 @@ THICKNESS = 0.20
 FALLBACK_OFFSET_SIGMA = 0.05
 WALL_TOP_STEP = 0.10  # m between the points sampling a wall top
 WALL_TOP_INSET = 0.15  # m from the wall into the room
+WALL_TOP_MIN_SHARE = 0.20  # share of the sampled points a level must hold to give a wall its top
 FALLBACK_AZIMUTH_SIGMA = np.radians(2.0)
 EXCLUDED_CLASSES = (4, 5, 6, 7)  # table, seat, window, door
 
@@ -185,13 +186,17 @@ def _region_json(region: shapely.MultiPolygon) -> list[dict]:
 
 
 def _wall_top(line: dict, start: np.ndarray, end: np.ndarray, levels: list[dict]) -> dict | None:
-    """Highest ceiling level over points every WALL_TOP_STEP along the wall, WALL_TOP_INSET inside the room."""
+    """Level holding most of the points every WALL_TOP_STEP along the wall, WALL_TOP_INSET inside the room (ties: the
+    higher one); None when no level holds WALL_TOP_MIN_SHARE of them."""
     length = float(np.linalg.norm(end - start))
     count = max(int(length / WALL_TOP_STEP), 1)
     t = (np.arange(count) + 0.5) / count
     pts = start + np.outer(t, end - start) + WALL_TOP_INSET * line["n"]
-    hit = [lv for lv in levels if shapely.contains_xy(lv["region"], pts[:, 0], pts[:, 1]).any()]
-    return max(hit, key=lambda lv: lv["level"]) if hit else None
+    if not levels:
+        return None
+    counts = [int(shapely.contains_xy(lv["region"], pts[:, 0], pts[:, 1]).sum()) for lv in levels]
+    best = max(zip(counts, (lv["level"] for lv in levels), range(len(levels))))
+    return levels[best[2]] if best[0] >= WALL_TOP_MIN_SHARE * count else None
 
 
 def _ceiling_elements(result: ceilings.CeilingResult) -> tuple[list[dict], dict, list[dict]]:
@@ -204,7 +209,7 @@ def _ceiling_elements(result: ceilings.CeilingResult) -> tuple[list[dict], dict,
     for k, b in enumerate(result.beams, 1):
         for name in ("underside", "width", "top"):
             params[f"beam.{k}.{name}"] = _param(b[name], b[f"{name}_sigma"], "m", "lidar")
-        elements.append({"id": f"Beam_{k}", "kind": "beam", "axis": b["axis"],
+        elements.append({"id": f"Beam_{k}", "kind": "beam", "axis": b["axis"], "flags": ["to_verify"] if b["to_verify"] else [],
                          "params": {n: f"beam.{k}.{n}" for n in ("underside", "width", "top")}})
     return elements, params, diag
 

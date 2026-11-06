@@ -189,9 +189,9 @@ def _beam_dimensions(d: _Doc) -> list[dict]:
         mid = np.mean(el["axis"], axis=0)
         out.append(_dimension(f"B{k}-u", "beam_underside", f"Hauteur sous poutre B{k}", d.value(under) - d.value("floor.level"),
                               np.hypot(d.sigma(under), d.sigma("floor.level")), [el["id"], "Floor"], mid,
-                              d.weakest([under, "floor.level"])))
+                              d.weakest([under, "floor.level"]), el.get("flags", [])))
         out.append(_dimension(f"B{k}-w", "beam_width", f"Largeur de la poutre B{k}", d.value(width), d.sigma(width),
-                              [el["id"]], mid, d.weakest([width])))
+                              [el["id"]], mid, d.weakest([width]), el.get("flags", [])))
     return out
 
 

@@ -26,10 +26,9 @@ UNEXPLAINED = {
 HORIZONTAL = {
     "too_narrow": "trop étroit pour une poutre",
     "too_shallow": "descend de moins de 14 cm sous le plafond",
-    "no_side_face": "pas de face latérale sur un côté",
-    "face_below_ceiling": "face latérale qui n'atteint pas le plafond",
-    "no_higher_level": "aucun plafond plus haut à côté",
+    "suspended": "suspendu sous un plafond visible (luminaire, gaine, chemin de câbles)",
 }
+TO_VERIFY = "poutre probable, à confirmer (photos ou relevé)"
 STATION_FLAG = "section de mur encombrée ou irrégulière, mesure à prendre avec réserve"
 DASH = "—"
 
@@ -130,8 +129,9 @@ class _Report:
             p = el["params"]
             length = float(np.linalg.norm(np.subtract(*el["axis"])))
             rows.append([el["id"].split("_")[1], fr((self.p(p["underside"])["value"] - self.floor_y) * 100) + " ± " +
-                         fr(self.p(p["underside"])["sigma"] * 100) + " cm", self.level(p["width"]), fr(length, 2) + " m"])
-        return _table(["Poutre", "Hauteur sous poutre", "Largeur", "Longueur"], rows)
+                         fr(self.p(p["underside"])["sigma"] * 100) + " cm", self.level(p["width"]), fr(length, 2) + " m",
+                         "à vérifier" if "to_verify" in el.get("flags", []) else "confirmée"])
+        return _table(["Poutre", "Hauteur sous poutre", "Largeur", "Longueur", "État"], rows)
 
     def columns(self) -> list[str]:
         rows = []
@@ -174,6 +174,7 @@ class _Report:
         out += [f"- {GENERAL_FLAGS[f]}" for f in self.diag["flags"] if f in GENERAL_FLAGS]
         known = set(GENERAL_FLAGS) | {f"{e['label']}:{f}" for e in self.els["wall"] for f in e["flags"]}
         out += [f"- {f}" for f in self.diag["flags"] if f not in known]
+        out += [f"- Poutre {e['id'].split('_')[1]} : {TO_VERIFY}" for e in self.els["beam"] if "to_verify" in e.get("flags", [])]
         out += [f"- Mur RoomPlan hors du contour du sol (cloison ?), ignoré : {i}" for i in self.diag["off_outline_walls"]]
         if frac := self.diag.get("ceiling_unobserved_fraction"):
             out.append(f"- {fr(frac * 100)} % du plafond non observé par le LiDAR")

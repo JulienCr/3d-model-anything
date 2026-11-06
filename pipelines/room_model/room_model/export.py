@@ -40,9 +40,11 @@ def build_nodes(doc: dict) -> list[GltfNode]:
         else:
             mesh = meshes.column_mesh(*(value(p[n]) for n in ("center_x", "center_z", "size_x", "size_z")), y0, value(p["top"]))
         nodes.append(GltfNode(el["id"], mesh[0], mesh[1], kind, _extras(doc, el)))
+    unsure = [n.name for n in nodes if "to_verify" in n.extras.get("flags", [])]
     root = GltfNode("Coque", extras={"kind": "shell", "schema": doc["schema"], "version": doc["version"]},
-                    children=[n.name for n in nodes])
-    return [root, *nodes]
+                    children=[n.name for n in nodes if n.name not in unsure])
+    groups = [GltfNode("À vérifier", extras={"kind": "to_verify"}, children=unsure)] if unsure else []
+    return [root, *groups, *nodes]
 
 
 def dimensions_csv(doc: dict) -> str:
