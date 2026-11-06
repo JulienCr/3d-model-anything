@@ -37,6 +37,12 @@ def patch(tmp_root):
     return ctx, truth, shell.build(ctx)
 
 
+@pytest.fixture(scope="module")
+def stout(tmp_root):
+    ctx, truth = make_case(tmp_root, "stout", short_beam=True, short_beam_width=0.55)
+    return ctx, truth, shell.build(ctx)
+
+
 def _floor(doc):
     return doc["parameters"]["floor.level"]["value"]
 
@@ -155,3 +161,13 @@ def test_levels_a_few_centimetres_apart_stay_separate(patch):
     assert region.area < 1.3
     undersides = sorted(_value(doc, b["params"]["underside"]) - _floor(doc) for b in _elements(doc, "beam"))
     assert undersides == pytest.approx([2.16, 2.20], abs=0.01)
+
+
+def test_stout_beam_is_still_a_beam(stout):
+    ctx, truth, doc = stout
+    assert len(_elements(doc, "beam")) == 2
+    beam = _beam_near(doc, truth, ctx, 5.175, 1.20)
+    a, b = (np.array(pt) for pt in beam["axis"])
+    assert np.linalg.norm(b - a) == pytest.approx(1.40, abs=0.05)
+    assert doc["parameters"][beam["params"]["width"]]["value"] == pytest.approx(0.55, abs=0.03)
+    assert len(_elements(doc, "ceiling")) == 2

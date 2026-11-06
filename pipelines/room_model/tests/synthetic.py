@@ -40,6 +40,7 @@ class SyntheticOptions:
     short_beam: bool = False
     ceiling_patch: bool = False
     short_beam_underside: float = 2.00
+    short_beam_width: float = 0.30
 
 
 @dataclass
@@ -67,6 +68,10 @@ STEP_COLUMN = {"x": (2.15, 2.50), "z": (2.50, 2.85), "top": H_WING, "engaged": "
 TABLE = {"x": (0.0, 0.6), "z": (0.5, 1.7), "h": 0.75}
 CABINET = {"x": (0.0, 0.6), "z": (3.0, 4.0), "h": 1.90}
 DOOR = {"z": 1.25, "w": 0.90, "h": 2.05}
+
+
+def _short_beam_x(opt: SyntheticOptions) -> tuple[float, float]:
+    return (SHORT_BEAM["x"][0], SHORT_BEAM["x"][0] + opt.short_beam_width)
 
 
 def _columns(opt: SyntheticOptions) -> list[dict]:
@@ -195,7 +200,7 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
     m.rect(np.array([0, BEAM["underside"], 0]), X, Z, -Y, 3, (bx0, bx1), (bz0, bz1))
 
     if opt.short_beam:
-        (sx0, sx1), (sz0, sz1), under = SHORT_BEAM["x"], SHORT_BEAM["z"], opt.short_beam_underside
+        (sx0, sx1), (sz0, sz1), under = _short_beam_x(opt), SHORT_BEAM["z"], opt.short_beam_underside
         m.rect(np.array([sx0, 0, 0]), Z, Y, -X, 1, (sz0, sz1), (under, SHORT_BEAM["top"]))
         m.rect(np.array([sx1, 0, 0]), Z, Y, X, 1, (sz0, sz1), (under, SHORT_BEAM["top"]))
         m.rect(np.array([0, under, 0]), X, Z, -Y, 3, (sx0, sx1), (sz0, sz1))
@@ -214,7 +219,7 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
     l_shape = [((0, 6), (0, 2.5)), ((0, 2.5), (2.5, 4.5))]
     m.rect(o, X, Z, Y, 2, (0, 6), (0, 4.5),
            lambda u, v: _in_rects(u, v, l_shape) & ~_in_rects(u, v, solid))
-    holes = col_rects + ([(CEILING_PATCH["x"], CEILING_PATCH["z"])] if opt.ceiling_patch else []) + [(BEAM["x"], BEAM["z"])] + ([(SHORT_BEAM["x"], SHORT_BEAM["z"])] if opt.short_beam else [])
+    holes = col_rects + ([(CEILING_PATCH["x"], CEILING_PATCH["z"])] if opt.ceiling_patch else []) + [(BEAM["x"], BEAM["z"])] + ([(_short_beam_x(opt), SHORT_BEAM["z"])] if opt.short_beam else [])
     if opt.ceiling_patch:
         m.rect(np.array([0, CEILING_PATCH["y"], 0]), X, Z, -Y, 3, CEILING_PATCH["x"], CEILING_PATCH["z"])
     if opt.ceiling_hole:
