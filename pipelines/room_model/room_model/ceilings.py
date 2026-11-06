@@ -15,6 +15,7 @@ POLYGON_MARGIN = 0.05
 LEVEL_WINDOW = 0.03
 MIN_LEVEL_AREA = 0.3  # m2
 MAX_LEVELS = 8
+MERGE_SIGMAS = 3.0  # neighbouring levels closer than this many sigmas (the larger one) are one rough surface
 GRID = 0.02  # m, plan raster cell
 CLOSING_ITERATIONS = 2
 MIN_COMPONENT_AREA = 0.1  # m2
@@ -205,6 +206,23 @@ def _beam_axis(frame: dict, centre: np.ndarray, polygon: shapely.Polygon) -> lis
     return [[float(x), float(z)] for x, z in (centre + start * u, centre + end * u)]
 
 
+def _merge_rough_levels(levels: list[dict]) -> list[dict]:
+    """Merge levels (highest first) closer than MERGE_SIGMAS sigmas whose regions touch; the level is support-weighted."""
+    levels = list(levels)
+    k = 0
+    while k < len(levels) - 1:
+        a, b = levels[k], levels[k + 1]
+        gap = a["level"] - b["level"]
+        if gap >= MERGE_SIGMAS * max(a["sigma"], b["sigma"]) or not a["region"].buffer(CLOSING_ITERATIONS * GRID + 1e-6).intersects(b["region"]):
+            k += 1
+            continue
+        support = a["support_m2"] + b["support_m2"]
+        levels[k:k + 2] = [{"level": (a["level"] * a["support_m2"] + b["level"] * b["support_m2"]) / support,
+                            "sigma": float(np.hypot(max(a["sigma"], b["sigma"]), gap / 2)), "support_m2": support,
+                            "region": _as_multipolygon(shapely.union_all([a["region"], b["region"]]))}]
+    return levels
+
+
 def _beam(samples: Samples, polygon: shapely.Polygon, frame: dict, level: dict, top: dict) -> dict:
     v, centre = frame["v"], frame["centre"].copy()
     width, width_sigma = frame["minor"], FALLBACK_WIDTH_SIGMA
@@ -270,6 +288,7 @@ def detect(samples: Samples, polygon: shapely.Polygon, floor_level: float) -> Ce
         region = _as_multipolygon(grid.polygon(keep).simplify(SIMPLIFY).intersection(polygon)) if keep.any() else None
         if region is not None and not region.is_empty:
             levels.append({"level": lv["level"], "sigma": lv["sigma"], "region": region, "support_m2": lv["support_m2"]})
+    levels = _merge_rough_levels(levels)
     beams.sort(key=lambda b: (-b["underside"], b["axis"][0]))
     covered = shapely.union_all([lv["region"] for lv in levels] + [_beam_footprint(b, polygon) for b in beams])
     return CeilingResult(levels, beams, float(1.0 - covered.intersection(inner).area / inner.area), unexplained)

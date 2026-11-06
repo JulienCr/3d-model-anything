@@ -33,13 +33,25 @@ def short(tmp_root):
 
 @pytest.fixture(scope="module")
 def patch(tmp_root):
-    ctx, truth = make_case(tmp_root, "patch", ceiling_patch=True, short_beam=True, short_beam_underside=2.16)
+    ctx, truth = make_case(tmp_root, "patch", ceiling_patch=True, patch_drop=0.07, short_beam=True, short_beam_underside=2.16)
     return ctx, truth, shell.build(ctx)
 
 
 @pytest.fixture(scope="module")
 def stout(tmp_root):
     ctx, truth = make_case(tmp_root, "stout", short_beam=True, short_beam_width=0.55)
+    return ctx, truth, shell.build(ctx)
+
+
+@pytest.fixture(scope="module")
+def panel(tmp_root):
+    ctx, truth = make_case(tmp_root, "panel", ceiling_patch=True, patch_drop=0.07, patch_length=1.62)
+    return ctx, truth, shell.build(ctx)
+
+
+@pytest.fixture(scope="module")
+def ripple(tmp_root):
+    ctx, truth = make_case(tmp_root, "ripple", ceiling_patch=True, patch_drop=0.04, patch_length=1.62)
     return ctx, truth, shell.build(ctx)
 
 
@@ -162,13 +174,13 @@ def test_beam_length_is_its_own_extent(short):
     assert np.linalg.norm(np.array(full["axis"][1]) - full["axis"][0]) == pytest.approx(2.50, abs=0.05)
 
 
-def test_levels_a_few_centimetres_apart_stay_separate(patch):
+def test_levels_seven_centimetres_apart_stay_separate(patch):
     ctx, truth, doc = patch
     heights = sorted(_value(doc, c["params"]["level"]) - _floor(doc) for c in _elements(doc, "ceiling"))
-    assert heights == pytest.approx([2.30, 2.468, 2.50], abs=0.008)
+    assert heights == pytest.approx([2.30, 2.43, 2.50], abs=0.008)
     T = truth_to_room(ctx, truth)
     panel = shapely.Polygon([plan_point(T, x, z) for x, z in ((2.0, 1.5), (3.0, 1.5), (3.0, 2.4), (2.0, 2.4))])
-    region = _region(next(c for c in _elements(doc, "ceiling") if abs(_value(doc, c["params"]["level"]) - _floor(doc) - 2.468) < 0.01))
+    region = _region(next(c for c in _elements(doc, "ceiling") if abs(_value(doc, c["params"]["level"]) - _floor(doc) - 2.43) < 0.01))
     assert region.intersection(panel).area / panel.area >= 0.85
     assert region.area < 1.3
     undersides = sorted(_value(doc, b["params"]["underside"]) - _floor(doc) for b in _elements(doc, "beam"))
@@ -209,3 +221,25 @@ def test_shallow_strip_is_not_a_beam(shallow):
     assert len(_elements(doc, "beam")) == 1
     (item,) = doc["diagnostics"]["unexplained_horizontal"]
     assert item["reason"] == "too_shallow"
+
+
+def test_ripple_of_a_few_centimetres_is_one_level(ripple, default):
+    _, _, doc = ripple
+    levels = _elements(doc, "ceiling")
+    assert len(levels) == 2
+    assert not _elements(doc, "beam")[1:] and not doc["diagnostics"]["unexplained_horizontal"]
+    top = _value(doc, levels[0]["params"]["level"]) - _floor(doc)
+    assert top == pytest.approx(2.50 - 0.04 * 0.1, abs=0.015)
+    assert len(_elements(default[2], "ceiling")) == 2
+
+
+def test_noisy_ceiling_stays_one_level_per_height(tmp_root):
+    ctx, _ = make_case(tmp_root, "noisy", noise_m=0.01)
+    assert len(_elements(shell.build(ctx), "ceiling")) == 2
+
+
+def test_lowered_panel_of_ratio_1_8_is_not_a_beam(panel):
+    _, _, doc = panel
+    assert len(_elements(doc, "beam")) == 1
+    assert doc["diagnostics"]["unexplained_horizontal"] == []
+    assert len(_elements(doc, "ceiling")) == 3
