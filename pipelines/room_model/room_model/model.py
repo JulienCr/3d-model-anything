@@ -41,8 +41,9 @@ def mode_median(vals: np.ndarray, lo: float, hi: float, bin_w=0.005, half=0.015,
     return float(np.median(core)), int(len(core))
 
 
-def measure_station(samples: Samples, room: Room, st: Station, heights=(0.8, 1.2, 1.6)) -> dict:
-    """Local wall-to-wall distance of a station at three heights, from the LiDAR samples."""
+def measure_station(samples: Samples, room: Room, st: Station, heights=(0.8, 1.2, 1.6), lateral=None) -> dict:
+    """Local wall-to-wall distance of a station at three heights; `lateral` = expected (a, b) offsets along wall A's normal."""
+    a_at, b_at = (0.0, st.d_roomplan) if lateral is None else lateral
     wa = st.wall_a
     rel = samples.P - (wa.c + wa.x * st.along)
     al, lat = rel @ wa.x, rel @ wa.n
@@ -50,8 +51,8 @@ def measure_station(samples: Samples, room: Room, st: Station, heights=(0.8, 1.2
     per_h = []
     for h in heights:
         band = slab & (np.abs(samples.P[:, 1] - (room.floor_y + h)) < 0.08)
-        a_pos, _ = mode_median(lat[band], -0.12, 0.12)
-        b_pos, _ = mode_median(lat[band], st.d_roomplan - 0.12, st.d_roomplan + 0.12)
+        a_pos, _ = mode_median(lat[band], a_at - 0.12, a_at + 0.12)
+        b_pos, _ = mode_median(lat[band], b_at - 0.12, b_at + 0.12)
         per_h.append(None if a_pos is None or b_pos is None else b_pos - a_pos)
     vals = [v for v in per_h if v is not None]
     return {"width_by_height": per_h,
@@ -59,33 +60,45 @@ def measure_station(samples: Samples, room: Room, st: Station, heights=(0.8, 1.2
             "width_spread_m": float(np.ptp(vals)) if len(vals) >= 2 else None}
 
 
-def build_stations(room: Room, samples: Samples) -> list[Station]:
-    """Candidate stations shifted (max +-0.75 m) onto wall sections the LiDAR sees as clean and RoomPlan-consistent."""
-    stations = []
+def _fitted_lateral(d, st: Station) -> tuple[float, float] | None:
+    """Offsets of the fitted lines of both walls along RoomPlan's normal of wall A at the station; None if a wall is unfitted."""
+    if st.wall_a.label not in d.walls or st.wall_b.label not in d.walls:
+        return None
+    q, n = (st.wall_a.c + st.wall_a.x * st.along)[[0, 2]], st.wall_a.n[[0, 2]]
+    a, b = (d.walls[w.label] for w in (st.wall_a, st.wall_b))
+    return tuple(float((w["offset"] - w["normal"] @ q) / (w["normal"] @ n)) for w in (a, b))
+
+
+def build_stations(room: Room, samples: Samples, d=None) -> list[Station]:
+    """Candidate stations shifted (max +-0.75 m) onto wall sections the LiDAR sees as clean and consistent with the
+    fitted walls `d` (RoomPlan's width when absent). A station in a door is moved out of it, or dropped."""
+    stations, number = [], 0
     for wa, wb, kind, positions, (lo, hi) in room.station_candidates():
         tol = 0.07 if kind == "largeur" else 0.12
         for s0 in positions:
+            number += 1  # a dropped candidate leaves a gap: ids keep the numbering of the unfiltered candidates
             chosen = None
             for sh in [0.0] + [sg * k * 0.15 for k in range(1, 6) for sg in (1, -1)]:
                 s = s0 + sh
                 if sh != 0 and not (lo + 0.3 <= s <= hi - 0.3):
                     continue
                 st = room.station_at(wa, wb, s, kind)
-                if st is None:
+                if st is None or st.door_labels:
                     continue
-                r = measure_station(samples, room, st)
+                lateral = None if d is None else _fitted_lateral(d, st)
+                r = measure_station(samples, room, st, lateral=lateral)
+                expected = st.d_roomplan if lateral is None else lateral[1] - lateral[0]
                 if (r["width_m"] is not None and all(v is not None for v in r["width_by_height"])
-                        and r["width_spread_m"] < 0.03 and abs(r["width_m"] - st.d_roomplan) < tol):
+                        and r["width_spread_m"] < 0.03 and abs(r["width_m"] - expected) < tol):
                     chosen = st
                     break
             if chosen is None:
                 chosen = room.station_at(wa, wb, s0, kind)
-                if chosen is None:
+                if chosen is None or chosen.door_labels:
                     continue
                 chosen.flag = "obstacle_or_uneven_wall"
+            chosen.sid = f"S{number:02d}"
             stations.append(chosen)
-    for k, st in enumerate(stations):
-        st.sid = f"S{k + 1:02d}"
     return stations
 
 
@@ -241,7 +254,7 @@ def build(ctx: StageContext, doc: dict) -> dict:
     room = Room(load_roomplan(ctx.capture, ctx.room), w2r)
     samples = load_samples(ctx, w2r)
     d = _Doc(doc)
-    dimensions = [x for x in (_station_dimension(d, st) for st in build_stations(room, samples)) if x]
+    dimensions = [x for x in (_station_dimension(d, st) for st in build_stations(room, samples, d)) if x]
     dimensions += _height_dimensions(d) + _beam_dimensions(d) + _column_dimensions(d)
     return {**doc, "schema": SCHEMA, "version": VERSION, "dimensions": dimensions}
 
