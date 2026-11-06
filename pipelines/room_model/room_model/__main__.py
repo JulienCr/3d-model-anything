@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import sys
 from pathlib import Path
 
@@ -33,6 +34,10 @@ def build_parser() -> argparse.ArgumentParser:
     parent = _stage_parent()
     for name in (*STAGE_MODULES, "all"):
         sub.add_parser(name, parents=[parent], help=f"run {name}")
+    cmp = sub.add_parser("compare", help="compare a model.json against a reference")
+    cmp.add_argument("--model", type=Path, required=True)
+    cmp.add_argument("--reference", type=Path, required=True)
+    cmp.add_argument("-o", "--output", type=Path, help="write Markdown here instead of stdout")
     return parser
 
 
@@ -58,8 +63,23 @@ def _run_stage(name: str, ctx: StageContext) -> int:
     return 0
 
 
+def _compare(args: argparse.Namespace) -> int:
+    from room_model.compare import compare
+
+    report = compare(json.loads(args.model.read_text(encoding="utf-8")),
+                     json.loads(args.reference.read_text(encoding="utf-8")))
+    if args.output:
+        args.output.write_text(report, encoding="utf-8")
+        print(f"compare: wrote {args.output}")
+    else:
+        print(report)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "compare":
+        return _compare(args)
     ctx = StageContext(args.capture, args.out, args.room, args.turn, args.force, args.keep_work)
     for name in STAGE_MODULES if args.command == "all" else [args.command]:
         code = _run_stage(name, ctx)
