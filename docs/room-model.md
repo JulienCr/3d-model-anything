@@ -67,7 +67,7 @@ Low-support walls (support under 0.5 m2, flag `low_support`): the azimuth of a p
   The beam top is the adjacent higher level with the most cells within 30 cm of the long sides. The axis spans the 2nd-98th percentile extent along the long axis, padded for the trimmed tails (not the room chord); an end within 10 cm of the floor outline is extended onto it.
 - Unexplained horizontal elements go to `diagnostics.unexplained_horizontal` as `{bbox, underside, width, length, reason}` (`suspended`, `too_narrow`, `too_shallow`) and are left out of the ceiling regions; the list is the input of milestone M2 (networks). A strip of the highest level has nothing above it and stays in its region. A duct pressed against the ceiling hides it and is not told from a beam by this test.
 - Columns: vertical wall-class surface that reaches the ceiling, outside the fitted wall bands, with a plausible size (10-150 cm). A rectangle within 6 cm of a wall line (whichever side the wall faces) is engaged on it, on up to two non-parallel walls (a corner column); engaged sides are snapped to the wall and only the remaining sides must be seen. `engaged_wall` is the first engaged wall in outline order and `diagnostics.columns` lists all of them; a cabinet not reaching the ceiling is listed as an unexplained vertical surface.
-- Wall top: the ceiling level holding the most of the points sampled every 10 cm along the wall, 15 cm inside the room, provided it holds at least 20 % of them; ties go to the higher level; otherwise the wall keeps its RoomPlan top.
+- Wall top: the highest ceiling level holding at least 10 % of the points sampled every 10 cm along the wall, 15 cm inside the room (a wall rises to the highest ceiling it meets; one stray corner hit does not count); otherwise the wall keeps its RoomPlan top.
 - Stations: opposite wall pairs measured every metre. A station is accepted when the LiDAR width at three heights agrees within 3 cm and is within 7 cm (12 cm for lengths) of the width between the fitted lines at that position, searched within +-0.75 m. Positions whose line crosses a door span (door width + 10 cm) on either wall are skipped, and a station that finds no position outside the door is dropped; ids keep the numbering of the unfiltered candidates, so a dropped station leaves a gap. A candidate with no clean position stays, flagged `obstacle_or_uneven_wall`.
 - Walls are never moved by faces of an earlier room (`inroom == 0`); RoomPlan walls off the floor outline are listed in `diagnostics.off_outline_walls`.
 
@@ -90,3 +90,7 @@ Edge `i` runs from `polygon[i]` to `polygon[i+1]`; `edge_heights[i]` is its heig
 - No openings (doors, windows) and no wall thickness from jambs: thickness is assumed.
 - Registration poses are written but not yet consumed by the other stages.
 - One room per run, no networks (pipes, ducts), no squared variant, no `room.json`.
+- Ducts or trays pressed against the ceiling hide it, so they look like beams.
+- Soffits that drop less than 14 cm below the neighbouring ceiling are not reported as beams.
+- A narrow ceiling region can be classed as an unexplained strip and lower a wall top.
+- Photo silhouettes (M3) and the site survey (M4) are expected to settle these cases.

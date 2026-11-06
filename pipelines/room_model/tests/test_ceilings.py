@@ -44,12 +44,6 @@ def stout(tmp_root):
 
 
 @pytest.fixture(scope="module")
-def corner(tmp_root):
-    ctx, truth = make_case(tmp_root, "corner", ceiling_patch=True, patch_drop=-0.07)
-    return ctx, truth, shell.build(ctx)
-
-
-@pytest.fixture(scope="module")
 def panel(tmp_root):
     ctx, truth = make_case(tmp_root, "panel", ceiling_patch=True, patch_drop=0.07, patch_length=1.62)
     return ctx, truth, shell.build(ctx)
@@ -307,7 +301,9 @@ def test_chain_of_small_steps_does_not_merge_into_one_level(tmp_root):
     assert max(abs(_value(doc, c["params"]["level"]) - _floor(doc) - 2.37) for c in _elements(doc, "ceiling")) < 0.2
 
 
-def test_wall_top_is_the_level_over_most_of_the_wall(corner):
-    _, truth, doc = corner
+@pytest.mark.parametrize("length, expected", [(1.5, 2.57), (0.675, 2.50)])
+def test_wall_rises_to_a_higher_ceiling_unless_it_is_a_corner_clip(tmp_root, length, expected):
+    ctx, truth = make_case(tmp_root, f"clip-{length}", ceiling_patch=True, patch_drop=-0.07, patch_length=length)
+    doc = shell.build(ctx)
     top = doc["parameters"][f"wall.{wall_labels(doc, truth, 'step')[0]}.top"]
-    assert top["value"] - _floor(doc) == pytest.approx(2.50, abs=0.01)
+    assert top["value"] - _floor(doc) == pytest.approx(expected, abs=0.01)
