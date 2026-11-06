@@ -9,6 +9,43 @@ MAX_ANGLE_DEG = 5.0
 MAX_OFFSET_M = 0.5
 
 
+class InvalidReference(ValueError):
+    """The reference document is malformed; the message (French) names the offending key."""
+
+
+def _is_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and np.isfinite(v)
+
+
+def validate_reference(reference) -> None:
+    if not isinstance(reference, dict):
+        raise InvalidReference("référence invalide : un objet JSON est attendu")
+    n_edges = None
+    if "polygon" in reference:
+        poly = reference["polygon"]
+        ok = isinstance(poly, list) and all(isinstance(p, (list, tuple)) and len(p) == 2 and all(map(_is_number, p)) for p in poly)
+        if not ok:
+            raise InvalidReference("référence invalide : « polygon » doit être une liste de paires [x, z] en mètres")
+        if len(poly) < 3:
+            raise InvalidReference("référence invalide : « polygon » doit avoir au moins 3 sommets")
+        n_edges = len(poly)
+    if "edge_heights" in reference:
+        heights = reference["edge_heights"]
+        if not isinstance(heights, list) or not all(map(_is_number, heights)):
+            raise InvalidReference("référence invalide : « edge_heights » doit être une liste de nombres")
+        if n_edges is None:
+            raise InvalidReference("référence invalide : « edge_heights » demande un « polygon »")
+        if len(heights) != n_edges:
+            raise InvalidReference(f"référence invalide : « edge_heights » compte {len(heights)} valeurs pour {n_edges} arêtes")
+    if "dimensions" in reference:
+        dims = reference["dimensions"]
+        if not isinstance(dims, dict):
+            raise InvalidReference("référence invalide : « dimensions » doit associer un id à une valeur en mètres")
+        for key, value in dims.items():
+            if not _is_number(value):
+                raise InvalidReference(f"référence invalide : « dimensions.{key} » n'est pas un nombre")
+
+
 def _edges(polygon) -> list[dict]:
     pts = np.asarray(polygon, dtype=float)
     out = []
@@ -83,14 +120,16 @@ def _dimensions_section(model: dict, reference: dict) -> list[str]:
             lines.append(f"| {dim_id} | absente | {ref:.3f} | | |")
             continue
         delta = d["value"] - ref
-        lines.append(f"| {dim_id} | {d['value']:.3f} | {ref:.3f} | {_cm(delta)} | {delta / d['sigma']:+.1f} |")
+        ratio = f"{delta / d['sigma']:+.1f}" if d["sigma"] > 0 else "n/a"
+        lines.append(f"| {dim_id} | {d['value']:.3f} | {ref:.3f} | {_cm(delta)} | {ratio} |")
     return lines + [""]
 
 
 def compare(model: dict, reference: dict) -> str:
     """Markdown report of model minus reference; every reference key is optional (metres, room frame)."""
+    validate_reference(reference)
     lines = ["# Comparaison modèle / référence", ""]
-    if reference.get("polygon"):
+    if "polygon" in reference:
         lines += _walls_section(model, reference)
     if reference.get("dimensions"):
         lines += _dimensions_section(model, reference)

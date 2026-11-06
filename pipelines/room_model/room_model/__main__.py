@@ -64,10 +64,20 @@ def _run_stage(name: str, ctx: StageContext) -> int:
 
 
 def _compare(args: argparse.Namespace) -> int:
-    from room_model.compare import compare
+    from room_model.compare import InvalidReference, compare
 
-    report = compare(json.loads(args.model.read_text(encoding="utf-8")),
-                     json.loads(args.reference.read_text(encoding="utf-8")))
+    docs = []
+    for label, path in (("modèle", args.model), ("référence", args.reference)):
+        try:
+            docs.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError) as exc:
+            print(f"{label} illisible ({path}) : {exc}", file=sys.stderr)
+            return 1
+    try:
+        report = compare(*docs)
+    except InvalidReference as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     if args.output:
         args.output.write_text(report, encoding="utf-8")
         print(f"compare: wrote {args.output}")

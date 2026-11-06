@@ -77,3 +77,45 @@ def test_compare_cli_writes_file(doc, tmp_path):
     out = tmp_path / "compare.md"
     assert cli.main(["compare", "--model", str(tmp_path / "model.json"), "--reference", str(tmp_path / "ref.json"), "-o", str(out)]) == 0
     assert "S01" in out.read_text(encoding="utf-8")
+
+
+def run_cli(tmp_path, doc, reference, capsys):
+    (tmp_path / "model.json").write_text(json.dumps(doc), encoding="utf-8")
+    ref = tmp_path / "ref.json"
+    if isinstance(reference, str):
+        ref.write_text(reference, encoding="utf-8")
+    elif reference is not None:
+        ref.write_text(json.dumps(reference), encoding="utf-8")
+    code = cli.main(["compare", "--model", str(tmp_path / "model.json"), "--reference", str(ref)])
+    return code, capsys.readouterr().err
+
+
+@pytest.mark.parametrize("reference", [None, "{not json"])
+def test_compare_cli_unreadable_reference(doc, tmp_path, capsys, reference):
+    code, err = run_cli(tmp_path, doc, reference, capsys)
+    assert code == 1 and "référence illisible" in err and "Traceback" not in err
+
+
+@pytest.mark.parametrize("polygon", [None, [1, 2, 3], [[0, 0], [1, "a"], [2, 2]], [[0, 0], [1, 0]]])
+def test_compare_cli_bad_polygon(doc, tmp_path, capsys, polygon):
+    code, err = run_cli(tmp_path, doc, {"polygon": polygon}, capsys)
+    assert code == 1 and "polygon" in err
+
+
+def test_compare_cli_edge_heights_length(doc, tmp_path, capsys):
+    ref = {"polygon": [[0, 0], [1, 0], [1, 1]], "edge_heights": [2.5, 2.5]}
+    code, err = run_cli(tmp_path, doc, ref, capsys)
+    assert code == 1 and "edge_heights" in err
+
+
+def test_compare_cli_non_numeric_dimension(doc, tmp_path, capsys):
+    code, err = run_cli(tmp_path, doc, {"dimensions": {"S01": "2.5m"}}, capsys)
+    assert code == 1 and "dimensions.S01" in err
+
+
+def test_compare_zero_sigma_shows_na(doc):
+    flat = json.loads(json.dumps(doc))
+    for d in flat["dimensions"]:
+        d["sigma"] = 0.0
+    s01 = next(r for r in rows(compare.compare(flat, {"dimensions": {"S01": 2.4}}), "## Dimensions") if r[0] == "S01")
+    assert s01[4] == "n/a"
