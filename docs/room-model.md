@@ -51,13 +51,13 @@ Every parameter carries `value`, `sigma`, `unit` and `source` (`lidar`, `roompla
 
 Constants: `SIGMA_SYS_OFFSET = 0.01 m`, `SIGMA_SYS_AZIMUTH = 0.25 deg`, `SIGMA_SUPPORT = 0.014 m` (the support term: 2 cm at 0.5 m2, 4.5 cm at 0.1 m2, below 0.5 cm from 8 m2). When a wall has too little LiDAR support, the RoomPlan plane is kept with a fallback sigma of 5 cm and 2 deg (flag `roomplan_fallback`). Wall thickness is assumed: 20 cm, sigma 5 cm.
 
-Misplaced walls (flag `shifted_seed`): RoomPlan walls can sit 20-30 cm from the surface. The wall-facing vertical samples inside the wall rectangle within 30 cm of the RoomPlan plane are histogrammed in 1 cm bins; the mode with the most support (at least 0.3 m2 within 4 cm; modes within 10 % of the best tie and the outer one wins, walls being behind furniture) is refitted inside 8 cm. It replaces the fit on the RoomPlan plane only when it is more than 8 cm away and has twice the support, or when the RoomPlan plane has no fit. Walls shorter than about 0.5 m keep the RoomPlan plane: there is nothing to measure.
+Misplaced walls (flag `shifted_seed`): a RoomPlan wall can sit away from the real surface. The wall-facing vertical samples inside the wall rectangle within 30 cm of the RoomPlan plane are histogrammed in 1 cm bins; the mode with the most support (at least 0.3 m2 within 4 cm; modes within 10 % of the best tie and the outer one wins, walls being behind furniture) is refitted inside 8 cm. It replaces the fit on the RoomPlan plane only when it is more than 8 cm away and has twice the support, or when the RoomPlan plane has no fit. Walls shorter than about 0.5 m keep the RoomPlan plane: there is nothing to measure.
 
 Low-support walls (support under 0.5 m2, flag `low_support`): the azimuth of a patch that small is not trustworthy, so the wall keeps the RoomPlan azimuth (source `roomplan`, sigma 2 deg). Its offset is the LiDAR fit evaluated at the fit centroid along the RoomPlan normal (source `lidar`), with the support term above dominating the offset sigma. `diagnostics.walls[*].angle_vs_roomplan_deg` still reports the fitted angle.
 
 ## Detection rules
 
-- Ceilings: height histogram of upward-facing LiDAR samples above 1.6 m; every level covering at least 0.3 m2 becomes a ceiling, so a patch the LiDAR never saw makes none. Once a level is picked, samples within 3 cm of it are removed from the histogram, so two levels 3 cm or more apart stay separate; a sample belongs to its nearest level only, which keeps the region of a level from absorbing the tail of its neighbour. Afterwards, two levels closer than 3 sigmas (the larger of the two) whose regions touch are merged into one support-weighted level, because a rough surface (sprayed insulation, tiles) otherwise breaks into dozens of fragments at 2-4 cm steps. Beams are detected before the merge, on the unmerged levels. A merged level spans at most 4 cm, so a chain of 2-4 cm steps cannot walk across a real step. The 3 cm level separation of the first couloir pass is therefore gone on purpose: a 3.2 cm lowered panel merges with its neighbour (the synthetic panel of that test now sits 7 cm lower).
+- Ceilings: height histogram (window 3 cm) of ceiling-facing LiDAR samples (normal pointing down) above 1.6 m; every level covering at least 0.3 m2 becomes a ceiling, so a patch the LiDAR never saw makes none. Once a level is picked, samples within 3 cm of it are removed, and a sample belongs to its nearest level only. Beams are detected on these unmerged levels. Then touching levels closer than 3 times the larger of their two sigmas merge into one support-weighted level, with a merged span of at most 4 cm: steps of about 3-4 cm or less are absorbed, larger steps stay separate.
 - Strip-shaped lower-level components (minor side up to 80 cm, ratio at least 2) get one of five verdicts, in this order:
   - `suspended` (unexplained): ceiling samples are seen above at least 30 % of the strip's cells, so the ceiling continues over it: fixtures, trays and ducts hang below a visible ceiling, a beam hides it.
   - `too_narrow` (unexplained): under 15 cm wide.
@@ -66,10 +66,54 @@ Low-support walls (support under 0.5 m2, flag `low_support`): the azimuth of a p
   - Beam to verify `Beam_<k>` with `flags: ["to_verify"]`: none of the above, so a probable beam whose sides are not both seen. Parameters keep `source: lidar`. `report.md` lists it in `Poutres` (« à vérifier ») and in `Alertes`, `plan.svg` labels it with a trailing « ? », the GLB puts it under the root node `À vérifier` instead of `Coque`, and its dimensions carry the flag.
   The beam top is the adjacent higher level with the most cells within 30 cm of the long sides. The axis spans the 2nd-98th percentile extent along the long axis, padded for the trimmed tails (not the room chord); an end within 10 cm of the floor outline is extended onto it.
 - Unexplained horizontal elements go to `diagnostics.unexplained_horizontal` as `{bbox, underside, width, length, reason}` (`suspended`, `too_narrow`, `too_shallow`) and are left out of the ceiling regions; the list is the input of milestone M2 (networks). A strip of the highest level has nothing above it and stays in its region. A duct pressed against the ceiling hides it and is not told from a beam by this test.
-- Columns: vertical wall-class surface that reaches the ceiling, outside the fitted wall bands, with a plausible size (10-150 cm). A rectangle within 6 cm of a wall line (whichever side the wall faces) is engaged on it, on up to two non-parallel walls (a corner column); engaged sides are snapped to the wall and only the remaining sides must be seen. `engaged_wall` is the first engaged wall in outline order and `diagnostics.columns` lists all of them; a cabinet not reaching the ceiling is listed as an unexplained vertical surface.
+- Columns: vertical surface of any class except table, seat, window and door that reaches the ceiling, outside the fitted wall bands, with a plausible size (10-150 cm). A rectangle within 6 cm of a wall line (whichever side the wall faces) is engaged on it, on up to two non-parallel walls (a corner column); engaged sides are snapped to the wall and only the remaining sides must be seen. `engaged_wall` is the first engaged wall in outline order and `diagnostics.columns` lists all of them; a cabinet not reaching the ceiling is listed as an unexplained vertical surface.
 - Wall top: the highest ceiling level lying over at least 0.30 m of the wall, sampled every 10 cm and 15 cm inside the room (a wall rises to the highest ceiling it meets; a shorter corner clip does not count); otherwise the wall keeps its RoomPlan top.
 - Stations: opposite wall pairs measured every metre. A station is accepted when the LiDAR width at three heights agrees within 3 cm and is within 7 cm (12 cm for lengths) of the width between the fitted lines at that position, searched within +-0.75 m. Positions whose line crosses a door span (door width + 10 cm) on either wall are skipped, and a station that finds no position outside the door is dropped; ids keep the numbering of the unfiltered candidates, so a dropped station leaves a gap. A candidate with no clean position stays, flagged `obstacle_or_uneven_wall`.
 - Walls are never moved by faces of an earlier room (`inroom == 0`); RoomPlan walls off the floor outline are listed in `diagnostics.off_outline_walls`.
+
+## Outputs
+
+Everything below is written under `--out`. Coordinates are in metres in the room frame (+Y up, plan `[x, z]`).
+
+### `model_measured.glb`
+
+- Root nodes: `Coque` (extras `kind: "shell"`, `schema`, `version`) holds the elements of the shell; `À vérifier` (extras `kind: "to_verify"`) exists only when an element carries the flag `to_verify`, and holds those elements instead.
+- One mesh node per element, named by its element id: `Floor`, `Wall_M1`, `Ceiling_1`, `Beam_1`, `Column_1`. Walls are prisms behind the interior face, extended past their end by their thickness. A beam or column `top` is the ceiling level it meets, copied from the ceiling, not measured on its own.
+- Node `extras`: `kind` (`floor`, `wall`, `ceiling`, `beam`, `column`), `params` (per parameter name: `{id, value, sigma, source}`) and `flags` (list).
+
+### `model.json`
+
+`model.json` is `shell.json` (schema `room-model/shell-1`) with `schema: "room-model/1"`, `version` and a `dimensions` list. Each entry: `id`, `kind`, `label` (French), `value` and `sigma` (m), `elements` (element ids such as `Wall_M1`), `at` (`[x, z]` or `null`), `source` (the weakest source among the parameters used: `assumed` < `roomplan` < `lidar`) and `flags` (list).
+
+| Id | Kind | Meaning |
+|---|---|---|
+| `S01`, `S02`, ... | `width`, `length` | Station between two opposite walls; numbering follows the unfiltered candidates, so a dropped station leaves a gap |
+| `H1`, `H2`, ... | `ceiling_height` | Floor to ceiling level `k` |
+| `B1-u`, `B1-w` | `beam_underside`, `beam_width` | Floor to beam underside; beam width |
+| `COL1-x`, `COL1-z` | `column_size` | Column size along x or z |
+| `COL1-dx`, `COL1-dz` | `column_offset` | Gap between a column face and the nearest wall that does not engage it |
+
+`engaged_wall` of a column holds a wall label (`M1`), and so does `diagnostics.columns[*].engaged_walls`; `elements` always hold element ids (`Wall_M1`).
+
+### `dimensions.csv`
+
+Columns: `id`, `kind`, `label`, `value_cm`, `sigma_cm`, `source`, `elements` (ids joined with `;`), `flags` (flags joined with `;`, empty when there are none).
+
+### Flags
+
+| Where | Flag | Meaning |
+|---|---|---|
+| Wall `flags` | `roomplan_fallback` | No LiDAR fit, RoomPlan plane kept |
+| | `shifted_seed` | Surface found away from the RoomPlan plane |
+| | `low_support` | Support under 0.5 m2, RoomPlan azimuth kept |
+| | `seeded_from_outline` | Wall absent from RoomPlan, built from the floor outline |
+| | `near_parallel_corner` | Corner with a near-parallel neighbour, obtained by projection |
+| Beam `flags` and its dimensions | `to_verify` | Probable beam whose sides are not both seen |
+| Station dimension `flags` | `obstacle_or_uneven_wall` | No clean wall section found for the station; measure with caution (`~` in `plan.svg`) |
+| `diagnostics.flags` | `floor:roomplan_fallback`, `columns:no_ceiling` | Floor level not seen; no ceiling, so no columns |
+| | `<label>:<wall flag>` | Wall flag repeated per wall, for example `M3:shifted_seed` |
+
+`plan.svg` is the dimensioned top view and `report.md` the French report: inputs, registration, per-wall table, floor, ceilings, beams, columns, unexplained surfaces, orthogonality, alerts.
 
 ## Comparing against a reference
 

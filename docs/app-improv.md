@@ -1,10 +1,8 @@
 # House Capture app: improvements suggested by the room-model pipeline
 
-The room-model pipeline (`docs/specs/room-model-pipeline.md`) turns a capture into dimensions. Its first
-run on a real room showed where the capture limits the result. This list proposes changes to
-`apps/house-capture`, most useful first.
-
-Figures come from that first room: 12 walls, 183 photos.
+The room-model pipeline (`docs/specs/room-model-pipeline.md`) turns a capture into dimensions. Runs on
+real rooms showed where the capture limits the result. This list proposes changes to
+`apps/house-capture`, most useful first. It states no figure from a real room.
 
 ## What the app already does
 
@@ -19,9 +17,9 @@ pipeline's measurements, however, come from LiDAR.
 
 ## 1. Show what the LiDAR has not seen
 
-**Problem.** 19 % of the ceiling had no LiDAR surface. Four of the 12 walls had less than 0.5 m² of
-LiDAR support. These were short returns and the sides of a pillar. Their angles are then
-unreliable: one fitted corner reads 94° instead of about 90°.
+**Problem.** A share of the ceiling had no LiDAR surface, and several short walls had very little LiDAR
+support (short returns, the sides of a pillar). Their angles are then unreliable: a fitted corner can
+read well away from the right angle it has in reality.
 
 **Proposal.**
 - A separate overlay layer for "no mesh here" on RoomPlan's surfaces. RoomPlan's walls and ceiling
@@ -33,8 +31,8 @@ unreliable: one fitted corner reads 94° instead of about 90°.
 ## 2. Take more photos, on purpose
 
 **Problem.** Auto-photo stops once coverage is reached, so each surface tends to be seen once. In
-the pose refinement, a 3D point is seen by 2.9 photos on average. 33 of the 183 photos had too few
-matches to be refined. Thin pipes (later milestones) need at least 3 views with real parallax.
+the pose refinement, a 3D point is seen by only a few photos on average, and some photos could not be
+refined for lack of matches. Thin pipes (later milestones) need at least 3 views with real parallax.
 
 **Proposal.**
 - A "geometry" photo density setting: a target of N views per surface point (default 3), from
@@ -46,15 +44,15 @@ matches to be refined. Thin pipes (later milestones) need at least 3 views with 
 ## 3. Guided ceiling pass
 
 **Problem.** Ceilings carry what matters most after walls: levels, beams and their undersides, ducts.
-People scan at eye height and tilt the phone up too little. The first room's ceiling had 4 levels
-plus a beam, and the 19 % hole sits on the ceiling.
+People scan at eye height and tilt the phone up too little. A ceiling with several levels and a beam
+is easy to under-scan, and the unseen share of the ceiling is where such holes sit.
 
 **Proposal.** A short guided step, "point at the ceiling and walk the room". It ends when ceiling
 LiDAR coverage reaches the target, with beams highlighted while they are being swept.
 
 ## 4. Warn on low-texture photos
 
-**Problem.** Close-ups of blank walls cannot be matched, which is what kept those 33 photos at their
+**Problem.** Close-ups of blank walls cannot be matched, which is what keeps some photos at their
 ARKit pose.
 
 **Proposal.** Compute a cheap feature count (corners) on the preview. When it is low, prefer a frame
