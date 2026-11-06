@@ -114,6 +114,9 @@ def test_missing_wall_falls_back_to_roomplan(no_wing):
     label = _labels(doc, truth, "wing_east")[0]
     assert doc["parameters"][f"wall.{label}.offset"]["source"] == "roomplan"
     assert _sigma(doc, label, "offset") >= 0.05
+    entry = doc["diagnostics"]["walls"][label]
+    assert entry["n_points"] == 0 and len(entry["centroid"]) == 2
+    assert set(doc["diagnostics"]["walls"]) == {e["label"] for e in doc["elements"] if e["kind"] == "wall"}
     assert "roomplan_fallback" in next(e for e in doc["elements"] if e.get("label") == label)["flags"]
     for (a, b), true_width in truth.widths.items():
         if "wing_east" not in (a, b):

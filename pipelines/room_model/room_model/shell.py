@@ -69,6 +69,10 @@ def _wall_lines(room: Room, samples: Samples) -> tuple[list[dict], dict, dict]:
             n_h, offset, source = seed_h, float(seed_h @ wall.c[[0, 2]]), "roomplan"
             sig_off, sig_az = FALLBACK_OFFSET_SIGMA, FALLBACK_AZIMUTH_SIGMA
             flags.append("roomplan_fallback")
+            diag[wall.label] = {
+                "rms_cm": None, "support_m2": None, "offset_vs_roomplan_cm": 0.0, "angle_vs_roomplan_deg": 0.0,
+                "tilt_deg": None, "n_points": 0, "centroid": [float(wall.c[0]), float(wall.c[2])],
+            }
         else:
             n_h = _horizontal(fit.normal)
             offset, source = float(n_h @ fit.point[[0, 2]]), "lidar"
