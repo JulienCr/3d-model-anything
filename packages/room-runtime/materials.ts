@@ -95,6 +95,26 @@ export function textured(o: TexturedOptions): THREE.MeshStandardMaterial {
   });
 }
 
+/** Load a room-specific texture that may be absent (git-ignored own-photo assets); resolves null when missing. */
+export async function loadOptionalTexture(path: string, repeat: [number, number], color = true) {
+  try {
+    const t = await loader.loadAsync(path);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(...repeat);
+    t.anisotropy = 8;
+    if (color) t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  } catch {
+    return null;
+  }
+}
+
+/** Name each material of a palette after its key, so exports and Blender show roles instead of "Material.012". */
+export function nameMaterials<T extends Record<string, unknown>>(palette: T): T {
+  for (const [key, value] of Object.entries(palette)) if (value instanceof THREE.Material && !value.name) value.name = key;
+  return palette;
+}
+
 // --- procedural canvas textures -------------------------------------------
 
 function canvasTexture(size: number, draw: (ctx: CanvasRenderingContext2D, size: number) => void) {

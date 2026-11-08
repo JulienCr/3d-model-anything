@@ -50,6 +50,8 @@ A new room goes in `demos/<id>/` and is registered in `demos/index.ts`. The offi
 
 Blender export (glTF, deterministic): see [docs/export.md](docs/export.md).
 
+Setting up the private rooms on another computer: see [docs/environments.md](docs/environments.md).
+
 ## Privacy and licensing
 
 Only the office example is distributed. No other rooms, connected-house layout, original scan bundles, or development Git history are included. Keep your captures private; inspect assets before publishing your own demo.
