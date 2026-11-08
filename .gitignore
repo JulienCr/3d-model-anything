@@ -17,3 +17,17 @@ data/exports/
 apps/house-capture/release/screenshots/
 
 HouseCapture.xcodeproj/
+
+# personal rooms: restored from a private drive by tools/drive-sync.mjs, never committed
+data/demos/atrium/
+data/demos/trone/
+data/demos/couloir/
+data/web-assets/atrium/
+data/web-assets/trone/
+data/web-assets/couloir/
+
+# Private rooms: code stays on the local-only branch "environments"
+/demos/atrium/
+/demos/trone/
+/demos/couloir/
+/docs/environments.md

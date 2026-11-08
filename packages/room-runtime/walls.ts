@@ -40,6 +40,13 @@ export function wallMatrix(w: WallDef) {
   return new THREE.Matrix4().makeBasis(w.u, new THREE.Vector3(0, 1, 0), w.n).setPosition(w.origin);
 }
 
+/** Wall-local placement: +x along the wall, +y up, +z into the room. */
+export function onWall<T extends THREE.Object3D>(obj: T, def: WallDef, u: number, v: number, out = 0) {
+  obj.quaternion.setFromRotationMatrix(wallMatrix(def));
+  obj.position.copy(wallPoint(def, u, v, out));
+  return obj;
+}
+
 // --- profiles ([s, t] — s: into the molding's field, t: out from the surface) ---
 
 const PANEL_PROFILE: [number, number][] = [
