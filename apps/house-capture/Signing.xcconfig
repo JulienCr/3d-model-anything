@@ -1,0 +1,3 @@
+// Upstream defaults. Personal team and bundle id go in Signing.local.xcconfig (gitignored).
+PRODUCT_BUNDLE_IDENTIFIER = com.wesbos.housecapture
+#include? "Signing.local.xcconfig"

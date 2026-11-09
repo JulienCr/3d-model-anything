@@ -31,3 +31,5 @@ data/web-assets/couloir/
 /demos/trone/
 /demos/couloir/
 /docs/environments.md
+
+apps/house-capture/Signing.local.xcconfig
