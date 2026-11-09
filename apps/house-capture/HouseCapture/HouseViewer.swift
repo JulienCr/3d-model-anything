@@ -44,6 +44,9 @@ final class PreviewModel: ObservableObject {
 
   @Published private(set) var style: RenderStyle = .photo
   @Published private(set) var styles: [RenderStyle] = []
+  @Published private(set) var coverageKind: CoverageKind = .photo
+  /// share of the shown rooms' walls, floor and ceiling reached by LiDAR (0...1), nil until measured
+  @Published private(set) var lidarFraction: Double?
   @Published private(set) var plan = false
   /// plan cut, meters above the floor
   @Published var cutHeight: Float = 1.4 { didSet { applyClip() } }
@@ -78,6 +81,8 @@ final class PreviewModel: ObservableObject {
   private var assets: [MeshAsset] = []
   private var allPhotos: [PreviewPhoto] = []
   private var bakeCancel = CancelFlag()
+  private var lidarCancel = CancelFlag()
+  private var lidarPending = Set<String>()
   private var started = false
   private var loadSeconds: Double = 0
   private var overlayTask: Task<Void, Never>?
@@ -305,6 +310,56 @@ final class PreviewModel: ObservableObject {
     scene.setStyle(s)
   }
 
+  /// false when no shown room has a RoomPlan layout: all-blue would read as fully covered
+  var hasLidarReference: Bool { assets.contains { $0.room.layout != nil && visibleRooms.contains($0.room.id) } }
+
+  func setCoverageKind(_ k: CoverageKind) {
+    guard k != coverageKind else { return }
+    coverageKind = k
+    scene.setCoverageKind(k)
+    if k == .lidar { computeLidar() }
+    refreshLidarFraction()
+  }
+
+  func cancelLidar() {
+    lidarCancel.cancel()
+    lidarCancel = CancelFlag()
+    lidarPending = []
+  }
+
+  private func computeLidar() {
+    let sessions = source.sessions
+    for asset in assets where asset.lidar == nil && !lidarPending.contains(asset.room.id) {
+      guard let layoutURL = asset.room.layout else { continue }
+      let id = asset.room.id
+      let toHouse = sessions.first { $0.index == asset.room.session }?.toHouse ?? matrix_identity_float4x4
+      let flag = lidarCancel
+      lidarPending.insert(id)
+      Task {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        let result = await Task.detached(priority: .userInitiated) { () -> LidarCoverage.Result? in
+          guard let layout = RoomLayout.load(layoutURL) else { return nil }
+          return LidarCoverage.compute(mesh: asset.mesh, layout: layout, toHouse: toHouse) { flag.isCancelled }
+        }.value
+        guard !flag.isCancelled else { return }
+        lidarPending.remove(id)
+        guard let result else { return }
+        asset.lidar = result
+        scene.lidarChanged(for: id)
+        refreshLidarFraction()
+        log(String(format: "lidar coverage %@: %.1f of %.1f m2 (%.0f%%) in %.0f ms", asset.room.name,
+                   result.covered, result.total, 100 * Double(result.covered / max(result.total, 0.001)),
+                   (CFAbsoluteTimeGetCurrent() - t0) * 1000))
+      }
+    }
+  }
+
+  private func refreshLidarFraction() {
+    let shown = assets.filter { visibleRooms.contains($0.room.id) }.compactMap(\.lidar)
+    let total = shown.reduce(0) { $0 + $1.total }
+    lidarFraction = total > 0 ? Double(shown.reduce(0) { $0 + $1.covered } / total) : nil
+  }
+
   func togglePlan() {
     if walkthrough { endWalkthrough() }
     plan.toggle()
@@ -352,6 +407,7 @@ final class PreviewModel: ObservableObject {
   private func applyFilter(_ v: Set<String>) {
     visibleRooms = v
     scene.setVisibleRooms(v, surroundings: showSurroundings)
+    refreshLidarFraction()
     refreshPhotoList()
     if walkthrough { scene.setPhotos(photos) ; loadMarkerThumbnails() }
     scene.resetView(animated: true)
@@ -569,7 +625,7 @@ struct PreviewScreen: View {
     .preferredColorScheme(.dark)
     .environment(\.colorScheme, .dark)
     .onAppear { model.start() }
-    .onDisappear { model.cancelBake() }
+    .onDisappear { model.cancelBake(); model.cancelLidar() }
   }
 
   @ViewBuilder private var overlays: some View {
@@ -763,13 +819,42 @@ struct PreviewScreen: View {
   @ViewBuilder private var legend: some View {
     switch model.style {
     case .coverage:
-      LegendView(items: [(Color(red: 1, green: 0.23, blue: 0.19), "Needs photos"), (Color(red: 1, green: 0.8, blue: 0), "Almost"),
-                         (Color(red: 0.2, green: 0.78, blue: 0.35), "Done"), (Color(white: 0.6), "Outside room")])
+      VStack(alignment: .trailing, spacing: 8) {
+        if model.hasLidarReference { coverageSwitch }
+        if model.coverageKind == .lidar {
+          let scanned = model.lidarFraction.map { "Scanned · \(Int(($0 * 100).rounded())) %" } ?? "Scanned"
+          LegendView(items: [(Color(red: 1, green: 0.58, blue: 0), "No LiDAR"), (Color(red: 0.2, green: 0.55, blue: 1), scanned),
+                             (Color(white: 0.6), "Outside room")])
+        } else {
+          LegendView(items: [(Color(red: 1, green: 0.23, blue: 0.19), "Needs photos"), (Color(red: 1, green: 0.8, blue: 0), "Almost"),
+                             (Color(red: 0.2, green: 0.78, blue: 0.35), "Done"), (Color(white: 0.6), "Outside room")])
+        }
+      }
     case .sessions:
       LegendView(items: model.sessions.filter { model.isSessionVisible($0.index) }.map { (Color(uiColor: $0.hue), $0.title) })
     default:
       EmptyView()
     }
+  }
+
+  private var coverageSwitch: some View {
+    HStack(spacing: 2) {
+      ForEach([CoverageKind.photo, .lidar], id: \.self) { k in
+        Button {
+          withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { model.setCoverageKind(k) }
+        } label: {
+          Text(k == .photo ? "Photo" : "LiDAR")
+            .font(.system(size: 12, weight: .semibold))
+            .padding(.horizontal, 14).frame(height: 30)
+            .foregroundStyle(model.coverageKind == k ? Color.black : Color.white)
+            .background { if model.coverageKind == k { Capsule().fill(PreviewTheme.accent) } }
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+      }
+    }
+    .padding(3)
+    .glass(Capsule())
   }
 
   private var stylePicker: some View {

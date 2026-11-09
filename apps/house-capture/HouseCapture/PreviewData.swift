@@ -44,6 +44,8 @@ struct PreviewRoom: Identifiable, Hashable {
   let name: String
   let mesh: URL
   let usdz: URL?
+  /// RoomPlan's JSON for the room, the reference surfaces for LiDAR coverage
+  var layout: URL? = nil
   var id: String { "\(session)/\(index)" }
 }
 
@@ -120,9 +122,11 @@ struct PreviewSource {
 
   private static func roomEntry(_ s: PreviewSession, index: Int, name: String) -> PreviewRoom {
     let usdz = s.folder.appendingPathComponent("rooms/room-\(index).usdz")
+    let layout = s.folder.appendingPathComponent("rooms/room-\(index).json")
     return PreviewRoom(session: s.index, index: index, name: name,
                        mesh: s.folder.appendingPathComponent("mesh/room-\(index).ply"),
-                       usdz: FileManager.default.fileExists(atPath: usdz.path) ? usdz : nil)
+                       usdz: FileManager.default.fileExists(atPath: usdz.path) ? usdz : nil,
+                       layout: FileManager.default.fileExists(atPath: layout.path) ? layout : nil)
   }
 
   private static func roomsInBundle(_ s: PreviewSession) -> [PreviewRoom] {
@@ -203,9 +207,9 @@ struct BundleManifest: Decodable {
 /// ("surroundings": hallways, views through doors) of the newest room per session, minus anything
 /// already covered by a shown room or by a newer session's surroundings.
 enum SurroundingsFilter {
-  private static let voxel: Float = 0.08
+  static let voxel: Float = 0.08
 
-  @inline(__always) private static func key(_ p: SIMD3<Float>) -> Int64 {
+  @inline(__always) static func key(_ p: SIMD3<Float>) -> Int64 {
     let x = Int64(floor(p.x / voxel)) & 0x1FFFFF, y = Int64(floor(p.y / voxel)) & 0x1FFFFF, z = Int64(floor(p.z / voxel)) & 0x1FFFFF
     return (x << 42) | (y << 21) | z
   }

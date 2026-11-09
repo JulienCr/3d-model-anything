@@ -191,14 +191,16 @@ struct FieldworkRoomScreen: View {
 private struct FieldworkRoomPreview: View {
   @Environment(\.horizontalSizeClass) private var sizeClass
   @StateObject private var model: PreviewModel
-  @State private var coverage = false
+  /// nil shows the plain 3D scan
+  @State private var mode: CoverageKind?
   @State private var expanded = false
   init(source: PreviewSource) { _model = StateObject(wrappedValue: PreviewModel(source: source)) }
   var body: some View {
     VStack(spacing: 12) {
-      Picker("Preview style", selection: $coverage) {
-        Text("3D").tag(false)
-        Text("Photo detail").tag(true)
+      Picker("Preview style", selection: $mode) {
+        Text("3D").tag(CoverageKind?.none)
+        Text("Photo detail").tag(CoverageKind?.some(.photo))
+        if model.hasLidarReference { Text("LiDAR").tag(CoverageKind?.some(.lidar)) }
       }.pickerStyle(.segmented).disabled(model.phase != .ready || !model.styles.contains(.coverage))
       ZStack {
         if !expanded { PreviewSceneView(scene: model.scene) }
@@ -211,7 +213,7 @@ private struct FieldworkRoomPreview: View {
       .frame(height: sizeClass == .regular ? 420 : 280).clipped()
       .overlay(FieldworkCorners().stroke(Fieldwork.orange, lineWidth: 1.5).allowsHitTesting(false))
       HStack {
-        Text(coverage ? "Green surfaces have useful photos" : "Drag to rotate · pinch to zoom")
+        Text(caption)
           .font(.caption).foregroundStyle(Fieldwork.secondary)
         Spacer()
         Button {
@@ -223,13 +225,26 @@ private struct FieldworkRoomPreview: View {
       }
     }
     .onAppear { paperBackground(); model.start() }
-    .onDisappear { if !expanded { model.cancelBake() } }
-    .onChange(of: coverage) { _, value in model.setStyle(value ? .coverage : .photo) }
+    .onDisappear { if !expanded { model.cancelBake(); model.cancelLidar() } }
+    .onChange(of: mode) { _, value in
+      guard let value else { model.setStyle(.photo); return }
+      model.setCoverageKind(value)
+      model.setStyle(.coverage)
+    }
     .fullScreenCover(isPresented: $expanded, onDismiss: {
       paperBackground()
-      coverage = model.style == .coverage
-      if !coverage, model.styles.contains(.photo) { model.setStyle(.photo) }
+      mode = model.style == .coverage ? model.coverageKind : nil
+      if mode == nil, model.styles.contains(.photo) { model.setStyle(.photo) }
     }) { PreviewScreen(model: model) }
+  }
+  private var caption: String {
+    switch mode {
+    case nil: "Drag to rotate · pinch to zoom"
+    case .photo: "Green surfaces have useful photos"
+    case .lidar:
+      model.lidarFraction.map { "Orange areas were not reached by LiDAR · \(Int(($0 * 100).rounded())) % scanned" }
+        ?? "Orange areas were not reached by LiDAR"
+    }
   }
   private func paperBackground() {
     model.scene.scene.background.contents = Fieldwork.uiPaper

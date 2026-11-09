@@ -678,7 +678,7 @@ final class CoverageEngine: @unchecked Sendable {
 
   // MARK: - room geometry helpers
 
-  private static func inside(_ poly: [SIMD2<Float>], _ p: SIMD2<Float>) -> Bool {
+  static func inside(_ poly: [SIMD2<Float>], _ p: SIMD2<Float>) -> Bool {
     var hit = false
     var j = poly.count - 1
     for i in poly.indices {

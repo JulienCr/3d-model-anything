@@ -147,7 +147,7 @@ This benchmark uses photo poses without depth occlusion; it is not a live phone 
 
 Thermal pressure, memory warnings and long scans reduce depth recording, photo frequency and coverage evaluation work. High-resolution automatic photos are disabled under constrained budgets. After a large map or four rooms, save and start a fresh scan rather than extending the same map further.
 
-After each room, **Review saved room in 3D** opens the textured preview. Use coverage colours to inspect missing photography. A room's **Connect to another room** action shows numbered doorway plans, supports a 180-degree orientation choice, and requires a combined preview before saving. This is manual doorway alignment; it does not claim an automatic verified registration. The reference room must already be placed in the house and both captures must have established tracking.
+After each room, **Review saved room in 3D** opens the textured preview. Use coverage colours to inspect missing photography. The **LiDAR** switch in the coverage view shows the walls, floor and ceiling from RoomPlan's layout that the mesh does not reach (orange) and the part it does (blue), with the scanned share; doors, windows and furniture footprints are excluded. It needs the room's RoomPlan layout (`rooms/room-N.json`). A room's **Connect to another room** action shows numbered doorway plans, supports a 180-degree orientation choice, and requires a combined preview before saving. This is manual doorway alignment; it does not claim an automatic verified registration. The reference room must already be placed in the house and both captures must have established tracking.
 
 ## Sharing and importing
 

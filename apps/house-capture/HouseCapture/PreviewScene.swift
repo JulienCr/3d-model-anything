@@ -31,6 +31,11 @@ enum RenderStyle: String, CaseIterable, Identifiable {
   }
 }
 
+/// What the coverage style measures
+enum CoverageKind: String {
+  case photo, lidar
+}
+
 /// One room mesh, loaded and ready for SceneKit (built off the main thread)
 final class MeshAsset: @unchecked Sendable {
   let room: PreviewRoom
@@ -52,6 +57,8 @@ final class MeshAsset: @unchecked Sendable {
   var photoTextures: PhotoTextures?
   var photoColors: [UInt8]?
   var photoSource: SCNGeometrySource?
+  /// set once computed, whether or not any gap was found
+  var lidar: LidarCoverage.Result?
 
   init(room: PreviewRoom, mesh: PLYMesh) {
     self.room = room
@@ -218,6 +225,7 @@ final class PreviewScene: NSObject, UIGestureRecognizerDelegate {
   private var parts: [Part] = []
   private var roomPlanNodes: [String: SCNNode] = [:]
   private(set) var style: RenderStyle = .photo
+  private(set) var coverageKind = CoverageKind.photo
   private var visibleRooms: Set<String> = []
   private var showSurroundings = true
   private var clipY: Float = 10_000
@@ -384,6 +392,15 @@ final class PreviewScene: NSObject, UIGestureRecognizerDelegate {
     for p in parts { apply(p) }
   }
 
+  func setCoverageKind(_ k: CoverageKind) {
+    coverageKind = k
+    for p in parts { apply(p) }
+  }
+
+  func lidarChanged(for roomID: String) {
+    for p in parts where p.asset.room.id == roomID { apply(p) }
+  }
+
   func setVisibleRooms(_ ids: Set<String>, surroundings: Bool) {
     visibleRooms = ids
     showSurroundings = surroundings
@@ -413,7 +430,7 @@ final class PreviewScene: NSObject, UIGestureRecognizerDelegate {
     let colors: String
     switch style {
     case .photo, .sessions, .wireframe: colors = hasPhoto ? "photo" : "none"
-    case .coverage: colors = "coverage"
+    case .coverage: colors = coverageKind == .lidar ? "lidar" : "coverage"
     case .clay, .roomPlan: colors = "none"
     }
     p.node.geometry = geometry(p, colors: colors, outside: false)
@@ -438,6 +455,16 @@ final class PreviewScene: NSObject, UIGestureRecognizerDelegate {
         if child.parent == nil { node.addChildNode(child) }
       } else { old?.isHidden = true }
     }
+    let gaps = p.node.childNode(withName: "lidar-gaps", recursively: false)
+    if style == .coverage, coverageKind == .lidar, let g = p.asset.lidar?.gaps {
+      let child = gaps ?? SCNNode()
+      child.name = "lidar-gaps"
+      child.categoryBitMask = PreviewScene.meshCategory
+      child.isHidden = false
+      child.geometry = g
+      g.firstMaterial = gapMaterial
+      if child.parent == nil { p.node.addChildNode(child) }
+    } else { gaps?.isHidden = true }
     // mesh style: a dark solid just behind the lines so the far side doesn't shine through
     for (node, outside) in [(p.node, false), (p.outsideNode, true)] {
       guard let node else { continue }
@@ -458,6 +485,17 @@ final class PreviewScene: NSObject, UIGestureRecognizerDelegate {
       }
     }
   }
+
+  private lazy var gapMaterial: SCNMaterial = {
+    let m = SCNMaterial()
+    m.lightingModel = .lambert
+    m.isDoubleSided = true
+    m.diffuse.contents = UIColor(red: 1, green: 0.58, blue: 0, alpha: 1)
+    m.shaderModifiers = [.surface: clipModifier]
+    m.setValue(NSNumber(value: clipY), forKey: "clipY")
+    materials["lidar-gap"] = m
+    return m
+  }()
 
   private lazy var underMaterial: SCNMaterial = {
     let m = SCNMaterial()
@@ -533,6 +571,9 @@ final class PreviewScene: NSObject, UIGestureRecognizerDelegate {
         m.lightingModel = .lambert
         m.diffuse.contents = hue.mixed(with: .white, amount: 0.3).scaled(dim ? 0.6 : 1)
       }
+    case (.coverage, "lidar"):
+      m.lightingModel = .lambert
+      m.diffuse.contents = dim ? UIColor(white: 0.6, alpha: 1) : UIColor(red: 0.20, green: 0.55, blue: 1, alpha: 1)
     case (.coverage, _):
       m.lightingModel = .lambert
       m.diffuse.contents = UIColor.white

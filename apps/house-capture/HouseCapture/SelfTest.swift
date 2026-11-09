@@ -87,6 +87,7 @@ final class SelfTest {
       try captureDiagnostics()
       try await previewNormals()
       try await photoTextures()
+      try await lidarCoverage()
       houseID = try await tests()
     } catch {
       failed += 1
@@ -580,6 +581,49 @@ final class SelfTest {
     let cancelled = PhotoTextures.build(mesh: mesh, inside: mesh.indices, outside: [], photos: [photo], pixelBudget: 2_000_000,
                                         progress: { _ in }, isCancelled: { true })
     expect(cancelled == nil, "texture building cancels without publishing partial geometry")
+  }
+
+  /// Test mesh: wall at z = -2 (x -1.5...1.5), floor (z -2...1), side wall. The layout is wider and deeper,
+  /// with a door in the part of the wall the mesh doesn't reach.
+  private func lidarCoverage() async throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("selftest-lidar")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let meshURL = folder.appendingPathComponent("test.ply"), layoutURL = folder.appendingPathComponent("room-0.json")
+    try writeTestPLY(to: meshURL)
+    func box(_ x: Float, _ y: Float, _ z: Float, _ w: Float, _ h: Float) -> [String: Any] {
+      ["transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1] as [Float], "dimensions": [w, h, 0] as [Float]]
+    }
+    let layout: [String: Any] = [
+      "walls": [box(0, 1.2, -2, 4, 2.4)],
+      "doors": [box(1.75, 1.0, -2, 0.4, 2.0)],
+      "floors": [["transform": [1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1] as [Float], "dimensions": [3, 4, 0] as [Float],
+                  "polygonCorners": [[-1.5, -2, 0], [1.5, -2, 0], [1.5, 2, 0], [-1.5, 2, 0]] as [[Float]]]],
+    ]
+    try JSONSerialization.data(withJSONObject: layout).write(to: layoutURL)
+    let mesh = try PLYMesh.load(url: meshURL)
+    guard let reference = RoomLayout.load(layoutURL) else { return expect(false, "room layout JSON loads") }
+    expect(RoomLayout.load(folder.appendingPathComponent("missing.json")) == nil, "a missing layout gives no LiDAR reference")
+    let result = await Task.detached {
+      LidarCoverage.compute(mesh: mesh, layout: reference, toHouse: matrix_identity_float4x4) { false }
+    }.value
+    guard let result else { return expect(false, "LiDAR coverage computes") }
+    let fraction = result.covered / result.total
+    expect(fraction > 0.4 && fraction < 0.7, "LiDAR coverage separates scanned from missing surface (\(Int(fraction * 100))%)")
+    var gaps: [SIMD3<Float>] = []
+    if let source = result.gaps?.sources(for: .vertex).first {
+      source.data.withUnsafeBytes { raw in
+        let f = raw.bindMemory(to: Float.self)
+        for i in 0..<source.vectorCount { gaps.append(SIMD3(f[i * 3], f[i * 3 + 1], f[i * 3 + 2])) }
+      }
+    }
+    let onWall = gaps.filter { abs($0.z + 2) < 0.01 }
+    expect(onWall.contains { $0.x < -1.7 }, "wall beyond the scanned part shows as a gap")
+    expect(!onWall.contains { abs($0.x) < 1.3 && $0.y > 0.2 && $0.y < 2.2 }, "scanned wall shows no gap")
+    expect(!onWall.contains { $0.x > 1.6 && $0.x < 1.9 && $0.y < 1.9 }, "a door is not counted as a gap")
+    expect(gaps.contains { abs($0.y) < 0.01 && $0.z > 1.3 }, "floor beyond the scanned part shows as a gap")
+    let cancelled = LidarCoverage.compute(mesh: mesh, layout: reference, toHouse: matrix_identity_float4x4) { true }
+    expect(cancelled == nil, "LiDAR coverage cancels without publishing")
   }
 
   /// With a real bundle copied to Documents/selftest-bundle (photos, depth, mesh/room-*.ply in

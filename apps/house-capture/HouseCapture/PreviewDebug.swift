@@ -8,6 +8,7 @@ import SwiftUI
 ///     -preview-session <n>        with a house: open session n (SessionViewer) instead of the house
 ///     -preview-room <id>          show only this room ("<session index>/<room index>", e.g. 1/0)
 ///     -preview-style <name>       photo | coverage | sessions | clay | wireframe | roomPlan
+///     -preview-coverage <name>    photo | lidar (with -preview-style coverage)
 ///     -preview-plan               start in the top-down plan view
 ///     -preview-walk <n>           start the walkthrough at photo n
 ///     -preview-opacity <0…1>      photo overlay opacity in the walkthrough
@@ -58,6 +59,7 @@ enum PreviewDebug {
     log("ready: styles \(model.styles.map(\.rawValue).joined(separator: ","))")
     if let r = value("-preview-room") { model.showOnly(r) }
     if let s = value("-preview-style").flatMap(RenderStyle.init(rawValue:)) { model.setStyle(s) }
+    if let k = value("-preview-coverage").flatMap(CoverageKind.init(rawValue:)) { model.setCoverageKind(k) }
     if args.contains("-preview-plan") { model.togglePlan() }
     if let o = value("-preview-opacity").flatMap(Double.init) { model.photoOpacity = o }
     if let n = value("-preview-walk").flatMap(Int.init) {
