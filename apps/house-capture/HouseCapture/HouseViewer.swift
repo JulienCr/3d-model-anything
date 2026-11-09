@@ -838,23 +838,9 @@ struct PreviewScreen: View {
   }
 
   private var coverageSwitch: some View {
-    HStack(spacing: 2) {
-      ForEach([CoverageKind.photo, .lidar], id: \.self) { k in
-        Button {
-          withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { model.setCoverageKind(k) }
-        } label: {
-          Text(k == .photo ? "Photo" : "LiDAR")
-            .font(.system(size: 12, weight: .semibold))
-            .padding(.horizontal, 14).frame(height: 30)
-            .foregroundStyle(model.coverageKind == k ? Color.black : Color.white)
-            .background { if model.coverageKind == k { Capsule().fill(PreviewTheme.accent) } }
-            .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-      }
+    CoverageKindSwitch(kind: model.coverageKind) { k in
+      withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { model.setCoverageKind(k) }
     }
-    .padding(3)
-    .glass(Capsule())
   }
 
   private var stylePicker: some View {
@@ -954,6 +940,29 @@ struct ProgressRing: View {
         .stroke(PreviewTheme.accent, style: StrokeStyle(lineWidth: 3, lineCap: .round))
         .rotationEffect(.degrees(-90))
     }
+  }
+}
+
+/// Photo | LiDAR capsule shared by the review preview and the live scan
+struct CoverageKindSwitch: View {
+  let kind: CoverageKind
+  let select: (CoverageKind) -> Void
+  var body: some View {
+    HStack(spacing: 2) {
+      ForEach([CoverageKind.photo, .lidar], id: \.self) { k in
+        Button { select(k) } label: {
+          Text(k == .photo ? "Photo" : "LiDAR")
+            .font(.system(size: 12, weight: .semibold))
+            .padding(.horizontal, 14).frame(height: 30)
+            .foregroundStyle(kind == k ? Color.black : Color.white)
+            .background { if kind == k { Capsule().fill(PreviewTheme.accent) } }
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+      }
+    }
+    .padding(3)
+    .glass(Capsule())
   }
 }
 

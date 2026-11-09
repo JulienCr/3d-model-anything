@@ -106,11 +106,20 @@ struct CaptureScreen: View {
         HStack(spacing: 10) {
           if scanning {
             VStack(spacing: 3) {
-              CoverageRing(percent: controller.stats.percent).frame(width: 44, height: 44)
-              Text("Photo detail").font(.system(size: 9, weight: .semibold))
+              if controller.liveCoverageKind == .lidar {
+                CoverageRing(percent: controller.lidarFraction.map { Int(($0 * 100).rounded()) } ?? 0,
+                             placeholder: controller.lidarFraction == nil, tint: .blue)
+                  .frame(width: 44, height: 44)
+                Text("LiDAR").font(.system(size: 9, weight: .semibold))
+              } else {
+                CoverageRing(percent: controller.stats.percent).frame(width: 44, height: 44)
+                Text("Photo detail").font(.system(size: 9, weight: .semibold))
+              }
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Photo detail, \(controller.stats.percent) percent of observed surfaces")
+            .accessibilityLabel(controller.liveCoverageKind == .lidar
+              ? "LiDAR, \(controller.lidarFraction.map { "\(Int(($0 * 100).rounded())) percent" } ?? "no walls found yet") of the walls, floor and ceiling found so far"
+              : "Photo detail, \(controller.stats.percent) percent of observed surfaces")
           }
           VStack(alignment: .trailing, spacing: 2) {
             if scanning {
@@ -328,13 +337,16 @@ struct CaptureScreen: View {
     VStack(spacing: 10) {
       if controller.captureReady {
         tip(controller.quality.ready ? controller.quality.message : (controller.instruction ?? controller.quality.message))
-        if controller.coveragePlateau && !controller.quality.ready {
+        if controller.coveragePlateau && !controller.quality.ready && controller.liveCoverageKind == .photo {
           tip("Photo detail isn't improving much. You can save and review what you have; you don't need to keep circling.")
         }
         if controller.captureBudget.constrained { Text("Reducing background capture to keep scanning responsive.").font(.caption).foregroundStyle(.white) }
       }
-      HStack(spacing: 14) {
-        Legend()
+      HStack(alignment: .bottom, spacing: 14) {
+        VStack(alignment: .leading, spacing: 6) {
+          CoverageKindSwitch(kind: controller.liveCoverageKind) { controller.liveCoverageKind = $0 }
+          Legend(kind: controller.liveCoverageKind, hasReference: controller.lidarFraction != nil)
+        }
         Button(action: controller.pause) {
           Image(systemName: "pause.fill")
         }
@@ -570,23 +582,35 @@ private struct MapStatusDot: View {
 /// Percent photographed, as a ring
 struct CoverageRing: View {
   var percent: Int
+  /// no value yet: shows a dash
+  var placeholder = false
+  /// fixed colour instead of red / orange / green
+  var tint: Color?
   var body: some View {
     ZStack {
       Circle().stroke(.white.opacity(0.25), lineWidth: 5)
       Circle()
         .trim(from: 0, to: CGFloat(min(100, percent)) / 100)
-        .stroke(percent >= 85 ? Color.green : percent >= 50 ? .orange : .red, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+        .stroke(tint ?? (percent >= 85 ? Color.green : percent >= 50 ? .orange : .red), style: StrokeStyle(lineWidth: 5, lineCap: .round))
         .rotationEffect(.degrees(-90))
         .animation(.easeOut(duration: 0.4), value: percent)
-      Text("\(percent)%").font(.caption2.monospacedDigit().weight(.bold))
+      Text(placeholder ? "–" : "\(percent)%").font(.caption2.monospacedDigit().weight(.bold))
     }
   }
 }
 
 private struct Legend: View {
+  var kind: CoverageKind = .photo
+  var hasReference = true
+  private var items: [(Color, String)] {
+    switch kind {
+    case .photo: [(.red, "needs photos"), (.green, "captured")]
+    case .lidar: hasReference ? [(.orange, "not reached"), (.blue, "LiDAR scanned")] : [(.blue, "LiDAR scanned"), (.gray, "gaps show once walls are found")]
+    }
+  }
   var body: some View {
     VStack(alignment: .leading, spacing: 2) {
-      ForEach([(Color.red, "needs photos"), (.green, "captured")], id: \.1) { color, label in
+      ForEach(items, id: \.1) { color, label in
         HStack(spacing: 4) {
           Circle().fill(color).frame(width: 7, height: 7)
           Text(label).font(.system(size: 9))

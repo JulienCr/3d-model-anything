@@ -1,3 +1,4 @@
+import RoomPlan
 import SceneKit
 import simd
 
@@ -9,6 +10,8 @@ struct RoomLayout {
     let size: SIMD3<Float>
     func local(_ p: SIMD3<Float>) -> SIMD3<Float> { simd_make_float3(inverse * SIMD4(p, 1)) }
   }
+
+  init() {}
 
   var walls: [Box] = []
   /// doors, windows and openings: real holes in the mesh nobody can fill
@@ -48,6 +51,66 @@ struct RoomLayout {
   }
 }
 
+extension RoomLayout {
+  /// RoomPlan's live room; the floor outline falls back to the walls' extent once there are 3 walls
+  init?(room: CapturedRoom) {
+    func box(_ s: CapturedRoom.Surface) -> Box { Box(transform: s.transform, inverse: s.transform.inverse, size: s.dimensions) }
+    walls = room.walls.map(box)
+    cutouts = (room.doors + room.windows + room.openings).map(box)
+    objects = room.objects.map { Box(transform: $0.transform, inverse: $0.transform.inverse, size: $0.dimensions) }
+    if let floor = room.floors.first, !floor.polygonCorners.isEmpty {
+      floorY = floor.transform.columns.3.y
+      outline = floor.polygonCorners.map { c in
+        let w = floor.transform * SIMD4(c, 1)
+        return SIMD2(w.x, w.z)
+      }
+    } else if walls.count >= 3 {
+      outline = CoverageEngine.bounds(for: room).0
+    }
+    if walls.isEmpty && outline.isEmpty { return nil }
+  }
+}
+
+/// World-frame triangles of a mesh, whatever stores them
+protocol TriangleSource {
+  /// Calls `visit` for triangles that may touch the box; `visit` returns false to stop.
+  func forEachTriangle(within lo: SIMD3<Float>, _ hi: SIMD3<Float>,
+                       _ visit: (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>) -> Bool)
+}
+
+extension PLYMesh: TriangleSource {
+  func forEachTriangle(within lo: SIMD3<Float>, _ hi: SIMD3<Float>,
+                       _ visit: (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>) -> Bool) {
+    var f = 0
+    while f + 2 < indices.count {
+      if !visit(position(Int(indices[f])), position(Int(indices[f + 1])), position(Int(indices[f + 2]))) { return }
+      f += 3
+    }
+  }
+}
+
+/// A snapshot of the live scan's mesh anchors, in the ARKit world frame
+struct LiveMesh: TriangleSource {
+  struct Part {
+    var world: [SIMD3<Float>]
+    var faces: [UInt32]
+    var lo: SIMD3<Float>
+    var hi: SIMD3<Float>
+  }
+  var parts: [Part] = []
+
+  func forEachTriangle(within lo: SIMD3<Float>, _ hi: SIMD3<Float>,
+                       _ visit: (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>) -> Bool) {
+    for part in parts where !(any(part.hi .< lo) || any(part.lo .> hi)) {
+      var f = 0
+      while f + 2 < part.faces.count {
+        if !visit(part.world[Int(part.faces[f])], part.world[Int(part.faces[f + 1])], part.world[Int(part.faces[f + 2])]) { return }
+        f += 3
+      }
+    }
+  }
+}
+
 /// Which parts of a room's walls, floor and ceiling the LiDAR mesh actually reaches. The mesh only
 /// exists where LiDAR saw something, so holes are found against RoomPlan's surfaces.
 enum LidarCoverage {
@@ -69,7 +132,7 @@ enum LidarCoverage {
   private static let objectMargin: Float = 0.10
 
   /// nil when cancelled or when the layout has no surface to test
-  static func compute(mesh: PLYMesh, layout: RoomLayout, toHouse: simd_float4x4,
+  static func compute(mesh: some TriangleSource, layout: RoomLayout, toHouse: simd_float4x4,
                       isCancelled: () -> Bool) -> Result? {
     let samples = samples(of: layout).map { s in
       Sample(position: simd_make_float3(toHouse * SIMD4(s.position, 1)),
@@ -167,18 +230,17 @@ enum LidarCoverage {
 
   /// Voxels touched by the mesh triangles inside the box. Triangles are filled, not just their
   /// centroids: flat floors use triangles far larger than a voxel.
-  private static func occupancy(_ mesh: PLYMesh, _ lo: SIMD3<Float>, _ hi: SIMD3<Float>,
+  private static func occupancy(_ mesh: some TriangleSource, _ lo: SIMD3<Float>, _ hi: SIMD3<Float>,
                                 _ isCancelled: () -> Bool) -> Set<Int64>? {
     var set = Set<Int64>()
     let step = SurroundingsFilter.voxel
-    let idx = mesh.indices
-    var f = 0
-    while f + 2 < idx.count {
-      if f & 0x3FFF == 0, isCancelled() { return nil }
-      let a = mesh.position(Int(idx[f])), b = mesh.position(Int(idx[f + 1])), c = mesh.position(Int(idx[f + 2]))
-      f += 3
+    var seen = 0
+    var stopped = false
+    mesh.forEachTriangle(within: lo, hi) { a, b, c in
+      seen += 1
+      if seen & 0x3FFF == 0, isCancelled() { stopped = true; return false }
       let tLo = simd_min(a, simd_min(b, c)), tHi = simd_max(a, simd_max(b, c))
-      if any(tHi .< lo) || any(tLo .> hi) { continue }
+      if any(tHi .< lo) || any(tLo .> hi) { return true }
       let longest = max(simd_length(b - a), simd_length(c - b), simd_length(a - c))
       let n = min(32, max(1, Int((longest / step).rounded(.up))))
       for i in 0...n {
@@ -186,7 +248,9 @@ enum LidarCoverage {
           set.insert(SurroundingsFilter.key(a + (b - a) * (Float(i) / Float(n)) + (c - a) * (Float(j) / Float(n))))
         }
       }
+      return true
     }
+    if stopped { return nil }
     return set
   }
 

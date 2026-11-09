@@ -154,6 +154,16 @@ final class CoverageEngine: @unchecked Sendable {
     if pendingRooms.finish() { queue.async { self.applyPendingRoom() } }
   }
 
+  /// The triangles of every anchor so far, for LiDAR coverage (arrays are copy-on-write: no buffer copies)
+  func lidarMesh(_ done: @escaping (LiveMesh) -> Void) {
+    queue.async {
+      let parts = self.anchors.values.map { a in
+        LiveMesh.Part(world: a.world, faces: a.faces, lo: a.center - a.radius, hi: a.center + a.radius)
+      }
+      done(LiveMesh(parts: parts))
+    }
+  }
+
   /// Mesh anchor added or updated. Copies the geometry immediately (call from any thread).
   func update(_ anchor: ARMeshAnchor) {
     update(snapshot: anchor.snapshot())

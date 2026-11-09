@@ -624,6 +624,18 @@ final class SelfTest {
     expect(gaps.contains { abs($0.y) < 0.01 && $0.z > 1.3 }, "floor beyond the scanned part shows as a gap")
     let cancelled = LidarCoverage.compute(mesh: mesh, layout: reference, toHouse: matrix_identity_float4x4) { true }
     expect(cancelled == nil, "LiDAR coverage cancels without publishing")
+
+    // the live scan feeds the same computation from the engine's anchors
+    let engine = CoverageEngine()
+    engine.update(snapshot: .init(id: UUID(), transform: matrix_identity_float4x4,
+                                  positions: (0..<mesh.vertexCount).map { mesh.position($0) },
+                                  normals: Array(repeating: SIMD3(0, 0, 1), count: mesh.vertexCount),
+                                  faces: mesh.indices, classes: Array(repeating: 1, count: mesh.indices.count / 3)))
+    _ = await withCheckedContinuation { c in engine.exportPLY(to: folder.appendingPathComponent("barrier.ply")) { c.resume(returning: $0) } }
+    let live = await withCheckedContinuation { c in engine.lidarMesh { c.resume(returning: $0) } }
+    let liveResult = LidarCoverage.compute(mesh: live, layout: reference, toHouse: matrix_identity_float4x4) { false }
+    expect(liveResult?.covered == result.covered && liveResult?.total == result.total,
+           "live engine mesh gives the same LiDAR coverage as the saved mesh")
   }
 
   /// With a real bundle copied to Documents/selftest-bundle (photos, depth, mesh/room-*.ply in

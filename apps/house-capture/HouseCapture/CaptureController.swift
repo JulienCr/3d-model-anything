@@ -109,6 +109,21 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
   /// photos of the zone from earlier sessions, to show where to stand while relocalizing
   @Published private(set) var landmarks: [URL] = []
   @Published private(set) var priorPhotoCount = 0
+  /// what the live mesh colours show; kept across rooms
+  @Published var liveCoverageKind: CoverageKind = .photo {
+    didSet {
+      guard liveCoverageKind != oldValue else { return }
+      scanView.setCoverageKind(liveCoverageKind)
+      resetLidar()
+      lastLidar = 0
+    }
+  }
+  /// share of RoomPlan's walls, floor and ceiling found so far that the LiDAR mesh reaches; nil before any wall
+  @Published private(set) var lidarFraction: Double?
+  private var lidarCancel = CancelFlag()
+  private var lidarInFlight = false
+  private var lastLidar: CFTimeInterval = 0
+  private let lidarQueue = DispatchQueue(label: "lidar-coverage", qos: .utility)
   /// what finishing is doing right now
   @Published private(set) var finishingStep = ""
 
@@ -664,6 +679,42 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
   }
   var canStartRoom: Bool { phase == .betweenRooms && !sessionNeedsRestart && !recordingSaveFailed && !requiresFreshScan && !roomName.trimmingCharacters(in: .whitespaces).isEmpty }
 
+  private func resetLidar() {
+    lidarCancel.cancel()
+    lidarCancel = CancelFlag()
+    lidarInFlight = false
+    lidarFraction = nil
+    scanView.showLidarGaps(nil)
+  }
+
+  /// Rebuilt from scratch every 1.5 s or so: ARKit rewrites most anchors between refreshes anyway
+  private func refreshLidar(_ now: CFTimeInterval) {
+    lastLidar = now
+    guard let room = liveRoom, let layout = RoomLayout(room: room) else {
+      lidarFraction = nil
+      scanView.showLidarGaps(nil)
+      return
+    }
+    lidarInFlight = true
+    let flag = lidarCancel
+    let queue = lidarQueue
+    engine.lidarMesh { mesh in
+      queue.async {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        let result = LidarCoverage.compute(mesh: mesh, layout: layout, toHouse: matrix_identity_float4x4) { flag.isCancelled }
+        let ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+        Task { @MainActor in
+          guard !flag.isCancelled else { return }
+          self.lidarInFlight = false
+          guard let result else { return }
+          self.lidarFraction = result.total > 0 ? Double(result.covered / result.total) : nil
+          self.scanView.showLidarGaps(result.gaps)
+          self.diagnostics.log(String(format: "lidar coverage %.0f%% in %.0f ms", 100 * (self.lidarFraction ?? 0), ms), since: self.startedAt)
+        }
+      }
+    }
+  }
+
   func startRoom() {
     guard canStartRoom else { return }
     do { try CaptureReadiness.requireStorage(at: bundle.url) }
@@ -675,6 +726,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     lastWarning = nil
     instruction = nil
     liveRoom = nil
+    resetLidar()
     meshReady = false
     paused = false
     scanView.feed.isOn = false
@@ -702,6 +754,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     if paused { resume() }
     commitCandidate(allowHighResolution: false)
     phase = .finishingRoom
+    resetLidar()
     scanView.feed.isOn = false // freeze accepted mesh input for the export barrier
     // export the mesh while it's all still there, then let RoomPlan wrap up (didEndWith → finish)
     let file = bundle.file("mesh/room-\(roomIndex).ply")
@@ -1324,6 +1377,8 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     }
     guard !paused, captureReady else { return }
     let budget = captureBudget
+    if liveCoverageKind == .lidar, !lidarInFlight, !budget.critical,
+       now - lastLidar > (budget.constrained ? 4 : 1.5) { refreshLidar(now) }
     depthRecorder.consider(frame, room: roomIndex, camera: cameraControl.state(for: frame), interval: budget.depthInterval)
     if frame.timestamp - lastEvaluate > budget.evaluationInterval {
       lastEvaluate = frame.timestamp

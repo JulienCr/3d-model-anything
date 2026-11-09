@@ -20,17 +20,23 @@ final class ScanView: NSObject, ARSCNViewDelegate {
 
   /// Red facets need photos; green facets have good photo coverage.
   /// Keep the camera visible through the fill and trace the actual LiDAR triangles on top.
-  private let materials: [SCNMaterial] = [
-    (0xFF3939, 0.28), (0xF94B4B, 0.23), (0xE82B2B, 0.25),
-    (0xFF3939, 0.28), (0xF94B4B, 0.23), (0xE82B2B, 0.25),
-    (0x39ED75, 0.24), (0x51F589, 0.22), (0x26D966, 0.23),
-    (0xFFFFFF, 0.0), (0xFFFFFF, 0.0), (0xFFFFFF, 0.0),
-  ].map { hex, alpha in
+  private static let photoPalette = [
+    0xFF3939, 0xF94B4B, 0xE82B2B, 0xFF3939, 0xF94B4B, 0xE82B2B,
+    0x39ED75, 0x51F589, 0x26D966, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF,
+  ]
+  /// LiDAR mode: the whole mesh is blue (it is where LiDAR has data); band 9+ stays invisible
+  private static let lidarPalette = [
+    0x338CFF, 0x4A9BFF, 0x2878F0, 0x338CFF, 0x4A9BFF, 0x2878F0,
+    0x338CFF, 0x4A9BFF, 0x2878F0, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF,
+  ]
+  private static func uiColor(_ hex: Int) -> UIColor {
+    UIColor(red: CGFloat((hex >> 16) & 255) / 255, green: CGFloat((hex >> 8) & 255) / 255,
+            blue: CGFloat(hex & 255) / 255, alpha: 1)
+  }
+  private let materials: [SCNMaterial] = zip(photoPalette, [0.28, 0.23, 0.25, 0.28, 0.23, 0.25, 0.24, 0.22, 0.23, 0, 0, 0]).map { hex, alpha in
     let m = SCNMaterial()
     m.lightingModel = .constant
-    m.diffuse.contents = UIColor(red: CGFloat((hex >> 16) & 255) / 255,
-                                green: CGFloat((hex >> 8) & 255) / 255,
-                                blue: CGFloat(hex & 255) / 255, alpha: 1)
+    m.diffuse.contents = ScanView.uiColor(hex)
     m.transparency = alpha
     m.blendMode = .alpha
     m.isDoubleSided = false
@@ -73,6 +79,20 @@ final class ScanView: NSObject, ARSCNViewDelegate {
   /// earlier scans of the zone (Continue sessions), drawn under the live mesh
   private let ghost = SCNNode()
   private let ghostEdges = SCNNode()
+  private var coverageKind = CoverageKind.photo
+  private var ghostAlpha: CGFloat = 0
+  private let gaps = SCNNode()
+  private let gapMaterial: SCNMaterial = {
+    let m = SCNMaterial()
+    m.lightingModel = .constant
+    m.diffuse.contents = UIColor(red: 1, green: 0.58, blue: 0, alpha: 1)
+    m.transparency = 0.5
+    m.blendMode = .alpha
+    m.isDoubleSided = true
+    m.readsFromDepthBuffer = true
+    m.writesToDepthBuffer = false
+    return m
+  }()
   private let ghostMaterial: SCNMaterial = {
     let m = SCNMaterial()
     m.lightingModel = .constant
@@ -99,6 +119,8 @@ final class ScanView: NSObject, ARSCNViewDelegate {
     view.scene = SCNScene()
     outline.renderingOrder = 10
     view.scene.rootNode.addChildNode(outline)
+    gaps.renderingOrder = 2 // after the live mesh and its edges, before the outlines
+    view.scene.rootNode.addChildNode(gaps)
     ghost.renderingOrder = -5 // before the live coverage mesh
     ghost.isHidden = true
     view.scene.rootNode.addChildNode(ghost)
@@ -138,8 +160,30 @@ final class ScanView: NSObject, ARSCNViewDelegate {
   }
 
   /// 0 hides it
+  /// Photo coverage (red/green) or LiDAR coverage (blue mesh + orange gaps). Instant: only material colours change.
+  func setCoverageKind(_ kind: CoverageKind) {
+    coverageKind = kind
+    for (m, hex) in zip(materials, kind == .lidar ? Self.lidarPalette : Self.photoPalette) {
+      m.diffuse.contents = Self.uiColor(hex)
+    }
+    if kind == .photo { showLidarGaps(nil) }
+    setGhostOpacity(ghostAlpha)
+  }
+
+  /// RoomPlan surfaces the mesh doesn't reach yet; nil hides them
+  func showLidarGaps(_ geometry: SCNGeometry?) {
+    guard let geometry, coverageKind == .lidar else {
+      gaps.geometry = nil
+      return
+    }
+    geometry.materials = [gapMaterial]
+    gaps.geometry = geometry
+  }
+
   func setGhostOpacity(_ alpha: CGFloat) {
-    ghost.isHidden = alpha <= 0 || ghost.geometry == nil
+    ghostAlpha = alpha
+    // the green ghost would read as covered in LiDAR mode
+    ghost.isHidden = alpha <= 0 || ghost.geometry == nil || coverageKind == .lidar
     ghostMaterial.transparency = alpha
     ghostEdges.opacity = min(1, alpha * 2)
   }
