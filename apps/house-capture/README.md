@@ -102,7 +102,7 @@ relocalization went (seconds to *normal* / *verified*, residual) and periodic li
   (relocalize → verify → scan → finish), logging the relocalization.
 - `-diag`: probes how RoomPlan and ARKit's mesh/depth coexist on one ARSession (`DIAG:` lines).
 
-Read logs with `xcrun devicectl device process launch --console --device <id> com.wesbos.housecapture -autotest`.
+Read logs with `xcrun devicectl device process launch --console --device <id> com.avolo.housecapture -autotest`.
 
 ## Tracking recovery and photo reliability
 

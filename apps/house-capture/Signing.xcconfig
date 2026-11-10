@@ -1,3 +1,4 @@
-// Upstream defaults. Personal team and bundle id go in Signing.local.xcconfig (gitignored).
-PRODUCT_BUNDLE_IDENTIFIER = com.wesbos.housecapture
+// Fork defaults. Signing.local.xcconfig (gitignored) can still override them.
+DEVELOPMENT_TEAM = U3P93WXUHR
+PRODUCT_BUNDLE_IDENTIFIER = com.avolo.housecapture
 #include? "Signing.local.xcconfig"
