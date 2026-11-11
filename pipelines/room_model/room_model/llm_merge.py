@@ -17,7 +17,7 @@ from room_model.architecture import _face_point, _value
 from room_model.capture import colmajor
 from room_model.lidar import SAMPLE_DENSITY, load_samples
 from room_model.openings import SLAB_MARGIN
-from room_model.photo_geom import backproject, load_posed_photos, to_sensor
+from room_model.photo_geom import MIN_CORNERS, backproject, load_posed_photos, to_sensor
 from room_model.vision import PAD_RATIO
 
 AGREEMENT = 0.03  # m; crops whose rectangles differ by less than this on every parameter agree
@@ -92,23 +92,29 @@ def _to_face(arch: dict, host: dict, pts: np.ndarray) -> np.ndarray:
     return np.column_stack([s, pts[:, 1] - _value(arch, "floor.level")])
 
 
-def _crop_points(crop_id: str, uv, crops: dict, evidence: Evidence, plane) -> np.ndarray:
-    """Room-frame points (4, 3) of four crop pixels cast on `plane`."""
+def _crop_points(crop_id: str, uv, crops: dict, evidence: Evidence, plane, allow_null: bool = False) -> np.ndarray:
+    """Room-frame points (4, 3) of four crop pixels cast on `plane`; with `allow_null`, a null pixel gives a NaN row."""
     info = crops.get(crop_id)
     if info is None:
         raise Unusable(f"vue {crop_id} inconnue")
     photo = evidence.photos.get(info["photo"])
     if photo is None:
         raise Unusable(f"photo {info['photo']} indisponible")
-    uv = np.asarray(uv, float)
-    if uv.shape != (4, 2) or not np.isfinite(uv).all():
+    if not isinstance(uv, (list, tuple)) or len(uv) != 4:
         raise Unusable(f"{crop_id} : moins de 4 coins valides")
+    holes = [p is None for p in uv]
+    uv = np.array([[np.nan, np.nan] if p is None else p for p in uv], float)
+    given = ~np.array(holes)
+    if uv.shape != (4, 2) or not np.isfinite(uv[given]).all() or (any(holes) and not allow_null) or given.sum() < (MIN_CORNERS if allow_null else 4):
+        raise Unusable(f"{crop_id} : moins de {MIN_CORNERS if allow_null else 4} coins valides")
     box, size = np.array(info["box"], float), np.array(info["size"], float)
-    upright = box[:2] + uv * (box[2:] - box[:2]) / size
+    upright = box[:2] + uv[given] * (box[2:] - box[:2]) / size
     sensor = to_sensor(replace(photo, up_turns=int(info.get("up_turns", photo.up_turns))), upright)
-    points = backproject(photo, sensor, plane)
-    if points is None:
+    cast = backproject(photo, sensor, plane)
+    if cast is None:
         raise Unusable(f"{crop_id} : rétroprojection impossible sur le plan de la face")
+    points = np.full((4, 3), np.nan)
+    points[given] = cast
     return points
 
 
@@ -189,31 +195,110 @@ def _set_llm(arch: dict, el: dict, name: str, value: float, sigma: float, rep: R
     p.update(scan_value=p["value"], scan_sigma=p["sigma"], llm_value=float(value), llm_sigma=float(sigma), value=float(value), sigma=float(sigma), source="llm")
 
 
+def _slots(arch: dict, host: dict, face: str | None, corners: list, crops: dict, evidence: Evidence, centre: float, middle: float):
+    """({(side, level): [(crop id, s, y)]}, reasons): each given corner cast on the host plane, filed by where it lies.
+
+    side 0 is the low-s half, level 1 the top half, both relative to the scan rectangle: the file does not depend on
+    the order of the entries or on which face of the host the photo was taken from.
+    """
+    plane, length = _plane(arch, host, face), _length(host)
+    top = _value(arch, host["params"]["top"]) - _value(arch, "floor.level")
+    slots: dict = {}
+    reasons = []
+    for corner in corners:
+        crop_id = corner.get("crop") if isinstance(corner, dict) else None
+        try:
+            points = _crop_points(crop_id, corner["uv"], crops, evidence, plane, allow_null=True)
+        except Unusable as exc:
+            reasons.append(str(exc))
+            continue
+        except (KeyError, TypeError, ValueError, IndexError):
+            reasons.append(f"{crop_id} : coins mal formés")
+            continue
+        for s_, y_ in _to_face(arch, host, points[~np.isnan(points[:, 0])]):
+            if not (-BOUNDS_MARGIN <= s_ <= length + BOUNDS_MARGIN and -BOUNDS_MARGIN <= y_ <= top + BOUNDS_MARGIN):
+                reasons.append(f"{crop_id} : coin hors de l'élément hôte")
+                continue
+            slots.setdefault((int(s_ >= centre), int(y_ >= middle)), []).append((crop_id, float(s_), float(y_)))
+    return slots, reasons
+
+
+def _agreeing(values: np.ndarray) -> list[int] | None:
+    """Indices of the largest group of points within AGREEMENT of each other on both axes; None when two or more points never agree."""
+    if len(values) == 1:
+        return [0]
+    for size in range(len(values), 1, -1):
+        fits = [(np.ptp(values[list(c)], axis=0).max(), c) for c in itertools.combinations(range(len(values)), size)]
+        fits = [f for f in fits if f[0] <= AGREEMENT]
+        if fits:
+            return list(min(fits)[1])
+    return None
+
+
 def _correct_opening(arch: dict, el: dict, item: dict, crops: dict, evidence: Evidence, rep: Report) -> None:
     host = _elements(arch).get(el.get("host"))
     if host is None or host["kind"] not in HOST_KINDS:
         raise Unusable("aucun plan hôte pour projeter les coins (élément orphelin)")
-    found, reasons = _rects(arch, host, el.get("face"), item["corners"], crops, evidence)
-    if not found:
-        raise Unusable("aucune vue exploitable : " + " ; ".join(reasons))
     scan = {n: arch["parameters"][pid]["value"] for n, pid in el["params"].items()}
     sill = arch["parameters"][el["params"]["sill"]]
     floor_reach = sill["value"] <= FLOOR_SIGMAS * sill["sigma"]
-    try:
-        values, sigmas, kept, single = _consensus([r for _, r, _ in found], floor_reach, scan["sill"])
-    except Unusable:
-        _flag(el, "llm_inconsistent")
-        rep.doc["inconsistent"].append(el["id"])
-        return
-    names = [n for n in ("width", "height", "center_s", "sill") if not (n == "sill" and floor_reach)]
+    slots, reasons = _slots(arch, host, el.get("face"), item["corners"], crops, evidence, scan["center_s"], scan["sill"] + scan["height"] / 2)
+    if not slots:
+        raise Unusable("aucune vue exploitable : " + " ; ".join(reasons))
+    final, inconsistent = {}, []
+    for key, found in slots.items():
+        values = np.array([[s_, y_] for _, s_, y_ in found])
+        kept = _agreeing(values)
+        if kept is None:
+            inconsistent.append(key)
+        else:
+            final[key] = (np.median(values[kept], axis=0), len(kept), np.std(values[kept], axis=0))
+    wanted = [n for n in ("width", "height", "center_s", "sill") if not (n == "sill" and floor_reach)]
+    values, sigmas, used = _from_corners(final, scan, floor_reach)
     size = {"width": scan["width"], "center_s": scan["width"], "height": scan["height"], "sill": scan["height"]}
-    for n in names:
+    for n in values:
         if abs(values[n] - scan[n]) > FRAME_MARGIN * size[n]:
             raise Unusable(f"écart au scan de {abs(values[n] - scan[n]) * 100:.0f} cm sur la {NAMES[n]}, hors du cadre montré au modèle, réponse écartée".replace(".", ","))
-    for n in names:
-        _set_llm(arch, el, n, values[n], sigmas[n], rep)
-    _flag(el, "llm_single_view" if single else "llm_corrected")
-    rep.doc["single_view" if single else "corrected"].append(el["id"])
+    if inconsistent:
+        _flag(el, "llm_inconsistent")
+        rep.doc["inconsistent"].append(el["id"])
+    elif not values:
+        raise Unusable("coins insuffisants pour calculer une cote, valeurs du scan conservées")
+    for n in wanted:
+        if n in values:
+            _set_llm(arch, el, n, values[n], sigmas[n], rep)
+        elif not inconsistent:
+            rep.refuse(el["id"], f"{NAMES[n]} : coins nécessaires absents des vues, valeur du scan conservée")
+    if values:
+        single = any(final[k][1] < 2 for k in used)
+        _flag(el, "llm_single_view" if single else "llm_corrected")
+        rep.doc["single_view" if single else "corrected"].append(el["id"])
+
+
+def _from_corners(final: dict, scan: dict, floor_reach: bool) -> tuple[dict, dict, set]:
+    """(values, sigmas, corners used) of the parameters that the available corners give.
+
+    width and position need a corner on each side (at any height), height a top corner and a bottom one (the floor
+    for a door), the sill a bottom corner. A parameter whose corners are missing is not returned.
+    """
+    side = lambda i: [k for k in final if k[0] == i]  # noqa: E731
+    level = lambda i: [k for k in final if k[1] == i]  # noqa: E731
+    mean = lambda keys, axis: float(np.mean([final[k][0][axis] for k in keys]))  # noqa: E731
+    spread = lambda keys, axis: max([MIN_SIGMA, *(float(final[k][2][axis]) for k in keys)])  # noqa: E731
+    values, sigmas, used = {}, {}, set()
+    (low, high), (bottom, top) = (side(0), side(1)), (level(0), level(1))
+    if low and high:
+        values["width"], values["center_s"] = mean(high, 0) - mean(low, 0), (mean(high, 0) + mean(low, 0)) / 2
+        sigmas["width"] = sigmas["center_s"] = max(spread(low, 0), spread(high, 0))
+        used |= {*low, *high}
+    if top and (bottom or floor_reach):
+        values["height"] = mean(top, 1) - (scan["sill"] if floor_reach else mean(bottom, 1))
+        sigmas["height"] = max(spread(top, 1), MIN_SIGMA if floor_reach else spread(bottom, 1))
+        used |= {*top, *(() if floor_reach else bottom)}
+    if bottom and not floor_reach:
+        values["sill"], sigmas["sill"] = mean(bottom, 1), spread(bottom, 1)
+        used |= {*bottom}
+    return values, sigmas, used
 
 
 def _apply_element(arch: dict, item: dict, crops: dict, evidence: Evidence, rep: Report) -> None:

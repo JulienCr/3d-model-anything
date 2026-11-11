@@ -148,6 +148,7 @@ def test_element_crops_are_frontal_and_large_else_the_overview_else_nothing(tmp_
         return
     assert list(shown) == ["Window_1-a"] and shown["Window_1-a"]["kind"] == "element" and entry["sheet"] == "Window_1.jpg"
     assert (pending / "Window_1.jpg").exists() and shown["Window_1-a"].get("fallback") == entry.get("fallback")
+    assert entry["covered_corners"] == [True] * 4 and shown["Window_1-a"]["visible_corners"] == [True] * 4
     if expected == "element":
         assert "fallback" not in entry
         return
@@ -301,6 +302,7 @@ def test_prompt_states_the_hinge_convention(pending):
         assert word in text
     assert "{{" not in text and all(t in text for t in catalogue.CATALOGUE["door"]) and all(t in text for t in catalogue.CATALOGUE["window"])
     assert "Door_1.jpg" in text
+    assert "`null`" in text and "coin" in text  # corners hidden or outside the crop, explained in French
 
 
 def test_schema_enums_match_the_catalogue(pending):
@@ -434,6 +436,28 @@ def test_malformed_corners_are_rejected(case, pending, fake, uv):
     set_answer(json.dumps(answer))
     answers = _load(vision.run(_stage(case, force=True)).parent, "answers.json")
     assert answers["elements"] == [] and len(_reasons(case)) == 2
+
+
+def test_null_corners_need_two_points_on_a_crop(case, pending, fake):
+    set_answer, _ = fake
+    crops = _load(pending, "crops.json")
+    crop = next(c for c in crops if c.startswith("Door_1-"))
+    full = _corner(crops, crop)["uv"]
+    overview = _overview_crop(pending)
+    cases = {
+        "two": [full[0], None, None, full[3]],
+        "three": [None, full[1], full[2], full[3]],
+        "one": [full[0], None, None, None],
+        "none": [None, None, None, None],
+        "outside": [full[0], None, None, [5000, 10]],
+    }
+    for name, uv in cases.items():
+        set_answer({"elements": [{"id": "Door_1", "type": "hinged_single", "corners": [{"crop": crop, "uv": uv}]}]})
+        answers = _load(vision.run(_stage(case, force=True)).parent, "answers.json")
+        assert bool(answers["elements"]) is (name in ("two", "three")), name
+    set_answer({"new_elements": [{"kind": "niche", "host_hint": _overview_host(pending), "corners": [{"crop": overview, "uv": [full[0], None, full[2], full[3]]}]}]})
+    answers = _load(vision.run(_stage(case, force=True)).parent, "answers.json")
+    assert answers["new_elements"] == [] and "at least 4" in _reasons(case)[0]["reason"]  # a niche needs its whole rectangle
 
 
 def test_a_good_item_survives_a_bad_neighbour(case, pending, fake):

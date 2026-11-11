@@ -323,6 +323,51 @@ def test_llm_two_crops_out_of_three_agree(env):
     assert "llm_corrected" in _element(arch, "Door_1")["flags"]
 
 
+def _keep(corners, indices):
+    """The same corner entries with every point but `indices` (TL, TR, BR, BL) set to null."""
+    return [{**c, "uv": [p if i in indices else None for i, p in enumerate(c["uv"])]} for c in corners]
+
+
+def test_corners_split_across_two_crops_rebuild_the_rectangle(env):
+    rect = [[x, y + 0.05, z] for x, y, z in _opening_rect(env.arch, "Window_1", widen=0.04)]
+    corners = [*_keep(_corners(env, ["Window_1-a"], rect), {0, 1}), *_keep(_corners(env, ["Window_1-b"], rect), {2, 3})]  # top, then bottom
+    arch = env.merge(_answers(env, elements=[{"id": "Window_1", "corners": corners}]))
+    scan = {n: _param(env.arch, "Window_1", n)["value"] for n in ("width", "height", "sill", "center_s")}
+    got = {n: _param(arch, "Window_1", n)["value"] for n in scan}
+    assert got["width"] == pytest.approx(scan["width"] + 0.04, abs=0.002) and got["center_s"] == pytest.approx(scan["center_s"], abs=0.002)
+    assert got["sill"] == pytest.approx(scan["sill"] + 0.05, abs=0.002) and got["height"] == pytest.approx(scan["height"], abs=0.002)
+    assert "llm_single_view" in _element(arch, "Window_1")["flags"] and _vision(arch)["not_applied"] == []  # each corner has one crop
+
+
+def test_a_parameter_whose_corners_are_missing_keeps_the_scan_value(env):
+    rect = [[x, y + 0.05, z] for x, y, z in _opening_rect(env.arch, "Window_1", widen=0.04)]
+    corners = [*_keep(_corners(env, ["Window_1-a"], rect), {0, 3}), *_keep(_corners(env, ["Window_1-b"], rect), {0, 3})]  # the left side twice
+    arch = env.merge(_answers(env, elements=[{"id": "Window_1", "corners": corners}]))
+    assert _param(arch, "Window_1", "width") == _param(env.arch, "Window_1", "width")
+    assert _param(arch, "Window_1", "center_s") == _param(env.arch, "Window_1", "center_s")
+    assert _param(arch, "Window_1", "sill")["value"] == pytest.approx(_param(env.arch, "Window_1", "sill")["value"] + 0.05, abs=0.002)
+    refused = [n["reason"] for n in _vision(arch)["not_applied"] if n["id"] == "Window_1"]
+    assert len(refused) == 2 and all("scan" in r for r in refused) and any("largeur" in r for r in refused)
+    assert "llm_corrected" in _element(arch, "Window_1")["flags"]  # every corner used has two agreeing crops
+
+
+def test_corner_order_in_the_answer_does_not_decide_the_side(env):
+    rect = _opening_rect(env.arch, "Door_1", widen=0.04)
+    reversed_order = [rect[1], rect[0], rect[3], rect[2]]  # entries in the wrong order: left and right swapped
+    arch = env.merge(_answers(env, elements=[{"id": "Door_1", "corners": _corners(env, ["Door_1-a", "Door_1-b"], reversed_order)}]))
+    assert _param(arch, "Door_1", "width")["value"] == pytest.approx(_param(env.arch, "Door_1", "width")["value"] + 0.04, abs=0.002)
+
+
+def test_a_corner_on_which_crops_disagree_is_dropped_the_others_are_kept(env):
+    wide = _opening_rect(env.arch, "Door_1", widen=0.04)
+    moved = _opening_rect(env.arch, "Door_1", widen=0.04, shift=0.08)  # the whole rectangle slid by 8 cm
+    corners = [*_corners(env, ["Door_1-a"], wide), *_keep(_corners(env, ["Door_1-b"], moved), {0, 3})]  # b contradicts a on the left corners
+    arch = env.merge(_answers(env, elements=[{"id": "Door_1", "corners": corners}]))
+    assert "llm_inconsistent" in _element(arch, "Door_1")["flags"] and _vision(arch)["inconsistent"] == ["Door_1"]
+    assert _param(arch, "Door_1", "height")["value"] == pytest.approx(_param(env.arch, "Door_1", "height")["value"], abs=0.002)
+    assert _param(arch, "Door_1", "width") == _param(env.arch, "Door_1", "width")  # the left side is not trusted
+
+
 def test_llm_single_view_is_applied_and_flagged(env):
     rect = _opening_rect(env.arch, "Door_1", widen=0.04)
     arch = env.merge(_answers(env, elements=[{"id": "Door_1", "corners": _corners(env, ["Door_1-a"], rect)}]))

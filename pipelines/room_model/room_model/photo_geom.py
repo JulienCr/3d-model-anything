@@ -33,6 +33,8 @@ GRID_SIDE = 5  # points per side of the grid laid on a rectangle
 FRAME_BAND = 0.03
 # Curtains or furniture often hide part of a frame, so half of the band is enough: what is clicked is the corners.
 MIN_BAND_SEEN = 0.5
+# Each corner is cast on the host plane on its own, so two visible corners per crop are enough and other crops add the rest.
+MIN_CORNERS = 2
 CORNER_RADIUS = 0.02  # m; a corner is tested on its grid point and four samples this far around it
 MIN_CORNER_SEEN = 2  # of the 5 samples: a casing or a leaf edge can hide most of a 2 cm disc, 0 or 1 left means a hidden corner
 MIN_SIDE_PX = 120  # shorter side of the projected rectangle: below it a corner click is within a few percent of the size
@@ -298,6 +300,7 @@ class RectView:
     area_px: float  # of the projected rectangle
     side_px: float  # its shorter side
     seen: float  # share of the frame band passing the depth test and the furniture box test
+    corners: tuple[bool, ...]  # which of the four corners are visible
 
 
 def rect_grid(rect: np.ndarray) -> np.ndarray:
@@ -332,9 +335,10 @@ def rect_views(photos: list[PosedPhoto], rect: np.ndarray, mesh: DepthMaps | tup
 
     Eligible: the camera faces the rectangle (cosine of `normal`, the face normal towards the viewing side, at least
     FACING_COS; |cos| when `two_sided`, as for a hole through its host, or when no normal is given), the projected
-    rectangle is at least `min_side` px on its shorter side, every corner is visible (MIN_CORNER_SEEN of its samples)
-    and MIN_BAND_SEEN of the frame band is. Visible = depth test (LOOSE_TOLERANCE: casings stand out of the wall plane,
-    an occluder is a wall thickness or more) and furniture box test. Ranked by seen share x area x cos.
+    rectangle is at least `min_side` px on its shorter side, at least MIN_CORNERS corners are visible (MIN_CORNER_SEEN
+    of their samples) and MIN_BAND_SEEN of the frame band is. Visible = depth test (LOOSE_TOLERANCE: casings stand out
+    of the wall plane, an occluder is a wall thickness or more) and furniture box test. Ranked by visible corners, then
+    seen share x area x cos; the k kept views cover as many corners as possible (`cover`).
     """
     maps = mesh if isinstance(mesh, DepthMaps) else DepthMaps(*mesh)
     rect = np.asarray(rect, float)
@@ -356,9 +360,21 @@ def rect_views(photos: list[PosedPhoto], rect: np.ndarray, mesh: DepthMaps | tup
         if boxes:
             seen &= ~occluded_mask(photo.centre, points, boxes)
         band_seen, corner_seen = seen[:len(band)], seen[len(band):].reshape(4, 5)
-        if (corner_seen.sum(1) < MIN_CORNER_SEEN).any() or band_seen.mean() < MIN_BAND_SEEN - 1e-9:
+        visible = tuple(bool(n >= MIN_CORNER_SEEN) for n in corner_seen.sum(1))
+        if sum(visible) < MIN_CORNERS or band_seen.mean() < MIN_BAND_SEEN - 1e-9:
             continue
         area = 0.5 * abs(float(np.dot(uv[:, 0], np.roll(uv[:, 1], -1)) - np.dot(uv[:, 1], np.roll(uv[:, 0], -1))))
-        found.append(RectView(photo, cos, area, min(wide, tall), float(band_seen.mean())))
-    found.sort(key=lambda v: -v.seen * v.area_px * v.cos)
-    return found[:k]
+        found.append(RectView(photo, cos, area, min(wide, tall), float(band_seen.mean()), visible))
+    found.sort(key=lambda v: (-sum(v.corners), -v.seen * v.area_px * v.cos))
+    return cover(found, k)
+
+
+def cover(ranked: list[RectView], k: int) -> list[RectView]:
+    """k views from a ranked list: the best, then each time the one adding most uncovered corners (rank breaks ties)."""
+    pool, chosen, covered = list(ranked), [], [False] * 4
+    while pool and len(chosen) < k:
+        gains = [sum(c and not s for c, s in zip(v.corners, covered)) for v in pool]
+        best = pool.pop(gains.index(max(gains)))
+        chosen.append(best)
+        covered = [s or c for s, c in zip(covered, best.corners)]
+    return chosen

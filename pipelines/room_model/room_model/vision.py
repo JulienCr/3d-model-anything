@@ -27,7 +27,7 @@ from room_model import architecture
 from room_model.architecture import _face_point, dimension_endpoints
 from room_model.capture import colmajor, load_photos, load_roomplan
 from room_model.context import ClaudeMissing, NoPhotos, StageContext, output_path, require
-from room_model.photo_geom import DEPTH_TOLERANCE, LOOSE_TOLERANCE, MIN_DEPTH, DepthMaps, PosedPhoto, best_views, load_posed_photos, load_room_mesh, project, rect_views, room_boxes, to_upright, upright, upright_size
+from room_model.photo_geom import DEPTH_TOLERANCE, LOOSE_TOLERANCE, MIN_CORNERS, MIN_DEPTH, DepthMaps, PosedPhoto, best_views, load_posed_photos, load_room_mesh, project, rect_views, room_boxes, to_upright, upright, upright_size
 
 PACKAGE = Path(__file__).resolve().parent
 CATALOGUE_FILE = PACKAGE.parent / "blender" / "arch" / "catalogue.py"
@@ -134,19 +134,15 @@ class _Crop:
     box: tuple[int, int, int, int]
     overlays: list[tuple[np.ndarray, tuple[int, int, int], str | None]] = field(default_factory=list)
     fallback: str | None = None  # "overview" for an element shown on a wall overview because no photo qualified
-
-
-def _in_image(photo: PosedPhoto, pts: np.ndarray) -> bool:
-    """Every point is in front of the camera and inside the sensor image."""
-    uv, depth = project(photo, pts)
-    return bool((depth > MIN_DEPTH).all() and (uv >= 0).all() and (uv <= photo.size).all())
+    corners: tuple[bool, ...] = ()  # which corners of the element rectangle are visible on this crop
 
 
 def _element_crops(scene: _Scene, el: dict, rect: np.ndarray) -> list[_Crop]:
-    """Up to three eligible views of the element; else one overview of its host face from a photo that shows it whole.
+    """Up to three eligible views of the element, together covering as many corners as possible.
 
-    A door, window, opening or through niche is a hole: it is seen from either side of its host. The overview keeps
-    every rule but the size: the element is small in it, never grazing or hidden.
+    No eligible view: overviews of its host face from photos that pass every rule but the size (the element is
+    small in them, never grazing or hidden). A door, window, opening or through niche is a hole: it is seen from
+    either side of its host.
     """
     host = next((e for e in scene.arch["elements"] if e["id"] == el["host"]), None)
     face = el.get("face") or "A"
@@ -158,17 +154,17 @@ def _element_crops(scene: _Scene, el: dict, rect: np.ndarray) -> list[_Crop]:
     for k, view in enumerate(rect_views(*args, VIEWS_PER_ELEMENT)):
         box = _frame_box(view.photo, rect)
         if box:
-            crops.append(_Crop(f"{el['id']}-{'abc'[k]}", "element", el["id"], view.photo, box, [(rect, YELLOW, None)]))
+            crops.append(_Crop(f"{el['id']}-{'abc'[k]}", "element", el["id"], view.photo, box, [(rect, YELLOW, None)], corners=view.corners))
     if crops or host is None:
         return crops
-    for view in rect_views(*args, len(scene.photos), min_side=0):
+    for k, view in enumerate(rect_views(*args, VIEWS_PER_ELEMENT, min_side=0)):
         seen_from = face
         if partition and _face_normal(scene.arch, host, face) @ (view.photo.centre - rect.mean(0)) < 0:
             seen_from = "B" if face == "A" else "A"
         box = _frame_box(view.photo, np.vstack([_whole_face(scene.arch, host, seen_from), rect]))
-        if box and _in_image(view.photo, rect):
-            return [_Crop(f"{el['id']}-a", "element", el["id"], view.photo, box, [(rect, YELLOW, None)], fallback="overview")]
-    return []
+        if box:
+            crops.append(_Crop(f"{el['id']}-{'abc'[k]}", "element", el["id"], view.photo, box, [(rect, YELLOW, None)], "overview", view.corners))
+    return crops
 
 
 def _whole_face(arch: dict, host: dict, face: str) -> np.ndarray:
@@ -311,6 +307,7 @@ def _elements_doc(arch: dict, typed: list[dict], crops: dict[str, list[_Crop]], 
         "elements": [{"id": e["id"], "kind": e["kind"], "host": e.get("host"), "face": e.get("face"), "flags": e.get("flags", []), **_scan_summary(arch, e),
                       "sheet": f"{e['id']}.jpg" if e["id"] in shown else None,
                       **({"fallback": "overview"} if any(c.fallback for c in crops[e["id"]]) else {}),
+                      "covered_corners": [any(c.corners[i] for c in crops[e["id"]] if c.corners) for i in (3, 2, 1, 0)],  # TL, TR, BR, BL
                       "crops": [{"id": c.id, "size": info[c.id]["size"]} for c in crops[e["id"]] if c.id in info]} for e in typed],
         "faces": [{"host": h["id"], "face": f, "kind": h["kind"], "length_cm": round(float(np.linalg.norm(np.subtract(h["end"], h["start"]))) * 100),
                    "crop": c.id if c and c.id in info else None, "sheet": sheet_of.get(c.id) if c else None} for h, f, c in faces],
@@ -356,7 +353,7 @@ def prepare(ctx: StageContext) -> Path:
     for c in [c for cs in crops.values() for c in cs] + covered:
         if c.id in info:
             info[c.id].update(photo=c.photo.name, box=list(c.box), up_turns=c.photo.up_turns, kind=c.kind, target=c.target,
-                              **({"fallback": c.fallback} if c.fallback else {}))
+                              **({"fallback": c.fallback} if c.fallback else {}), **({"visible_corners": list(reversed(c.corners))} if c.corners else {}))
     elements = _elements_doc(arch, typed, crops, {e["id"] for e in shown}, faces, sheets, info)
     (pending / "crops.json").write_text(json.dumps(info, indent=1), encoding="utf-8")
     (pending / "elements.json").write_text(json.dumps(elements, indent=1), encoding="utf-8")
@@ -426,8 +423,12 @@ def check(value, schema: dict, root: dict, path: str = "value") -> list[str]:
     return errors
 
 
-def _corner_errors(corners: list, crops: dict, kind: str, target: str) -> list[str]:
-    """Corners must sit on crops of `kind` that show `target` (an element id, or the host wall for overview crops)."""
+def _corner_errors(corners: list, crops: dict, kind: str, target: str, needed: int = 4) -> list[str]:
+    """Corners must sit on crops of `kind` that show `target` (an element id, or the host wall for overview crops).
+
+    A point may be null (hidden or outside the crop) as long as `needed` are given: an element is cast corner by
+    corner, a declared niche or panel frame needs its whole rectangle.
+    """
     errors = []
     for i, c in enumerate(corners):
         info = crops.get(c["crop"])
@@ -438,10 +439,13 @@ def _corner_errors(corners: list, crops: dict, kind: str, target: str) -> list[s
             errors.append(f"corners[{i}]: crop {c['crop']!r} is not a {kind} crop of {target!r}")
             continue
         w, h = info["size"]
-        uv = np.array(c["uv"], float)
-        if not ((uv >= 0).all() and (uv[:, 0] <= w).all() and (uv[:, 1] <= h).all()):
+        given = [p for p in c["uv"] if p is not None]
+        uv = np.array(given, float).reshape(-1, 2)
+        if len(given) < needed:
+            errors.append(f"corners[{i}]: {len(given)} points given on {c['crop']!r}, at least {needed} needed")
+        elif not ((uv >= 0).all() and (uv[:, 0] <= w).all() and (uv[:, 1] <= h).all()):
             errors.append(f"corners[{i}]: points outside the {w}x{h} crop {c['crop']!r}")
-        elif abs(float(np.dot(uv[:, 0], np.roll(uv[:, 1], -1)) - np.dot(uv[:, 1], np.roll(uv[:, 0], -1)))) / 2 < MIN_CORNER_AREA:
+        elif len(given) == 4 and abs(float(np.dot(uv[:, 0], np.roll(uv[:, 1], -1)) - np.dot(uv[:, 1], np.roll(uv[:, 0], -1)))) / 2 < MIN_CORNER_AREA:
             errors.append(f"corners[{i}]: degenerate quadrilateral")
     return errors
 
@@ -463,7 +467,7 @@ def _semantic_errors(name: str, item: dict, known: dict, crops: dict, seen: set)
         if item["host_hint"] not in known["hosts"]:
             errors.append(f"unknown host {item['host_hint']!r}")
     if "corners" in item:
-        errors += _corner_errors(item["corners"], crops, *(("element", item["id"]) if name == "elements" else ("overview", item["host_hint"])))
+        errors += _corner_errors(item["corners"], crops, *(("element", item["id"], MIN_CORNERS) if name == "elements" else ("overview", item["host_hint"])))
     return errors
 
 

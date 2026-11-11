@@ -25,11 +25,12 @@ A sheet holds several panels side by side. Each panel is a **crop** of one photo
 
 ## Corners
 
-`corners` is a list with one entry per crop where you can see the element: `{"crop": "<crop id>", "uv": [[u, v], [u, v], [u, v], [u, v]]}`. The four points are in the order top-left, top-right, bottom-right, bottom-left **as they appear on the crop** (the wall may be seen at an angle: the shape is then a quadrilateral, not a rectangle; click the real corners).
+`corners` is a list with one entry per crop where you can see the element: `{"crop": "<crop id>", "uv": [[u, v], [u, v], [u, v], [u, v]]}`. The four entries are in the order top-left, top-right, bottom-right, bottom-left **as they appear on the crop** (the wall may be seen at an angle: the shape is then a quadrilateral, not a rectangle; click the real corners).
 
 - Door or bare opening: the clear passage between the two tableaux (the inner faces of the opening, architrave excluded), from the floor to the underside of the lintel (linteau).
 - Window or niche: the hole in the wall, between the tableaux, from the top of the sill (appui, allège) to the underside of the lintel.
-- Give corners only when the four corners are visible and sharp on that crop (not hidden by furniture, a curtain or the open leaf). Give them on every crop where that holds, up to three: the pipeline compares the views. If you cannot see them, leave `corners` out; the scan value is kept.
+- Give a corner only when it is visible and sharp on that crop (not hidden by furniture, a curtain or the open leaf, not outside the crop). A corner you cannot see is `null`. Give at least two corners on a crop, otherwise leave that crop out; the pipeline casts each corner on the wall by itself and compares the crops, so one crop may give the left corners and another the right ones. If you see no corner anywhere, leave `corners` out; the scan value is kept.
+- Corners `null` (en français) : un coin caché par un meuble, un rideau ou le battant ouvert, ou sorti du cadre de la photo, se note `null` à sa place, jamais deviné. Exemple : sur `Window_2-a` le bas de la fenêtre est derrière un bureau : `{"crop": "Window_2-a", "uv": [[130, 110], [610, 70], null, null]}` ; sur `Window_2-b` les coins du bas sont visibles : `{"crop": "Window_2-b", "uv": [null, null, [455, 690], [205, 705]]}`. Deux coins du même côté (gauche ou droite) donnent la position, un coin à gauche et un à droite donnent la largeur ; il faut un coin du haut et un du bas pour la hauteur. Une niche ou un cadre de panneau (`new_elements`, `panel_frames`) demande en revanche les quatre coins.
 - Be careful: a pixel is small. Read the nearest ticks and interpolate.
 
 ## Catalogue

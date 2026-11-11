@@ -228,21 +228,34 @@ def test_rect_views_accept_a_partly_hidden_frame_when_every_corner_is_seen(tmp_p
     assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=sides) == []
 
 
-def test_rect_views_drop_a_view_with_one_corner_hidden(tmp_path):
+def test_rect_views_report_which_corners_are_visible(tmp_path):
     wall, camera = _plane(5.0, 4.0, 3.0), _seen_from(0, 3.0, tmp_path)
-    corner = _slab(-0.6, -0.3, 0.2, 1.0)  # the top-left corner of the rectangle only
+    corner = _slab(-0.6, -0.3, 0.2, 1.0)  # hides the top-left corner only (RECT is ordered BL, BR, TR, TL)
     assert photo_geom.occluded_mask(camera.centre, photo_geom.rect_corner_samples(RECT)[3], [corner]).sum() >= 4
-    assert photo_geom.occluded_mask(camera.centre, photo_geom.rect_band(RECT), [corner]).mean() <= 0.25  # the frame band is mostly seen
-    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=[corner]) == []
-    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER)  # without the box it is eligible
+    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER)[0].corners == (True, True, True, True)
+    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=[corner])[0].corners == (True, True, True, False)
 
 
-def test_rect_views_drop_a_view_with_a_corner_outside_the_image(tmp_path):
+def test_rect_views_need_two_visible_corners(tmp_path):
+    wall, camera = _plane(5.0, 4.0, 3.0), _seen_from(0, 3.0, tmp_path)
+    left_hidden = [_slab(-0.6, -0.1, -1.0, 1.0)]  # the left corners and 44 % of the band are hidden
+    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=left_hidden)[0].corners == (False, True, True, False)
+    one_left = left_hidden + [_slab(0.3, 0.6, 0.2, 1.0)]  # and the top-right corner too
+    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=one_left) == []
+
+
+def test_rect_views_cover_the_corners_with_complementary_views(tmp_path):
     wall = _plane(5.0, 4.0, 3.0)
-    aside = _camera("aside", CENTRE + np.array([0.0, 0.0, -3.0]), CENTRE + np.array([0.6, 0.0, 0.0]), tmp_path)  # one edge leaves the image
-    uv, _ = photo_geom.project(aside, RECT)
-    assert (uv[:, 0] > 640).any() and (uv[:, 0] < 640).any() and (uv[:, 0] > 0).all()
-    assert photo_geom.rect_views([aside], RECT, wall, TOWARDS_VIEWER) == []
+    left = _camera("left", CENTRE + np.array([0.0, 0.0, -3.0]), CENTRE + np.array([-0.6, 0.0, 0.0]), tmp_path)  # the right edge leaves the image
+    right = _camera("right", CENTRE + np.array([0.0, 0.0, -3.0]), CENTRE + np.array([0.6, 0.0, 0.0]), tmp_path)
+    full = _seen_from(30, 3.5, tmp_path, "full")
+    views = photo_geom.rect_views([left, right, full], RECT, wall, TOWARDS_VIEWER)
+    assert _names(views)[0] == "full" and {"left", "right"} <= set(_names(views))  # most corners first
+    assert views[0].corners == (True,) * 4
+    two = photo_geom.rect_views([left, right], RECT, wall, TOWARDS_VIEWER)
+    assert {v.corners for v in two} == {(True, False, False, True), (False, True, True, False)}
+    ranked = [photo_geom.rect_views([c], RECT, wall, TOWARDS_VIEWER)[0] for c in (left, right, full)]
+    assert [v.photo.name for v in photo_geom.cover([ranked[0], ranked[0], ranked[1]], 2)] == ["left", "right"]  # the repeat adds nothing
 
 
 def test_rect_views_tolerate_a_casing_standing_out_of_the_plane(tmp_path):
