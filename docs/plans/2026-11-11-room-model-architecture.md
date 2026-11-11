@@ -231,3 +231,13 @@
 - [ ] **Step 5: commit** `docs(room-model): document the architecture stages and the Blender scene`.
 
 **Checkpoint (orchestrator):** full run timed on the capture, trace `12-bureau-final`, whole-branch review.
+
+---
+
+## Addendum (2026-11-11): photo anchoring and measurement semantics
+
+Spec: section "Photo anchoring of fixture edges". Reference implementation and numbers: `~/dev/spikes/photo-anchoring/` (`REPORT.md`, `code/`, `setup.sh`).
+
+- **Task 12 — `anchor` stage** (`room_model/ortho.py`, `segment.py`, `anchor.py`; torch + SAM 2.1 pinned in requirements; stage between `openings` and `architecture`; `architecture` uses anchored edges with `source: "photo"` and their depth in `dimension_endpoints`). Synthetic tests per REPORT §Integration plan (recessed leaf + casing from 3 poses; ortho round-trip; recipes with a stub mask; endpoints at depth). GPU tests skipped when CUDA is absent.
+- **Task 13 — `edge_pick`** replaces the corner clicks in `vision`/`llm_merge`: lettered candidate lines on rectified strips, the LLM answers letters; validation; merge as photo source.
+- **Task 14 — leaf/jamb/casing joinery + survey page**: Blender cut = leaf + 2 jambs, casing to the LiDAR outer extent; survey rows per kind with precise wording, endpoints on anchored edges, durable store (FS Access autosave, pre-fill, import, per-capture key, date + note per row); skirting gaps fixed (observed: back-wall skirting only in short pieces).

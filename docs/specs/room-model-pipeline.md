@@ -243,3 +243,26 @@ did not detect.
   download of `measurements.json`.
 - Rerunning with that file applies the tape values to the model (priority tape > LLM > LiDAR >
   RoomPlan > assumed) and rebuilds the Blender scene; a station moves the less certain wall.
+
+### Photo anchoring of fixture edges (2026-11-11, research spike `~/dev/spikes/photo-anchoring/REPORT.md`) — overrides "CPU only"
+
+- **GPU is part of the pipeline** (user decision): torch and SAM 2.1 are regular dependencies; an
+  NVIDIA GPU is expected (developed on an RTX 4090). The "CPU only / no torch" lines above are void.
+- New stage `anchor` (after `openings` and `registration`, before `architecture`, output
+  `anchors.json`): rectify each host face from the posed photos, segment the element with SAM 2.1
+  prompted by the projected model rectangle, snap each mask edge to a gradient peak, triangulate each
+  edge's depth behind the face across views, median over views. Floor-based bottoms (doors, floor
+  niches, openings) are the LiDAR floor plane by rule. Sigma comes from the depth ambiguity, not only
+  the view spread.
+- Measurement semantics per kind: door = **leaf** (the moving panel; double leaf = union of both);
+  window = sash/leaf (candidates + pick when the mask fails: curtains, frosted glass); niche and
+  opening = jamb to jamb, floor (or sill) to head underside.
+- The LLM no longer gives coordinates: geometry proposes lettered candidate lines on rectified strips
+  and the LLM picks letters (`edge_pick`); typing stays in `vision`.
+- Anchored edges carry their depth; survey endpoints and Blender geometry use them at that depth.
+- Joinery from the leaf: leaf = anchored or tape value; frame (jamb) visible width = a stated constant
+  or the LLM; wall cut = leaf + 2 × jamb (height + 1 jamb); casing = remaining width up to the LiDAR
+  outer extent, flagged `to_verify` outside a plausible range.
+- Survey page: lines on the anchored edges with what to tape spelled out ("vantail", "deux vantaux
+  ensemble", "passage", "niche"), a durable store (linked `measurements.json` via the File System
+  Access API with autosave, pre-fill from the existing file, browser copy keyed by capture, import).
