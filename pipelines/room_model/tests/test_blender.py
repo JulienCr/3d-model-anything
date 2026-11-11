@@ -177,8 +177,8 @@ def scene(tmp_path_factory):
     return ctx, arch, json.loads(facts_path.read_text(encoding="utf-8"))
 
 
-def _probe(ctx, arch_path, rays=(), spans=(), texel_rays=()):
-    spec = {"rays": list(rays), "rigs": [], "spans": list(spans), "texel_rays": list(texel_rays), "arch": str(arch_path), "blender_dir": str(BLENDER_DIR)}
+def _probe(ctx, arch_path, rays=(), spans=(), texel_rays=(), rigs=()):
+    spec = {"rays": list(rays), "rigs": list(rigs), "spans": list(spans), "texel_rays": list(texel_rays), "arch": str(arch_path), "blender_dir": str(BLENDER_DIR)}
     spec_path, facts_path = ctx.out / "spec.json", ctx.out / "facts.json"
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
     blender_stage.run_blender(["--background", ctx.out / "architecture.blend", "--python-exit-code", "1", "--python", PROBE,
@@ -422,6 +422,148 @@ def test_open_render_shows_the_leaves_swung(scene):
     ctx, _, _ = scene
     closed, opened = (np.asarray(Image.open(ctx.out / "renders" / f"{n}.png").convert("L"), int) for n in ("top", "open"))
     assert (np.abs(closed - opened) > 20).sum() > 300
+
+
+LEAF_FRAME = {"profile": "flat", "width": 0.07}
+JAMB = 0.05  # openings.JAMB_VISIBLE
+# (source, id, host, centre along the host, parameter values, fields): doors and windows measured by their leaf
+LEAF_ELEMENTS = [
+    ("Door_1", "Door_L1", "Wall_M3", 0.6, {"width": 1.04, "height": 2.12, "leaf_width": 0.8, "leaf_height": 2.0}, {"frame": LEAF_FRAME}),
+    ("Door_1", "Door_L2", "Wall_M3", 1.9, {"width": 1.04, "height": 2.12}, {"frame": LEAF_FRAME}),
+    ("Door_1", "Door_L3", "Wall_M1", 0.9, {"width": 1.7, "height": 2.15, "leaf_width": 1.4, "leaf_height": 2.0},
+     {"frame": {"profile": "flat", "width": 0.1}, "type": "hinged_double"}),
+    ("Door_1", "Door_L4", "Wall_M5", 1.25, {"width": 1.5, "height": 2.12, "leaf_width": 0.8, "leaf_height": 2.0}, {"frame": LEAF_FRAME}),
+    ("Window_1", "Window_L1", "Wall_M1", 4.6, {"width": 1.0, "height": 1.2, "sill": 0.9, "leaf_width": 0.8, "leaf_height": 1.0},
+     {"frame": {"profile": "flat", "width": 0.05}, "type": "casement_single"}),
+]
+
+
+def _add_leaf_elements(arch):
+    for source, new_id, host, centre, values, fields in LEAF_ELEMENTS:
+        element = json.loads(json.dumps(_element(arch, source)))
+        element.update(id=new_id, host=host, **fields)
+        for name, pid in list(element["params"].items()):
+            element["params"][name] = f"opening.{new_id}.{name}"
+            arch["parameters"][element["params"][name]] = dict(arch["parameters"][pid])
+        for name, value in {**values, "center_s": centre}.items():
+            pid = element["params"].setdefault(name, f"opening.{new_id}.{name}")
+            arch["parameters"][pid] = {**arch["parameters"].get(pid, {"sigma": 0.0, "unit": "m", "source": "llm"}), "value": value}
+        arch["elements"].append(element)
+
+
+def _cut_rays(arch, oid, cut_w, bottom, top):
+    """Rays across the wall just inside and just outside the cut, along it and up its height."""
+    host = _element(arch, oid)["host"]
+    mid = (bottom + top) / 2
+    rays = []
+    for name, along, height in (("in-left", -cut_w / 2 + 0.01, mid), ("in-right", cut_w / 2 - 0.01, mid), ("out-left", -cut_w / 2 - 0.01, mid),
+                                ("out-right", cut_w / 2 + 0.01, mid), ("in-low", 0.0, bottom + 0.01), ("in-high", 0.0, top - 0.01),
+                                ("out-high", 0.0, top + 0.01)):
+        rays.append(_ray(arch, oid, f"{oid}-{name}", along, height, target=host))
+    if bottom > 0.05:
+        rays.append(_ray(arch, oid, f"{oid}-out-low", 0.0, bottom - 0.01, target=host))
+    return rays
+
+
+CUTS = {  # id: (cut width, bottom, top) in metres above the floor
+    "Door_L1": (0.9, 0.0, 2.05), "Door_L2": (0.9, 0.0, 2.05), "Door_L3": (1.5, 0.0, 2.05), "Door_L4": (0.9, 0.0, 2.05),
+    "Window_L1": (0.9, 0.95, 2.05),
+}
+
+
+@pytest.fixture(scope="module")
+def leafed(tmp_path_factory):
+    ctx, _ = make_case(tmp_path_factory.mktemp("leafed"), "leafed", window=True, partition=True, partition_opening=True,
+                       partition_opening_width=0.6)
+    shell.run(ctx)
+    model.run(ctx)
+    openings.run(ctx)
+    architecture.run(ctx)
+    arch_path = output_path(ctx, "architecture")
+    arch = json.loads(arch_path.read_text(encoding="utf-8"))
+    _add_leaf_elements(arch)
+    arch_path.write_text(json.dumps(arch), encoding="utf-8")
+    blender_stage.run(ctx)
+    rays = [r for oid, (w, bottom, top) in CUTS.items() for r in _cut_rays(arch, oid, w, bottom, top)]
+    rigs = [{"name": f"{kind}-{oid}", "empty": oid, "props": props} for oid in CUTS for kind, props in (("closed", {}), ("open", {"Ouverture": 1}))]
+    return ctx, arch, _probe(ctx, arch_path, rays, rigs=rigs)
+
+
+@needs_blender
+@pytest.mark.parametrize("oid", CUTS)
+def test_wall_cut_is_the_leaf_plus_a_jamb_on_each_side(leafed, oid):
+    _, _, facts = leafed
+    rays = facts["rays"]
+    for inside in ("in-left", "in-right", "in-low", "in-high"):
+        assert not rays[f"{oid}-{inside}"]["hit"], f"{oid}: wall left inside the cut ({inside})"
+    for outside in ("out-left", "out-right", "out-high", *(["out-low"] if f"{oid}-out-low" in rays else [])):
+        assert rays[f"{oid}-{outside}"]["hit"], f"{oid}: wall cut away outside the cut ({outside})"
+
+
+@needs_blender
+@pytest.mark.parametrize("oid,width", [("Door_L1", 0.8), ("Door_L2", 0.8), ("Window_L1", 0.8), ("Door_L4", 0.8)])
+def test_single_leaf_is_as_wide_as_the_leaf(leafed, oid, width):
+    _, _, facts = leafed
+    assert facts["objects"][f"{oid}_Leaf_1"]["dims"][0] == pytest.approx(width, abs=0.001)
+
+
+@needs_blender
+def test_double_leaves_add_up_to_the_leaf_width(leafed):
+    _, _, facts = leafed
+    one, two = (facts["rigs"]["closed-Door_L3"][f"Door_L3_Leaf_{k}"]["extent_x"] for k in (1, 2))
+    assert min(one + two) == pytest.approx(-0.7, abs=0.001) and max(one + two) == pytest.approx(0.7, abs=0.001)
+    assert one[1] == pytest.approx(two[0], abs=0.001), "the leaves meet in the middle"
+
+
+@needs_blender
+def test_leaf_rig_still_opens_ninety_degrees_from_the_jamb(leafed):
+    _, _, facts = leafed
+    closed, opened = facts["rigs"]["closed-Door_L1"]["Door_L1_Leaf_1"], facts["rigs"]["open-Door_L1"]["Door_L1_Leaf_1"]
+    assert abs(closed["location"][0]) == pytest.approx(0.4, abs=0.001), "hinged at the leaf edge, in front of the jamb"
+    assert abs(opened["rotation_z_deg"]) == pytest.approx(90, abs=0.5)
+    assert opened["location"] == pytest.approx(closed["location"], abs=1e-4)
+
+
+@needs_blender
+def test_frame_surrounds_the_leaf_with_a_jamb_each_side(leafed):
+    _, arch, facts = leafed
+    frame_ = facts["objects"]["Door_L1_Frame"]
+    n = _on_face(arch, _element(arch, "Door_L1"))[2]
+    lo, hi = np.array(frame_["bbox"])
+    n_b = _plan_dir(n)
+    assert (hi - lo)[:2] @ np.abs(np.array([-n_b[1], n_b[0]])) == pytest.approx(0.8 + 2 * JAMB, abs=0.006)
+    assert hi[2] - lo[2] == pytest.approx(2.0 + JAMB, abs=0.006)
+
+
+@needs_blender
+def test_architraves_run_from_the_cut_to_the_outer_extent(leafed):
+    _, arch, facts = leafed
+    floor = _value(arch, "floor.level")
+    for oid, outer_w, outer_top in (("Door_L1", 1.04, 2.12), ("Door_L2", 1.04, 2.12), ("Door_L3", 1.7, 2.15), ("Window_L1", 1.0, 2.1)):
+        obj = facts["objects"][f"{oid}_Architrave"]
+        lo, hi = np.array(obj["bbox"])
+        n_b = _plan_dir(_on_face(arch, _element(arch, oid))[2])
+        assert (hi - lo)[:2] @ np.abs(np.array([-n_b[1], n_b[0]])) == pytest.approx(outer_w, abs=0.012), oid
+        assert hi[2] - floor == pytest.approx(outer_top, abs=0.004), oid
+        assert obj["collections"] == ["Moulures"] and obj["flags"] is None, oid
+
+
+@needs_blender
+def test_derived_leaf_is_flagged_and_a_measured_one_is_not(leafed):
+    _, _, facts = leafed
+    objects = facts["objects"]
+    assert objects["Door_L2"]["flags"] == "leaf_estimated"
+    assert all(objects[o]["flags"] is None for o in ("Door_L1", "Door_L3", "Window_L1"))
+
+
+@needs_blender
+def test_an_implausible_casing_is_clamped_and_sent_to_verification(leafed):
+    _, _, facts = leafed
+    root, band = facts["objects"]["Door_L4"], facts["objects"]["Door_L4_Architrave"]
+    assert "to_verify" in root["flags"] and "to_verify" in band["flags"]
+    assert band["collections"] == ["\u00c0 v\u00e9rifier"]
+    lo, hi = np.array(band["bbox"])
+    assert (hi - lo)[2] > 0 and hi[2] - lo[2] == pytest.approx(2.05 + 0.2, abs=0.01), "casing of 20 cm, not the 30 cm left over"
 
 
 def _plan_dir(vec):
@@ -1172,8 +1314,9 @@ def test_architraves_frame_the_openings(moulded):
             obj = objects[name]
             lo, hi = np.array(obj["bbox"])
             assert obj["collections"] == ["Moulures"] and obj["materials"] == ["Moulure"]
-            assert hi[2] - floor == pytest.approx(h + spec["width"], abs=0.003) and lo[2] == pytest.approx(floor, abs=0.003)
-            assert (hi - lo)[:2] @ np.abs(np.array([-n_b[1], n_b[0]])) == pytest.approx(w + 2 * spec["width"], abs=0.012)
+            grow = 0.0 if el["kind"] in ("door", "window") else spec["width"]  # a door or window casing lies inside the outer extent
+            assert hi[2] - floor == pytest.approx(h + grow, abs=0.003) and lo[2] == pytest.approx(floor, abs=0.003)
+            assert (hi - lo)[:2] @ np.abs(np.array([-n_b[1], n_b[0]])) == pytest.approx(w + 2 * grow, abs=0.012)
     t = _value(arch, "partition.P1.thickness")
     a, b = (np.array(objects[f"Opening_1_Architrave_{f}"]["bbox"]).mean(0) for f in "AB")
     assert abs((a - b)[:2] @ _plan_dir(_on_face(arch, _element(arch, "Opening_1"))[2])) == pytest.approx(t + 0.015, abs=0.004)

@@ -8,7 +8,7 @@ import math
 import bmesh
 import bpy
 
-from . import frame, plan, profiles, shell
+from . import frame, openings, plan, profiles, shell
 
 BITE = 0.001  # m a moulding sinks into its host, so no two faces are coplanar
 DEFAULT_PROJECTION = 0.015
@@ -19,7 +19,6 @@ MAX_MITRE = 4.0  # floor of 1 / (1 + cos) so a near fold-back does not shoot off
 EPS = 1e-9
 ARCHITRAVE_PROJECTION = 0.015
 PANEL_WIDTH, PANEL_PROJECTION = 0.03, 0.015
-SILL_TOL = 0.02  # m: an opening whose sill is below this reaches the floor, so its architrave has no bottom bar
 HOST_KINDS = ("wall", "partition")
 
 
@@ -288,7 +287,7 @@ def _band(arch: dict, name: str, host: dict, side: int, path: list, normals: lis
     return _finish(name, bm, collection, [*flags, *([] if known else ["unknown_profile"])])
 
 
-def _architraves(arch: dict, el: dict, hosts: dict, y_floor: float, collection) -> list[bpy.types.Object]:
+def _architraves(arch: dict, el: dict, hosts: dict, y_floor: float, collection, verify) -> list[bpy.types.Object]:
     host = hosts.get(el.get("host"))
     spec = el.get("frame")
     if not spec or host is None or host["kind"] not in HOST_KINDS:
@@ -296,17 +295,20 @@ def _architraves(arch: dict, el: dict, hosts: dict, y_floor: float, collection) 
     if "width" not in spec:
         raise ValueError(f"{el['id']}: frame.width is missing")
     geom = frame.wall_geometry(arch, host)
-    w, h, sill, centre = (frame.value(arch, el["params"][k]) for k in ("width", "height", "sill", "center_s"))
-    s0, s1, y0 = centre - w / 2, centre + w / 2, y_floor + sill
-    closed = sill > SILL_TOL
-    path = [(s0, y0), (s0, y0 + h), (s1, y0 + h), (s1, y0)]
+    lay = openings.resolve(arch, el)
+    centre = frame.value(arch, el["params"]["center_s"])
+    s0, s1, y0 = centre - lay.cut_w / 2, centre + lay.cut_w / 2, y_floor + lay.bottom
+    closed = lay.bottom_casing
+    path = [(s0, y0), (s0, y0 + lay.cut_h), (s1, y0 + lay.cut_h), (s1, y0)]
     normals = [(-1.0, 0.0), (0.0, 1.0), (1.0, 0.0)] + ([(0.0, -1.0)] if closed else [])
     sides = _faces(arch, el, host, geom)
+    flags = [*el.get("flags", []), *(f for f in lay.flags if f == "to_verify")]
+    target = verify if "to_verify" in flags else collection
     out = []
     for side in sides:
         suffix = "" if len(sides) == 1 else ("_A" if side == 1 else "_B")
-        band = ("architrave", spec.get("profile"), spec["width"], ARCHITRAVE_PROJECTION, el.get("flags", []))
-        out.append(_band(arch, f"{el['id']}_Architrave{suffix}", host, side, path, normals, closed, band, collection))
+        band = ("architrave", spec.get("profile"), lay.casing, ARCHITRAVE_PROJECTION, flags)
+        out.append(_band(arch, f"{el['id']}_Architrave{suffix}", host, side, path, normals, closed, band, target))
     return out
 
 
@@ -335,5 +337,5 @@ def add(arch: dict, collections: dict, ctx: dict) -> list[bpy.types.Object]:
         elif kind == "panel_frame":
             out.append(_panel_frame(arch, el, hosts, y_floor, collections["À vérifier"]))
         elif kind in shell.CUT_KINDS:
-            out += _architraves(arch, el, hosts, y_floor, moulures)
+            out += _architraves(arch, el, hosts, y_floor, moulures, collections["À vérifier"])
     return [o for o in out if o is not None]

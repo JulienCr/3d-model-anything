@@ -3,7 +3,7 @@ import bmesh
 import bpy
 from mathutils import Vector, geometry
 
-from . import frame, plan
+from . import frame, openings, plan
 
 CUT_KINDS = ("door", "window", "opening", "niche")
 CUT_OVERSHOOT = 0.01  # m a cutter sticks out of each face of its host
@@ -55,8 +55,8 @@ def recess_depth(arch: dict, geom: dict, el: dict) -> float | None:
 
 def _cutter(arch: dict, geom: dict, opening: dict, y_floor: float, host: dict) -> tuple[bpy.types.Object, list] | None:
     """The cutting box of an opening and the plan quad it cuts through the host (without the overshoots); None for no size."""
-    p = opening["params"]
-    w, h, sill, centre = (frame.value(arch, p[k]) for k in ("width", "height", "sill", "center_s"))
+    lay = openings.resolve(arch, opening)
+    w, h, sill, centre = lay.cut_w, lay.cut_h, lay.bottom, frame.value(arch, opening["params"]["center_s"])
     if w <= 0 or h <= 0:
         return None
     side = frame.side(host, opening.get("face"))
