@@ -214,3 +214,18 @@ def test_a_partition_collinear_with_a_wall_ends_flush_with_it():
     _, finals, _ = _resolved(arch)
     at_corner = sorted(z for x, z in finals["Partition_P1"].exterior.coords if abs(x - 3.0) < 1e-6)
     assert at_corner[0] == pytest.approx(2.0, abs=0.005) and at_corner[-1] == pytest.approx(2.2, abs=0.005), "both faces meet the wall's"
+
+
+@pytest.mark.parametrize("fraction,snapped", [(0.45, True), (0.55, False)])
+def test_snap_threshold_is_half_the_thinner_thickness(fraction, snapped):
+    """Off the step wall's face line by 0.9 x half the thickness the partition is flush with it; by 1.1 x it keeps its step."""
+    offset = fraction * THICKNESS
+    arch = _ring([(0, 0), (6, 0), (6, 2), (3, 2), (3, 4), (0, 4)])
+    line = ((3.2, 2.0 - offset), (0.0, 2.0 - offset), THICKNESS)
+    _wall(arch, "partition", "Partition_P1", line[0], line[1], THICKNESS, (0.0, -1.0))
+    walls, finals, _ = _resolved(arch)
+    lowest = min(z for x, z in finals["Partition_P1"].exterior.coords if x > 2.9)  # the face towards the room, at the step wall
+    assert lowest == pytest.approx(2.0 if snapped else 2.0 - offset, abs=0.01 if snapped else 1e-6), "flush, or the step stays"
+    for wall in walls.values():
+        assert finals["Partition_P1"].intersection(wall).area == pytest.approx(0.0, abs=1e-9)
+    assert _slots(arch, walls, finals, {"Partition_P1": (line[0], line[1], THICKNESS)}) == 0

@@ -14,7 +14,9 @@ JOIN_TOL = 0.02  # m: RoomPlan walls share their corner point to well under this
 NEAR_PARALLEL = math.sin(math.radians(10.0))  # |sin| of the turn under which two walls count as parallel (brief)
 CORNER_SHIFT = 2.0  # x t: a line intersection further than this from the shared corner is a blow-up (a 10 degree turn with a jog)
 REACH = 1.5  # x t: a RoomPlan partition ends within about a wall thickness of the face it meets, plus its own error
-SNAP = 0.5  # x t: a collinear partition off a wall face line by under half its thickness still shares most of the wall body, so it is the same plane
+# Snap a collinear partition flush when its body still overlaps the wall's by more than half the thinner of the two
+# (offset < SNAP x min thickness); below that it is a different plane and keeps its step.
+SNAP = 0.5
 SHADOW = 5.0  # x t a host is swept along a partition line to remove what sticks out behind it
 TOUCH_TOL = 0.001  # m: polygons overlapping by less than this only touch (mesh precision)
 
@@ -198,7 +200,7 @@ def _shadow(poly: list, d) -> list:
 
 
 def _face_lines(quad: list):
-    """The two face lines of a partition quad as (vertex, vertex, other end of the line) triples: A (0, 1) and B (3, 2)."""
+    """The two face lines of a partition quad as (vertex, vertex) index pairs: A (0, 1) and B (3, 2)."""
     return ((0, 1), (3, 2))
 
 
@@ -237,6 +239,7 @@ def _snap(quad: list, walls: dict, lines: dict) -> list:
     The n of a wall points to its room, so a partition facing the same way has its face on the wall face line.
     """
     quad = list(quad)
+    thickness = math.dist(quad[0], quad[3])
     n = _sub(quad[0], quad[3])  # from the back line to the face line
     size = math.hypot(*n) or 1.0
     n = (n[0] / size, n[1] / size)
@@ -252,7 +255,7 @@ def _snap(quad: list, walls: dict, lines: dict) -> list:
             for i, target in zip(faces, targets):
                 step = (target - _dot(line["n"], quad[i])) / _dot(line["n"], n)
                 moved.append((quad[i][0] + n[0] * step, quad[i][1] + n[1] * step, step))
-            if all(abs(m[2]) <= SNAP * line["t"] for m in moved):
+            if all(abs(m[2]) < SNAP * min(line["t"], thickness) for m in moved):
                 for i, m in zip(faces, moved):
                     quad[i] = (m[0], m[1])
                 break
