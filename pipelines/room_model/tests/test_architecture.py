@@ -163,3 +163,11 @@ def test_survey_alternatives(full):
     assert max(alts.values()) in (1, 2, 3) and all(a <= 3 for a in alts.values())
     assert all(r.count('class="main"') == 1 for r in rows.values() if "data:image/jpeg" in r)
     assert "swap" in html and "http" not in html and "<script src" not in html
+
+
+def test_survey_masked_note(full):
+    _, _, arch = full
+    rows = survey_page.numbered_rows(arch)[:2]
+    html = survey_page.render(arch, rows, {1: ["AAAA", "BBBB"], 2: ["CCCC"]}, frozenset({1}))
+    sections = {int(m.group(1)): m.group(0) for m in re.finditer(r'<article class="row[^"]*" id="row-(\d+)".*?</article>', html, re.S)}
+    assert "vue partiellement masquée par un meuble" in sections[1] and "meuble" not in sections[2]

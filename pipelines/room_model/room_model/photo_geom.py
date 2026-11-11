@@ -150,27 +150,29 @@ def room_boxes(roomplan: dict, w2r: np.ndarray) -> list[RoomBox]:
     return out
 
 
-def sight_blocked(centre: np.ndarray, span: np.ndarray, boxes: list[RoomBox], margin: float = BOX_MARGIN) -> bool:
-    """True when a sight line from `centre` to a sample of the span (ends included) crosses a box grown by `margin`.
+def occluded_fraction(centre: np.ndarray, span: np.ndarray, boxes: list[RoomBox], margin: float = BOX_MARGIN) -> float:
+    """Fraction of the span samples (ends included) whose sight line from `centre` crosses a box grown by `margin`.
 
-    A box that contains the sample itself is ignored: the measured element may sit inside its slack.
+    A box holding the sample, or the camera centre, is ignored for that sample.
     """
-    span = np.asarray(span, float)
+    span, centre = np.asarray(span, float), np.asarray(centre, float)
     t = np.linspace(0.0, 1.0, SIGHT_SAMPLES)[:, None]
     samples = span[0] + t * (span[-1] - span[0])
+    blocked = np.zeros(len(samples), bool)
     for box in boxes:
         half = box.half + margin
-        a, d = (np.asarray(centre, float) - box.centre) @ box.axes, (samples - box.centre) @ box.axes
-        a, d = np.broadcast_to(a, d.shape), d - a
+        a, p = (centre - box.centre) @ box.axes, (samples - box.centre) @ box.axes
+        if (np.abs(a) <= half).all():
+            continue
+        d = p - a
         with np.errstate(divide="ignore", invalid="ignore"):
             t0, t1 = (-half - a) / d, (half - a) / d
         parallel = np.abs(d) < 1e-12
         lo = np.where(parallel, np.where(np.abs(a) <= half, -np.inf, np.inf), np.minimum(t0, t1)).max(1)
         hi = np.where(parallel, np.inf, np.maximum(t0, t1)).min(1)
-        inside = (np.abs(d + a) <= half).all(1)
-        if (~inside & (np.maximum(lo, 0.0) <= np.minimum(hi, 1.0))).any():
-            return True
-    return False
+        inside = (np.abs(p) <= half).all(1)
+        blocked |= ~inside & (np.maximum(lo, 0.0) <= np.minimum(hi, 1.0))
+    return float(blocked.mean())
 
 
 class DepthMaps:
@@ -232,7 +234,7 @@ def best_views(photos: list[PosedPhoto], pts_room: np.ndarray, mesh: DepthMaps |
 
     Score: squared pixel diagonal of the projected points, times the cosine between the optical axis and the
     direction to the points' centroid, times |cos| between `normal` and the direction to the camera when given.
-    With `boxes`, a photo whose sight lines to the span cross a box is rejected as well.
+    With `boxes`, photos are ranked by the fraction of the span hidden by furniture first (see `occluded_fraction`).
     """
     maps = mesh if isinstance(mesh, DepthMaps) else DepthMaps(*mesh)
     pts = np.atleast_2d(np.asarray(pts_room, float))
@@ -242,13 +244,12 @@ def best_views(photos: list[PosedPhoto], pts_room: np.ndarray, mesh: DepthMaps |
         uv, depth = project(photo, pts)
         if not (depth > MIN_DEPTH).all() or not maps.visible(photo, pts, tolerance).all():
             continue
-        if boxes and sight_blocked(photo.centre, pts, boxes):
-            continue
+        hidden = occluded_fraction(photo.centre, pts, boxes) if boxes else 0.0
         diag2 = float(((uv.max(0) - uv.min(0)) ** 2).sum()) + 1.0
         to_point = centroid - photo.centre
         distance = np.linalg.norm(to_point)
         cos_axis = float(to_point @ photo.c2w_room[:3, 2]) / max(distance, 1e-9)
         cos_surface = 1.0 if normal is None else abs(float(np.asarray(normal, float) @ to_point)) / max(distance, 1e-9)
-        scored.append((diag2 * max(cos_axis, 0.0) * cos_surface, photo))
-    scored.sort(key=lambda s: -s[0])
+        scored.append(((round(hidden, 6), -diag2 * max(cos_axis, 0.0) * cos_surface), photo))
+    scored.sort(key=lambda s: s[0])
     return [p for _, p in scored[:k]]

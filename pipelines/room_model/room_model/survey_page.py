@@ -16,16 +16,16 @@ from room_model.architecture import STATION_HEIGHT, dimension_endpoints
 from room_model.capture import colmajor, load_roomplan
 from room_model.context import StageContext
 from room_model.fmt import fr
-from room_model.photo_geom import DepthMaps, PosedPhoto, best_views, load_posed_photos, load_room_mesh, project, room_boxes, to_upright, upright, upright_size
+from room_model.photo_geom import DepthMaps, PosedPhoto, best_views, load_posed_photos, load_room_mesh, occluded_fraction, project, room_boxes, to_upright, upright, upright_size
 
 GROUP = {"opening_width": 0, "opening_height": 0, "opening_sill": 0, "width": 1, "length": 1, "ceiling_height": 2}
 SOURCES = {"lidar": "LiDAR", "roomplan": "RoomPlan", "assumed": "valeur supposée", "llm": "LLM"}
 PRIORITY_SIGMA = 0.02  # m
 PRIORITY_SOURCES = ("roomplan", "llm", "assumed")
 BADGE = "à reprendre en priorité"
+MASKED_NOTE = "vue partiellement masquée par un meuble"
 LOOSE_TOLERANCE = 0.06  # m; second try when no photo passes the 3 cm test (a skirting or a frame hides an end)
 CROP_SIDE = 480  # px on the long side of a crop
-THUMB_SIDE = 240
 MAX_ALTERNATIVES = 3
 MARKER_RADIUS = 11
 MARKER_GAP = 26.0
@@ -126,12 +126,13 @@ def _values(dim: dict) -> str:
     return f"Scan : {fr(dim['value'] * 100)} cm"
 
 
-def _row_html(row: Row, arch: dict, crops: list[str]) -> str:
+def _row_html(row: Row, arch: dict, crops: list[str], masked: bool = False) -> str:
     d = row.dim
     badge = f' <span class="badge">{BADGE}</span>' if row.priority else ""
     alts = "".join(f'<img class="alt" alt="Autre vue" title="Autre vue" src="data:image/jpeg;base64,{c}">' for c in crops[1:])
+    note = f'<p class="masked">{MASKED_NOTE}</p>' if masked else ""
     image = (f'<figure><img class="main" alt="Photo de {escape(d["id"])}" src="data:image/jpeg;base64,{crops[0]}">'
-             f'<div class="alts">{alts}</div></figure>'
+             f'<div class="alts">{alts}</div>{note}</figure>'
              if crops else '<figure class="nophoto">Pas de photo où les deux extrémités sont visibles.</figure>')
     return (f'<article class="row{" priority" if row.priority else ""}" id="row-{row.number}" data-dim="{escape(d["id"])}">'
             f'<div class="num">{row.number}</div><div class="body"><h3>{escape(_describe(d, arch))}</h3>'
@@ -156,7 +157,7 @@ button.main{background:#1f6feb;color:#fff;border-color:#1f6feb}
 .badge{display:inline-block;background:#ffebe9;color:#a40e26;border-radius:10px;padding:1px 8px;font-size:.8rem;margin-left:6px}
 .entry{display:block;font-size:.9rem}.entry input{font:inherit;width:8rem;padding:.4rem;margin-left:6px}
 figure{margin:0}figure img{width:100%;height:auto;border-radius:4px;display:block}.nophoto{color:#6e7781;font-size:.85rem}
-figure .alts{display:flex;gap:6px;margin-top:6px}.alts img{width:72px;height:54px;object-fit:cover;cursor:pointer;border:1px solid #bbb}
+figure .alts{display:flex;gap:6px;margin-top:6px}.masked{color:#9a6700;font-size:.8rem;margin:4px 0 0}.alts img{width:72px;height:54px;object-fit:cover;cursor:pointer;border:1px solid #bbb}
 #status{color:#57606a;font-size:.9rem}
 @media(max-width:640px){.row{grid-template-columns:36px 1fr}.row figure{grid-column:1 / -1}}
 """
@@ -219,9 +220,9 @@ SCRIPT = """
 """
 
 
-def render(arch: dict, rows: list[Row], crops: dict[int, list[str]]) -> str:
+def render(arch: dict, rows: list[Row], crops: dict[int, list[str]], masked: frozenset[int] = frozenset()) -> str:
     """The sheet as one HTML document; `crops` maps a row number to base64 JPEGs, the chosen view first."""
-    body = "\n".join(_row_html(r, arch, crops.get(r.number, [])) for r in rows)
+    body = "\n".join(_row_html(r, arch, crops.get(r.number, []), r.number in masked) for r in rows)
     return (f'<!doctype html>\n<html lang="fr"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1"><title>Relevé au mètre ruban</title>'
             f'<style>{STYLE}</style></head><body>\n<h1>Relevé au mètre ruban</h1>\n'
@@ -233,14 +234,14 @@ def render(arch: dict, rows: list[Row], crops: dict[int, list[str]]) -> str:
             f'<div class="plan">{_SurveyPlan(arch).draw_survey(rows, arch)}</div>\n{body}\n<script>{SCRIPT}</script>\n</body></html>\n')
 
 
-def _crop(photo: PosedPhoto, p0: list[float], p1: list[float], side: int = CROP_SIDE, quality: int = 72) -> str:
+def _crop(photo: PosedPhoto, p0: list[float], p1: list[float], quality: int = 75) -> str:
     """Base64 JPEG of the upright photo around a span, with the span and its two ends drawn."""
     uv = to_upright(photo, project(photo, np.array([p0, p1]))[0])
     width, height = upright_size(photo)
     lo, hi = uv.min(0), uv.max(0)
     half = (hi - lo) / 2 + max(0.35 * float((hi - lo).max()), 0.08 * max(width, height))
     box0, box1 = np.maximum((lo + hi) / 2 - half, 0), np.minimum((lo + hi) / 2 + half, [width, height])
-    scale = min(1.0, side / float((box1 - box0).max()))
+    scale = min(1.0, CROP_SIDE / float((box1 - box0).max()))
     image = upright(photo).crop((*map(int, box0), *map(int, np.ceil(box1))))
     image = image.resize((max(1, round(image.width * scale)), max(1, round(image.height * scale))))
     draw = ImageDraw.Draw(image)
@@ -262,22 +263,24 @@ def _host_normal(arch: dict, dim: dict) -> np.ndarray | None:
     return np.array([np.cos(az), 0.0, np.sin(az)])
 
 
-def _crops(ctx: StageContext, arch: dict, rows: list[Row]) -> dict[int, list[str]]:
+def _crops(ctx: StageContext, arch: dict, rows: list[Row]) -> tuple[dict[int, list[str]], frozenset[int]]:
     w2r = colmajor(arch["frame"]["world_to_room"], 4)
     photos = load_posed_photos(ctx, w2r)
     if not photos or not rows:
-        return {}
+        return {}, frozenset()
     maps = DepthMaps(*load_room_mesh(ctx, w2r))
     boxes = room_boxes(load_roomplan(ctx.capture, ctx.room), w2r)
-    crops = {}
+    crops, masked = {}, set()
     for row in rows:
         ends, normal = np.array([row.p0, row.p1]), _host_normal(arch, row.dim)
         k = 1 + MAX_ALTERNATIVES
         views = (best_views(photos, ends, maps, k, normal, boxes=boxes)
                  or best_views(photos, ends, maps, k, normal, LOOSE_TOLERANCE, boxes))
         if views:
-            crops[row.number] = [_crop(views[0], row.p0, row.p1)] + [_crop(v, row.p0, row.p1, THUMB_SIDE, 70) for v in views[1:]]
-    return crops
+            crops[row.number] = [_crop(v, row.p0, row.p1) for v in views]
+            if boxes and occluded_fraction(views[0].centre, ends, boxes) > 0:
+                masked.add(row.number)
+    return crops, frozenset(masked)
 
 
 def write(ctx: StageContext, arch: dict) -> Path:
@@ -287,5 +290,5 @@ def write(ctx: StageContext, arch: dict) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "plan_numbers.json").write_text(json.dumps({str(r.number): r.dim["id"] for r in rows}, indent=2), encoding="utf-8")
     page = folder / "index.html"
-    page.write_text(render(arch, rows, _crops(ctx, arch, rows)), encoding="utf-8")
+    page.write_text(render(arch, rows, *_crops(ctx, arch, rows)), encoding="utf-8")
     return page
