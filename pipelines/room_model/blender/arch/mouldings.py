@@ -1,22 +1,19 @@
 """Cornices, skirting, architraves and panel frames: 2D profiles swept along wall faces, mitred at the corners.
 
 A chain is `{"points": plan points, "normals": one inward normal per segment, "tags": (host id, side, s0, s1) per
-segment, "closed": bool}`: the runs of a ring (floor polygon, ceiling outline) that lie on wall faces.
+segment, "tops": top of the host at each point, "closed": bool}`: consecutive wall faces, then each face of a partition.
 """
 import math
 
 import bmesh
 import bpy
 
-from . import frame, profiles, shell
+from . import frame, plan, profiles, shell
 
 BITE = 0.001  # m a moulding sinks into its host, so no two faces are coplanar
 DEFAULT_PROJECTION = 0.015
-WALL_TOL = 0.25  # m: a ring vertex this close to a wall face lies on it (scanned ceilings stop short of the walls)
-END_TOL = 0.08  # m: how far past either end of a wall a vertex may lie and still belong to it
-MIN_RUN = 0.3  # m: shorter stretches along a wall are noise
-JOIN_TOL = 0.35  # m: two stretches meet at a corner when the face lines cross this close to both ends
-PARALLEL = 0.17  # sin of the angle under which two face lines count as parallel
+TOP_STEP = 0.01  # m: a cornice stops where the wall top changes by more than this from one wall to the next
+LEDGE_MIN = 0.001  # m: the faces of two joined walls are this far apart where they meet, so a step joins them
 MIN_PIECE = 0.01  # m
 MAX_MITRE = 4.0  # floor of 1 / (1 + cos) so a near fold-back does not shoot off
 EPS = 1e-9
@@ -77,82 +74,81 @@ def _flags(el: dict, known: bool) -> list[str]:
     return [*el.get("flags", []), *([] if known else ["unknown_profile"])]
 
 
-def _dedupe(points: list, closed: bool) -> list:
-    out = [p for k, p in enumerate(points) if k == 0 or math.dist(p, points[k - 1]) > 1e-6]
-    if closed and len(out) > 1 and math.dist(out[0], out[-1]) <= 1e-6:
-        out.pop()
-    return out
+def _along(geom: dict, point) -> float:
+    """Distance of a plan point along the host from its start, as an opening's `center_s` is measured."""
+    (ox, oz), (ux, uz) = geom["point"](0.0), geom["u"]
+    return (point[0] - ox) * ux + (point[1] - oz) * uz
 
 
-def _stretches(arch: dict, ring: list) -> list[dict]:
-    """The runs of consecutive ring vertices lying on a wall face, in ring order."""
-    ring = _dedupe([tuple(p) for p in ring], closed=True)
-    n = len(ring)
-    found = []
-    for el in arch["elements"]:
-        if el["kind"] != "wall":
+def _segment(arch: dict, host: dict, side: int, a, b) -> dict:
+    geom = frame.wall_geometry(arch, host)
+    normal = (geom["n"][0] * side, geom["n"][1] * side)
+    return {"a": a, "b": b, "normal": normal, "top": geom["top"],
+            "tag": (host["id"], side, _along(geom, a), _along(geom, b)), "u": geom["u"]}
+
+
+def _step(prev: dict, a, b) -> dict:
+    """The end face that sticks out where two joined walls are not flush, from the end of `prev` to the start of the next wall."""
+    jog, u = (b[0] - a[0], b[1] - a[1]), prev["u"]
+    perp = (-jog[1], jog[0])
+    forward = -1.0 if jog[0] * prev["normal"][0] + jog[1] * prev["normal"][1] > 0 else 1.0  # the free side is ahead if the next face is behind
+    if (perp[0] * u[0] + perp[1] * u[1]) * forward < 0:
+        perp = (-perp[0], -perp[1])
+    size = math.hypot(*jog)
+    return {"a": a, "b": b, "normal": (perp[0] / size, perp[1] / size), "top": prev["top"], "tag": ("", 0, 0.0, size), "u": u}
+
+
+def _chain(segments: list, closed: bool) -> dict:
+    """Chain of consecutive segments; the top at a point shared by two walls is the mean of theirs."""
+    tops = [s["top"] for s in segments]
+    shared = [(tops[k - 1] + tops[k]) / 2 for k in range(len(tops))]
+    return {"points": [s["a"] for s in segments] + ([] if closed else [segments[-1]["b"]]),
+            "normals": [s["normal"] for s in segments], "tags": [s["tag"] for s in segments], "closed": closed,
+            "tops": shared if closed else [tops[0], *shared[1:], tops[-1]]}
+
+
+def _split(segments: list, closed: bool, step: float | None) -> list[dict]:
+    """Chains of `segments`, cut wherever the top changes by more than `step` (never when it is None)."""
+    breaks = [k for k in range(len(segments)) if step is not None
+              and abs(segments[k - 1]["top"] - segments[k]["top"]) > step and (closed or k > 0)]
+    if not breaks:
+        return [_chain(segments, closed)]
+    first = breaks[0] if closed else 0
+    runs, cur = [], []
+    for k in [*range(first, len(segments)), *range(first)] if closed else range(len(segments)):
+        if k in breaks and cur:
+            runs.append(cur)
+            cur = []
+        cur.append(segments[k])
+    return [_chain(run, False) for run in [*runs, cur]]
+
+
+def _face_chains(arch: dict, step: float | None) -> list[dict]:
+    """Chains along the interior face of every wall (consecutive joined walls share a chain) and of both sides of every partition."""
+    hosts = {e["id"]: e for e in arch["elements"]}
+    walls = plan.wall_footprints(arch)
+    links = plan.wall_links(arch)
+    order = [e["id"] for e in arch["elements"] if e["kind"] == "wall"]
+    seen, out = set(), []
+    for first in [i for i in order if i not in links.values()] + order:
+        if first in seen:
             continue
-        geom = frame.wall_geometry(arch, el)
-        (ox, oz), (ux, uz), (nx, nz) = geom["point"](0.0), geom["u"], geom["n"]
-        along = []
-        for x, z in ring:
-            s, d = (x - ox) * ux + (z - oz) * uz, (x - ox) * nx + (z - oz) * nz
-            along.append(s if abs(d) <= WALL_TOL and -END_TOL <= s <= geom["length"] + END_TOL else None)
-        gaps = [i for i, s in enumerate(along) if s is None]
-        order = list(range(n)) if not gaps else [(gaps[0] + 1 + k) % n for k in range(n)]
-        group = []
-        for i in [*order, None]:
-            if i is not None and along[i] is not None:
-                group.append(i)
-                continue
-            values = [along[j] for j in group]
-            if group and max(values) - min(values) >= MIN_RUN:
-                found.append({"key": group[0], "id": el["id"], "geom": geom, "s0": along[group[0]], "s1": along[group[-1]]})
-            group = []
-    return sorted(found, key=lambda f: f["key"])
-
-
-def _crossing(a: dict, b: dict) -> tuple[float, float] | None:
-    """Where the face lines of two consecutive stretches meet, if that is a corner both stretches really reach."""
-    ga, gb = a["geom"], b["geom"]
-    if a["id"] == b["id"] or abs(ga["u"][0] * gb["u"][1] - ga["u"][1] * gb["u"][0]) < PARALLEL:
-        return None
-    (ax, az), (bx, bz) = ga["point"](0.0), gb["point"](0.0)
-    det = ga["u"][0] * -gb["u"][1] + gb["u"][0] * ga["u"][1]
-    t = ((bx - ax) * -gb["u"][1] + gb["u"][0] * (bz - az)) / det
-    corner = (ax + ga["u"][0] * t, az + ga["u"][1] * t)
-    if math.dist(corner, ga["point"](a["s1"])) > JOIN_TOL or math.dist(corner, gb["point"](b["s0"])) > JOIN_TOL:
-        return None
-    return corner
-
-
-def _chains(arch: dict, ring: list) -> list[dict]:
-    """Chains along the walls a ring follows; stretches that meet at a corner share its vertex."""
-    items = _stretches(arch, ring)
-    count = len(items)
-    if not count:
-        return []
-    corners = [_crossing(items[k], items[(k + 1) % count]) if count > 1 else None for k in range(count)]
-    starts = [k for k in range(count) if corners[k - 1] is None]
-    closed = not starts
-    out = []
-    for first in starts or [0]:
-        chain = {"points": [], "normals": [], "tags": [], "closed": closed}
-        k = first
-        while True:
-            item, geom = items[k], items[k]["geom"]
-            a = corners[k - 1] if corners[k - 1] is not None else geom["point"](item["s0"])
-            b = corners[k] if corners[k] is not None else geom["point"](item["s1"])
-            (ox, oz), (ux, uz) = geom["point"](0.0), geom["u"]
-            chain["points"].append(a)
-            chain["normals"].append(geom["n"])
-            chain["tags"].append((item["id"], 1, (a[0] - ox) * ux + (a[1] - oz) * uz, (b[0] - ox) * ux + (b[1] - oz) * uz))
-            k = (k + 1) % count
-            if corners[(k - 1) % count] is None or k == first:
-                break
-        if not closed:
-            chain["points"].append(b)
-        out.append(chain)
+        ids, cur = [], first
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            ids.append(cur)
+            cur = links.get(cur)
+        segments = []
+        for k, wid in enumerate(ids):
+            quad = walls[wid]
+            segments.append(_segment(arch, hosts[wid], 1, quad[0], quad[1]))
+            following = ids[(k + 1) % len(ids)] if k + 1 < len(ids) or cur == first else None
+            if following is not None and math.dist(quad[1], walls[following][0]) > LEDGE_MIN:
+                segments.append(_step(segments[-1], quad[1], walls[following][0]))
+        out += _split(segments, cur == first, step)
+    for pid, quad in plan.partition_footprints(arch, walls).items():
+        for side, a, b in ((1, quad[0], quad[1]), (-1, quad[3], quad[2])):
+            out.append(_chain([_segment(arch, hosts[pid], side, a, b)], False))
     return out
 
 
@@ -203,11 +199,13 @@ def _cut(chain: dict, gaps: dict) -> list[dict]:
     return out
 
 
-def _horizontal(bm, chains: list, y: float, profile: list, projection: float, height: float) -> None:
+def _horizontal(bm, chains: list, levels: list | float, profile: list, projection: float, height: float) -> None:
+    """Sweeps the profile along each chain, at `levels` (one per point of a chain, or one for all)."""
     for chain in chains:
         pts = chain["points"]
+        ys = levels if isinstance(levels, list) else [levels] * len(pts)
         across = [(mx, 0.0, mz) for mx, mz in _mitre(chain["normals"], chain["closed"])]
-        _sweep(bm, [(x, y, z) for x, z in pts], across, (0.0, 1.0, 0.0), profile, (projection, height), (-BITE, 0.0),
+        _sweep(bm, [(x, y, z) for (x, z), y in zip(pts, ys)], across, (0.0, 1.0, 0.0), profile, (projection, height), (-BITE, 0.0),
                chain["closed"])
 
 
@@ -239,27 +237,12 @@ def _skirting_gaps(arch: dict, hosts: dict, height: float) -> dict:
     return gaps
 
 
-def _partition_chains(arch: dict) -> list[dict]:
-    out = []
-    for el in arch["elements"]:
-        if el["kind"] != "partition":
-            continue
-        geom = frame.wall_geometry(arch, el)
-        for side in (1, -1):
-            ends = [frame.face_point(geom, s, side) for s in (0.0, geom["length"])]
-            out.append({"points": ends, "normals": [(geom["n"][0] * side, geom["n"][1] * side)],
-                        "tags": [(el["id"], side, 0.0, geom["length"])], "closed": False})
-    return out
-
-
 def _cornice(arch: dict, el: dict, collection) -> bpy.types.Object | None:
     height, projection = _spec(arch, el)
     profile, known = profiles.resolve("cornice", el.get("profile"))
     bm = bmesh.new()
-    for ceiling in (e for e in arch["elements"] if e["kind"] == "ceiling"):
-        level = frame.value(arch, ceiling["params"]["level"])
-        for region in ceiling["region"]:
-            _horizontal(bm, _chains(arch, region["exterior"]), level - height, profile, projection, height)
+    for chain in _face_chains(arch, TOP_STEP):
+        _horizontal(bm, [chain], [top - height for top in chain["tops"]], profile, projection, height)
     if not bm.faces:
         bm.free()
         return None
@@ -269,11 +252,9 @@ def _cornice(arch: dict, el: dict, collection) -> bpy.types.Object | None:
 def _skirting(arch: dict, el: dict, hosts: dict, collection) -> bpy.types.Object | None:
     height, projection = _spec(arch, el)
     profile, known = profiles.resolve("skirting", el.get("profile"))
-    floor = next((e for e in arch["elements"] if e["kind"] == "floor"), None)
-    chains = _chains(arch, floor["polygon"]) if floor else []
     gaps = _skirting_gaps(arch, hosts, height)
     bm = bmesh.new()
-    for chain in [*chains, *_partition_chains(arch)]:
+    for chain in _face_chains(arch, None):
         _horizontal(bm, _cut(chain, gaps), frame.value(arch, "floor.level"), profile, projection, height)
     if not bm.faces:
         bm.free()
@@ -312,6 +293,8 @@ def _architraves(arch: dict, el: dict, hosts: dict, y_floor: float, collection) 
     spec = el.get("frame")
     if not spec or host is None or host["kind"] not in HOST_KINDS:
         return []
+    if "width" not in spec:
+        raise ValueError(f"{el['id']}: frame.width is missing")
     geom = frame.wall_geometry(arch, host)
     w, h, sill, centre = (frame.value(arch, el["params"][k]) for k in ("width", "height", "sill", "center_s"))
     s0, s1, y0 = centre - w / 2, centre + w / 2, y_floor + sill

@@ -1,7 +1,7 @@
 """Plan geometry of the shell in the room frame ([x, z] points): mitred wall footprints, trimmed partitions, overlap tests.
 
-A footprint is a convex polygon. Walls get a mitre at every corner they share, so no two footprints overlap;
-partitions are clipped to the face of the wall (or earlier partition) their ends run into.
+A footprint is a convex polygon [start face, end face, end back, start back]. Walls get a mitre at every corner they
+share, so no two footprints overlap; partition ends move onto the face of the wall (or earlier partition) they run into.
 """
 import math
 
@@ -88,11 +88,11 @@ def _convex(poly: list) -> bool:
     return len(signs) == 1
 
 
-def wall_footprints(arch: dict) -> dict[str, list]:
-    """{wall id: [start face, end face, end back, start back]}: perimeter walls mitred where one ends on the next one's start."""
+def _joined(arch: dict):
+    """(walls, lines, cuts, links): the wall elements, their face lines, the cuts at their joints and {id: id of the next wall}."""
     walls = [e for e in arch["elements"] if e["kind"] == "wall"]
     lines = {e["id"]: _line(e, arch) for e in walls}
-    cuts = {e["id"]: {} for e in walls}
+    cuts, links = {e["id"]: {} for e in walls}, {}
     for a in walls:
         for b in walls:
             if a is b or math.dist(a["end"], b["start"]) > JOIN_TOL:
@@ -100,6 +100,18 @@ def wall_footprints(arch: dict) -> dict[str, list]:
             joint = _joint(lines[a["id"]], lines[b["id"]])
             if joint is not None:
                 cuts[a["id"]]["end"], cuts[b["id"]]["start"] = joint
+                links[a["id"]] = b["id"]
+    return walls, lines, cuts, links
+
+
+def wall_links(arch: dict) -> dict[str, str]:
+    """{wall id: id of the wall joined to its end}."""
+    return _joined(arch)[3]
+
+
+def wall_footprints(arch: dict) -> dict[str, list]:
+    """{wall id: [start face, end face, end back, start back]}: perimeter walls mitred where one ends on the next one's start."""
+    walls, lines, cuts, _ = _joined(arch)
     out = {}
     for e in walls:
         line = lines[e["id"]]
@@ -114,18 +126,14 @@ def wall_footprints(arch: dict) -> dict[str, list]:
     return out
 
 
-def _clip(poly: list, point, normal) -> list:
-    """The part of a convex polygon on the side of the line through `point` that `normal` points to."""
-    out = []
-    for k, cur in enumerate(poly):
-        prev = poly[k - 1]
-        dp, dc = _dot(_sub(prev, point), normal), _dot(_sub(cur, point), normal)
-        if (dp >= 0) != (dc >= 0):
-            r = dp / (dp - dc)
-            out.append((prev[0] + (cur[0] - prev[0]) * r, prev[1] + (cur[1] - prev[1]) * r))
-        if dc >= 0:
-            out.append(cur)
-    return out
+def _on_line(p, q, point, normal):
+    """The point of the line p -> q on the line through `point` perpendicular to `normal`, None when they are parallel."""
+    d = _sub(q, p)
+    den = _dot(d, normal)
+    if abs(den) < 1e-9 * math.hypot(*d):
+        return None
+    r = _dot(_sub(point, p), normal) / den
+    return (p[0] + d[0] * r, p[1] + d[1] * r)
 
 
 def _entry(a, b, poly: list):
@@ -150,18 +158,21 @@ def _entry(a, b, poly: list):
 
 
 def _trim(quad: list, hosts: list) -> list:
-    """The partition `quad` [face start, face end, back end, back start] clipped to the nearest host face each end crosses.
+    """The partition `quad` [face start, face end, back end, back start] with each end moved onto the nearest host face it crosses.
 
     Each end is followed from the middle of the partition, so a start drawn out through a wall is cut at its first face.
     """
+    quad = list(quad)
     ends = [((quad[0][0] + quad[3][0]) / 2, (quad[0][1] + quad[3][1]) / 2), ((quad[1][0] + quad[2][0]) / 2, (quad[1][1] + quad[2][1]) / 2)]
     middle = ((ends[0][0] + ends[1][0]) / 2, (ends[0][1] + ends[1][1]) / 2)
     reach = math.dist(middle, ends[0])
-    for end in ends:
+    along = {0: 1, 3: 2, 1: 0, 2: 3}  # each end vertex slides along its own face line, towards the other end
+    for end, verts in zip(ends, ((0, 3), (1, 2))):
         hits = [h for h in (_entry(middle, end, host) for host in hosts) if h and (1.0 - h[0]) * reach > CROSS_DEPTH]
         if hits:
             _, normal, point = min(hits, key=lambda h: h[0])
-            quad = _clip(quad, point, normal)
+            for i in verts:
+                quad[i] = _on_line(quad[i], quad[along[i]], point, normal) or quad[i]
     return quad
 
 

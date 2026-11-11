@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import shapely
 from PIL import Image
 
 from room_model import architecture, blender_stage, meshes, model, openings, shell
@@ -708,13 +709,15 @@ NICHE_PARAMS = ("center_s", "sill", "width", "height", "depth")
 MOULDING_ELEMENTS = [
     {"id": "Niche_1", "kind": "niche", "host": "Partition_P1", "face": "A", "through": True, "dividers": 2, "shelves": [],
      "frame": {"profile": "flat", "width": 0.06}, "flags": []},
-    {"id": "Niche_2", "kind": "niche", "host": "Wall_M3", "face": None, "through": False, "dividers": 0, "shelves": [0.3],
+    {"id": "Niche_2", "kind": "niche", "host": "Wall_M3", "face": None, "through": False, "dividers": 0, "shelves": [-0.5, 0.3],
      "frame": None, "flags": []},
     {"id": "Cornice", "kind": "cornice", "profile": "cove", "params": {"height": "cornice.height", "projection": "cornice.projection"}},
     {"id": "Skirting", "kind": "skirting", "profile": "baroque",
      "params": {"height": "skirting.height", "projection": "skirting.projection"}},
     {"id": "PanelFrame_1", "kind": "panel_frame", "host": "Wall_M3", "face": None, "rect": [2.5, 0.9, 3.3, 1.9],
      "profile": "quarter_round", "flags": ["to_verify"]},
+    {"id": "PanelFrame_2", "kind": "panel_frame", "host": "Wall_M3", "face": None, "rect": [0.5, 0.9, 1.3, 1.9],
+     "profile": "flat", "flags": ["to_verify"]},
 ]
 ARCHITRAVES = {"Door_1": {"profile": "moulded", "width": 0.07}, "Opening_1": {"profile": "flat", "width": 0.05}}
 SKIRTING_HEIGHT, NICHE_1_COMPARTMENTS = 0.1, 3
@@ -730,6 +733,46 @@ def _add_mouldings(arch):
         arch["elements"].append(element)
     for oid, spec in ARCHITRAVES.items():
         _element(arch, oid)["frame"] = spec
+
+
+STOP_SHORT = 0.4  # m the floor and the ceilings stop short of the walls, as on a real scan
+CORNICE_REACH = 0.05  # m from the wall face where the cornice rays come down
+
+
+def _stop_short(arch):
+    """Insets the floor and every ceiling region by STOP_SHORT, so no mesh outline lies on a wall face."""
+    inset = lambda ring, holes=(): [list(p) for p in shapely.Polygon(ring, holes).buffer(-STOP_SHORT).exterior.coords][:-1]  # noqa: E731
+    floor = _element(arch, "Floor")
+    floor["polygon"] = inset(floor["polygon"])
+    for ceiling in (e for e in arch["elements"] if e["kind"] == "ceiling"):
+        for region in ceiling["region"]:
+            region["exterior"], region["holes"] = inset(region["exterior"], region["holes"]), []
+
+
+def _cornice_rays(arch):
+    """Rays coming down on each face of every wall and partition: at the middle and 15 cm from the ends, and 3 cm from an
+    end that no taller or shorter wall meets (the cornice must reach the corner there)."""
+    rays = []
+    walls = [e for e in arch["elements"] if e["kind"] == "wall"]
+    for host in (e for e in arch["elements"] if e["kind"] in ("wall", "partition")):
+        az = _value(arch, host["params"]["azimuth"])
+        n, t = np.array([math.cos(az), math.sin(az)]), _value(arch, host["params"]["thickness"])
+        start, end = np.array(host["start"]), np.array(host["end"])
+        length = np.linalg.norm(end - start)
+        top = _value(arch, host["params"]["top"])
+        positions = {"mid": length / 2, "start15": 0.15, "end15": length - 0.15}
+        for key, other, name in (("start", "end", "start3"), ("end", "start", "end3")):
+            neighbour = next((w for w in walls if w is not host and np.allclose(w[other], host[key], atol=1e-6)), None)
+            if neighbour is None or abs(_value(arch, neighbour["params"]["top"]) - top) < 0.01:
+                positions[name] = 0.03 if key == "start" else length - 0.03
+        for side in (1, -1) if host["kind"] == "partition" else (1,):
+            for label, s in positions.items():
+                p = start + (end - start) / length * s
+                p = p + n * (_value(arch, host["params"]["offset"]) - n @ p) - (n * t if side < 0 else 0)
+                origin = p + side * n * CORNICE_REACH
+                rays.append({"name": f"cornice-{host['id']}-{side}-{label}", "object": "Cornice",
+                             "origin": _blender_point(origin[0], top + 1.0, origin[1]), "direction": [0.0, 0.0, -1.0]})
+    return rays
 
 
 def _across(ray, name, distance):
@@ -764,6 +807,7 @@ def moulded(tmp_path_factory):
     arch_path = output_path(ctx, "architecture")
     arch = json.loads(arch_path.read_text(encoding="utf-8"))
     _add_mouldings(arch)
+    _stop_short(arch)
     arch_path.write_text(json.dumps(arch), encoding="utf-8")
     blender_stage.run(ctx)
 
@@ -798,6 +842,7 @@ def moulded(tmp_path_factory):
         if ray["name"].startswith("skirt-") and "corner" not in ray["name"]:
             ray["distance"] = 0.65
     rays.append(_corner_ray(arch))
+    rays += _cornice_rays(arch)
     return ctx, arch, _probe(ctx, arch_path, rays), {r["name"]: r for r in rays}
 
 
@@ -825,6 +870,7 @@ def test_niche_recess_has_a_back(moulded):
         assert facts["rays"][name]["hit"], name
         assert np.linalg.norm(np.array(facts["rays"][name]["location"]) - np.array(rays[name]["origin"])) == pytest.approx(expected, abs=0.002)
     assert facts["rays"]["shelf"]["hit"]
+    assert [n for n in facts["objects"] if n.startswith("Niche_2_Shelf")] == ["Niche_2_Shelf_1"], "numbered after filtering"
     wall = facts["objects"]["Wall_M3"]
     assert wall["modifiers"] == 0 and wall["non_manifold"] == 0
     assert not any("utter" in name for name in facts["objects"])
@@ -866,6 +912,18 @@ def test_cornice_height(moulded):
 
 
 @needs_blender
+def test_cornice_follows_walls(moulded):
+    _, arch, facts, rays = moulded
+    walls = [e for e in arch["elements"] if e["kind"] in ("wall", "partition")]
+    assert len({_value(arch, e["params"]["top"]) for e in walls}) > 1, "two ceiling levels"
+    for name in (n for n in rays if n.startswith("cornice-")):
+        host = _element(arch, name.split("-")[1])
+        hit = facts["rays"][name]
+        assert hit["hit"], f"{name}: the cornice stops short of the wall"
+        assert hit["location"][2] == pytest.approx(_value(arch, host["params"]["top"]), abs=0.001), name
+
+
+@needs_blender
 def test_unknown_profile(moulded):
     _, _, facts, _ = moulded
     skirting = facts["objects"]["Skirting"]
@@ -902,10 +960,26 @@ def test_panel_frame_goes_to_the_verify_collection(moulded):
     _, arch, facts, _ = moulded
     frame_ = facts["objects"]["PanelFrame_1"]
     assert frame_["collections"] == ["\u00c0 v\u00e9rifier"] and frame_["flags"] == "to_verify"
+    assert facts["objects"]["PanelFrame_2"]["flags"] == "to_verify,unknown_profile", "a panel frame has no flat profile"
     lo, hi = np.array(frame_["bbox"])
     floor = _value(arch, "floor.level")
     assert (lo[2], hi[2]) == pytest.approx((floor + 0.9, floor + 1.9), abs=0.004)
     assert np.hypot(*(hi - lo)[:2]) == pytest.approx(0.8, abs=0.02)
+
+
+@needs_blender
+def test_architrave_without_a_width_says_which_element(tmp_path):
+    ctx, _ = make_case(tmp_path, "case")
+    shell.run(ctx)
+    model.run(ctx)
+    openings.run(ctx)
+    architecture.run(ctx)
+    arch_path = output_path(ctx, "architecture")
+    arch = json.loads(arch_path.read_text(encoding="utf-8"))
+    _element(arch, "Door_1")["frame"] = {"profile": "flat"}
+    arch_path.write_text(json.dumps(arch), encoding="utf-8")
+    with pytest.raises(RuntimeError, match=r"Door_1: frame\.width is missing"):
+        blender_stage.run(ctx)
 
 
 def test_stage_deletes_stale_outputs_before_launching_blender(tmp_path, monkeypatch):
