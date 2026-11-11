@@ -193,16 +193,20 @@ def normalize(doc: dict) -> dict:
     """{id: metres} from either file format; an unusable v2 entry becomes None or stays as is, for `apply` to report."""
     if doc.get("version") != 2 or not isinstance(doc.get("values"), dict):
         return doc
-    return {k: (v.get("value_m") if isinstance(v, dict) else v) for k, v in doc["values"].items()}
+    return {k: (v.get("value_m") if isinstance(v, dict) else v) for k, v in doc["values"].items()
+            if not (isinstance(v, dict) and "value_m" in v and v["value_m"] is None)}  # a note without a value: nothing to apply
 
 
 def read_store(doc: dict) -> dict:
-    """{id: {"value_m", "date", "note"}} from either file format, for pre-filling the survey page; unusable entries are dropped."""
+    """{id: {"value_m", "date", "note"}} from either file format, for pre-filling the survey page; unusable entries are dropped.
+
+    `value_m` is None for a note without a value.
+    """
     out = {}
     for key, raw in (doc["values"] if doc.get("version") == 2 and isinstance(doc.get("values"), dict) else doc).items():
         entry = raw if isinstance(raw, dict) else {"value_m": raw}
-        if _number(entry.get("value_m")) is not None:
-            out[key] = {"value_m": float(entry["value_m"]), "date": str(entry.get("date") or ""), "note": str(entry.get("note") or "")}
+        if _number(entry.get("value_m")) is not None or (entry.get("value_m") is None and str(entry.get("note") or "").strip()):
+            out[key] = {"value_m": None if entry.get("value_m") is None else float(entry["value_m"]), "date": str(entry.get("date") or ""), "note": str(entry.get("note") or "")}
     return out
 
 

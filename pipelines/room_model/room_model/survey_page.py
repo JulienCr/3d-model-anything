@@ -270,8 +270,7 @@ figure .alts{display:flex;gap:6px;margin-top:6px}.masked{color:#9a6700;font-size
 .kind{display:inline-block;background:#e6edf7;color:#0b3d8c;border-radius:10px;padding:1px 8px;font-size:.8rem;font-weight:normal;margin-right:4px}
 .estimated{display:inline-block;background:#fff4d6;color:#7a5200;border-radius:10px;padding:1px 8px;font-size:.8rem;margin-left:6px}
 .note{display:block;font:inherit;font-size:.85rem;width:100%;box-sizing:border-box;margin-top:6px;padding:.3rem}
-@media(max-width:640px){.row{grid-template-columns:36px 1fr}.row figure{grid-column:1 / -1}}
-"""
+@media(max-width:640px){.row{grid-template-columns:36px 1fr}.row figure{grid-column:1 / -1}}"""
 
 SCRIPT = """
 (function () {
@@ -297,8 +296,8 @@ SCRIPT = """
     var out = {}, src = doc && doc.version === 2 && doc.values ? doc.values : doc;
     Object.keys(src || {}).forEach(function (id) {
       var raw = src[id], e = raw !== null && typeof raw === 'object' ? raw : { value_m: raw };
-      var v = Number(e.value_m);
-      if (isFinite(v) && v > 0) out[id] = { value_m: v, date: String(e.date || ''), note: String(e.note || '') };
+      var v = e.value_m === null || e.value_m === undefined ? null : Number(e.value_m);
+      if (v === null ? String(e.note || '').trim() : isFinite(v) && v > 0) out[id] = { value_m: v, date: String(e.date || ''), note: String(e.note || '') };
     });
     return out;
   }
@@ -310,12 +309,21 @@ SCRIPT = """
   }
   function collect() {
     var values = {};
-    Object.keys(state).forEach(function (id) {
-      if (state[id].value_m !== null) values[id] = { value_m: state[id].value_m, date: state[id].date, note: state[id].note };
-    });
+    Object.keys(state).forEach(function (id) { values[id] = { value_m: state[id].value_m, date: state[id].date, note: state[id].note }; });
     return { version: 2, capture: CAPTURE, values: values };
   }
   function show() {
+    var rows = {};
+    inputs.forEach(function (i) { rows[i.getAttribute('data-dim')] = true; });
+    var box = document.getElementById('legacy'), list = document.getElementById('legacylist');
+    var orphans = Object.keys(state).filter(function (id) { return !rows[id]; });
+    list.textContent = '';
+    orphans.forEach(function (id) {
+      var li = document.createElement('li'), e = state[id];
+      li.textContent = id + ' : ' + (e.value_m === null ? 'sans valeur' : cm(e.value_m) + ' cm') + (e.note ? ' (' + e.note + ')' : '');
+      list.appendChild(li);
+    });
+    box.hidden = !orphans.length;
     inputs.forEach(function (i) { var e = state[i.getAttribute('data-dim')]; i.value = e && e.value_m !== null ? cm(e.value_m) : ''; });
     notes.forEach(function (n) { var e = state[n.getAttribute('data-note')]; n.value = e ? e.note : ''; });
     count();
@@ -323,14 +331,14 @@ SCRIPT = """
   function edit(id) {
     var value = parse(document.querySelector('input[data-dim="' + id + '"]').value);
     var note = document.querySelector('input[data-note="' + id + '"]').value;
-    if (value === null && !note.trim()) { delete state[id]; } else {
-      state[id] = { value_m: value === null ? null : Math.round(value * 100) / 10000, date: new Date().toISOString(), note: note };
-    }
+    var metres = value === null ? null : Math.round(value * 100) / 10000, before = state[id];
+    if (value === null && !note.trim()) { delete state[id]; }
+    else if (!before || before.value_m !== metres || before.note !== note) state[id] = { value_m: metres, date: new Date().toISOString(), note: note };
     count();
     clearTimeout(timer);
     timer = setTimeout(persist, 600);
   }
-  function count() { status.textContent = Object.keys(collect().values).length + ' cote(s) renseignée(s), ' + inputs.length + ' lignes'; }
+  function count() { status.textContent = Object.keys(state).filter(function (id) { return state[id].value_m !== null; }).length + ' cote(s) renseignée(s), ' + inputs.length + ' lignes'; }
 
   function saveLocal() { try { localStorage.setItem(storageKey, JSON.stringify(state)); } catch (e) {} }
   async function writeFile() {
@@ -349,6 +357,26 @@ SCRIPT = """
     var local = JSON.parse(localStorage.getItem(storageKey) || '{}');
     Object.keys(local).forEach(function (id) { if (local[id] && typeof local[id] === 'object') { var one = {}; one[id] = local[id]; merge(one, false); } });
   } catch (e) {}
+  function migrate() {
+    var rows = {}, current = storageKey;
+    inputs.forEach(function (i) { rows[i.getAttribute('data-dim')] = true; });
+    var keys = ['room-model-tape:Relevé au mètre ruban'];
+    for (var k = 0; k < localStorage.length; k++) { var name = localStorage.key(k); if (name.indexOf('room-model-tape:') === 0) keys.push(name); }
+    keys.forEach(function (key) {
+      var old = key === current ? null : localStorage.getItem(key);
+      if (!old) return;
+      var doc = JSON.parse(old);
+      var ids = doc && typeof doc === 'object' ? Object.keys(doc) : [];
+      if (!ids.length || !ids.every(function (id) { return typeof doc[id] === 'string' || typeof doc[id] === 'number'; })) return;
+      ids.forEach(function (id) {
+        var v = parse(doc[id]), mine = state[id];
+        if (v === null || (mine && mine.value_m !== null)) return;
+        var frame = /^(Door|Window)_[0-9]+-[wh]$/.test(id);
+        state[id] = { value_m: Math.round(v * 100) / 10000, date: '', note: mine ? mine.note : rows[id] ? '' : frame ? 'ancienne page — mesure bâti compris' : 'ancienne page' };
+      });
+    });
+  }
+  try { migrate(); saveLocal(); } catch (e) {}
   show();
   inputs.forEach(function (i) { i.addEventListener('input', function () { edit(i.getAttribute('data-dim')); }); });
   notes.forEach(function (n) { n.addEventListener('input', function () { edit(n.getAttribute('data-note')); }); });
@@ -444,8 +472,7 @@ SCRIPT = """
       say('fichier lié : ' + h.name + ', autorisation à renouveler');
     }).catch(function () {});
   }
-})();
-"""
+})();"""
 
 
 def render(arch: dict, rows: list[Row], crops: dict[int, list[str]], masked: frozenset[int] = frozenset(),
@@ -469,6 +496,7 @@ def render(arch: dict, rows: list[Row], crops: dict[int, list[str]], masked: fro
             f'<button id="download" type="button">Télécharger measurements.json</button>'
             f'<button id="import" type="button">Importer</button><input id="importfile" type="file" accept=".json,application/json" hidden>'
             f'<button id="copy" type="button">Copier</button><span id="status"></span><span id="saved"></span></div>\n'
+            f'<section id="legacy" hidden><h2>Anciennes valeurs</h2><p>Saisies d\'une ancienne version de la page, sans ligne correspondante : elles restent dans le fichier de mesures.</p><ul id="legacylist"></ul></section>\n'
             f'<div class="plan">{_SurveyPlan(arch).draw_survey(rows, arch)}</div>\n{body}\n<script>{data}{SCRIPT}</script>\n</body></html>\n')
 
 

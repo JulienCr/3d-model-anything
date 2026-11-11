@@ -215,3 +215,91 @@ def test_page_script_parses(full, tmp_path):  # noqa: F811
         path.write_text(text, encoding="utf-8")
         done = subprocess.run(["node", "--check", str(path)], capture_output=True, text=True)
         assert done.returncode == 0, done.stderr
+
+
+# --- legacy migration and notes without a value (page script run under node with a minimal DOM) -------------------------
+
+HARNESS = r"""
+const [script, setup] = [process.argv[2], JSON.parse(process.argv[3])];
+const store = Object.assign({}, setup.local);
+global.localStorage = { get length() { return Object.keys(store).length; }, key: i => Object.keys(store)[i],
+  getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); } };
+const el = (extra) => Object.assign({ listeners: {}, hidden: false, textContent: '', children: [], value: '',
+  addEventListener(n, f) { this.listeners[n] = f; }, appendChild(c) { this.children.push(c); },
+  setAttribute() {}, getAttribute(n) { return this.attrs[n]; } }, extra);
+const inputs = setup.dims.map(d => el({ attrs: { 'data-dim': d } }));
+const notes = setup.dims.map(d => el({ attrs: { 'data-note': d } }));
+const byId = {};
+global.document = { querySelectorAll: s => (s === 'input[data-dim]' ? inputs : s === 'input[data-note]' ? notes : []),
+  querySelector: s => { const m = /\[(data-\w+)="(.*)"\]/.exec(s); return (m[1] === 'data-dim' ? inputs : notes).find(i => i.attrs[m[1]] === m[2]); },
+  getElementById: id => (byId[id] = byId[id] || el({})), createElement: () => el({}) };
+global.window = global; global.navigator = {};
+global.PREFILL = setup.prefill; global.CAPTURE = 'cap';
+eval(script);
+const type = (id, value, note) => { const i = inputs.find(x => x.attrs['data-dim'] === id), n = notes.find(x => x.attrs['data-note'] === id);
+  if (value !== undefined) i.value = value; if (note !== undefined) n.value = note; i.listeners.input(); };
+const steps = setup.steps || [];
+const out = [];
+const snapshot = () => ({ inputs: Object.fromEntries(inputs.map(i => [i.attrs['data-dim'], i.value])),
+  stored: JSON.parse(store['room-model-tape:cap'] || '{}'), legacy: store, orphans: byId.legacylist.children.map(c => c.textContent), boxHidden: byId.legacy.hidden });
+setTimeout(() => {
+  for (const s of steps) { type(...s); }
+  setTimeout(() => console.log(JSON.stringify(snapshot())), 700);
+}, 10);
+"""
+
+
+def _run_page(arch, tmp_path, setup):
+    script = re.search(r"<script>(.*?)</script>", _page(arch), re.S).group(1)
+    script = re.sub(r"^var PREFILL.*\nvar CAPTURE.*\n", "", script)
+    (tmp_path / "harness.js").write_text(HARNESS, encoding="utf-8")
+    done = subprocess.run(["node", str(tmp_path / "harness.js"), script, json.dumps(setup)], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+
+
+@needs_node
+def test_legacy_localstorage_is_migrated_without_loss(full, tmp_path):  # noqa: F811
+    _, _, arch = full
+    legacy = {"Opening_1-w": "81,5", "Door_1-w": "92", "Window_1-h": "120.5", "Cornice-x": "3", "Window_1-sill": "oops"}
+    old_key = "room-model-tape:Relevé au mètre ruban"
+    setup = {"dims": ["Opening_1-w", "Window_1-sill"], "local": {old_key: json.dumps(legacy)},
+             "prefill": {"Opening_1-w": {"value_m": 0.9, "date": "2026-11-11T09:00:00Z", "note": ""}}}
+    out = _run_page(arch, tmp_path, setup)
+    stored = out["stored"]
+    assert stored["Opening_1-w"]["value_m"] == 0.9  # the newer entry is not overwritten
+    assert stored["Door_1-w"] == {"value_m": 0.92, "date": "", "note": "ancienne page — mesure bâti compris"}
+    assert stored["Window_1-h"]["value_m"] == 1.205 and stored["Window_1-h"]["note"] == "ancienne page — mesure bâti compris"
+    assert stored["Cornice-x"]["note"] == "ancienne page" and "Window_1-sill" not in stored
+    assert not out["boxHidden"] and len(out["orphans"]) == 3 and any("Door_1-w" in o and "92" in o for o in out["orphans"])
+    assert json.loads(out["legacy"][old_key]) == legacy  # the legacy key is never deleted
+
+    only_rows = _run_page(arch, tmp_path, {**setup, "prefill": {}, "local": {"room-model-tape:other": json.dumps({"Opening_1-w": "70"})}})
+    assert only_rows["inputs"]["Opening_1-w"] == "70" and only_rows["stored"]["Opening_1-w"]["note"] == ""
+    current_format = {"room-model-tape:other": json.dumps({"Opening_1-w": {"value_m": 0.7, "date": "x", "note": ""}})}
+    assert _run_page(arch, tmp_path, {**setup, "prefill": {}, "local": current_format})["inputs"]["Opening_1-w"] == ""
+
+
+@needs_node
+def test_note_without_value_is_kept_and_not_redated(full, tmp_path):  # noqa: F811
+    _, _, arch = full
+    first = {"value_m": 0.9, "date": "2026-01-01T00:00:00Z", "note": "n"}
+    setup = {"dims": ["Opening_1-w", "Window_1-sill"], "local": {}, "prefill": {"Opening_1-w": first},
+             "steps": [["Opening_1-w", "90", "n"], ["Window_1-sill", "", "bord de fenêtre"]]}
+    stored = _run_page(arch, tmp_path, setup)["stored"]
+    assert stored["Opening_1-w"] == first  # same value and note: same date
+    assert stored["Window_1-sill"]["value_m"] is None and stored["Window_1-sill"]["note"] == "bord de fenêtre"
+    reloaded = _run_page(arch, tmp_path, {**setup, "steps": [], "prefill": {"Window_1-sill": stored["Window_1-sill"]}})
+    assert reloaded["stored"]["Window_1-sill"]["note"] == "bord de fenêtre"
+    changed = _run_page(arch, tmp_path, {**setup, "steps": [["Opening_1-w", "91", "n"]]})["stored"]["Opening_1-w"]
+    assert changed["value_m"] == 0.91 and changed["date"] > first["date"]
+
+
+def test_python_side_accepts_a_note_without_a_value():
+    doc = {"version": 2, "values": {"A-w": {"value_m": None, "date": "d", "note": "x"}, "B-w": {"value_m": 0.5, "date": "", "note": ""}}}
+    assert tape_merge.normalize(doc) == {"B-w": 0.5}
+    assert tape_merge.read_store(doc)["A-w"] == {"value_m": None, "date": "d", "note": "x"}
+    assert tape_merge.read_store({"version": 2, "values": {"A-w": {"value_m": None, "note": " "}}}) == {}

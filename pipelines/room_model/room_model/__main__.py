@@ -73,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name in (*STAGE_MODULES, "all"):
         stage = sub.add_parser(name, parents=[parent], help=f"run {name}")
         if name in ("architecture", "all"):
-            stage.add_argument("--tape", type=Path, help='tape measurements {"<dimension id>": <metres>}, copied to <out>/measurements.json')
+            stage.add_argument("--tape", type=Path, help='tape measurements: the survey page file (version 2, "values") or {"<dimension id>": <metres>}, copied to <out>/measurements.json')
             stage.add_argument("--overrides", type=Path, help='manual corrections {"<element id>": {field: value}}, copied to <out>/overrides.json')
     cmp = sub.add_parser("compare", help="compare a model.json against a reference")
     cmp.add_argument("--model", type=Path, required=True)
