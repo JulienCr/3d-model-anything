@@ -10,7 +10,8 @@ import types
 
 import bmesh
 import bpy
-from mathutils import Vector
+import numpy as np
+from mathutils import Vector, geometry
 from mathutils.bvhtree import BVHTree
 
 RIG_PROPS = ("Ouverture", "Inverser sens", "Inverser charni\u00e8re", "AngleMax")
@@ -36,6 +37,7 @@ def _object_facts(obj):
         bm.from_mesh(obj.data)
         facts.update(verts=len(bm.verts), faces=len(bm.faces), non_manifold=sum(1 for e in bm.edges if not e.is_manifold),
                      materials=[m.name for m in obj.data.materials if m],
+                     bare_faces=sum(1 for p in obj.data.polygons if p.material_index >= len(obj.data.materials) or not obj.data.materials[p.material_index]),
                      zs=sorted({round(v.co.z, 4) for v in bm.verts}))
         corners = [obj.matrix_world @ v.co for v in bm.verts]
         bm.free()
@@ -154,6 +156,33 @@ def _overlaps(step=0.01, levels=(0.1, 0.5, 0.9, 1.3, 1.7, 2.1)):
     return out
 
 
+def _texel_at(obj, origin, direction):
+    """Ray-casts the object; returns the material, UV and image pixel (RGB bytes, as stored) at the hit, or {"hit": False}."""
+    inv = obj.matrix_world.inverted()
+    hit, location, _, index = obj.ray_cast(inv @ Vector(origin), (inv.to_3x3() @ Vector(direction)).normalized())
+    if not hit:
+        return {"hit": False}
+    mesh = obj.data
+    mesh.calc_loop_triangles()
+    uv_layer = mesh.uv_layers.active.data
+    uv = None
+    for tri in mesh.loop_triangles:
+        if tri.polygon_index != index:
+            continue
+        a, b, c = (mesh.vertices[v].co for v in tri.vertices)
+        if geometry.intersect_point_tri(location, a, b, c) is not None:
+            uvs = [Vector((*uv_layer[l].uv, 0.0)) for l in tri.loops]
+            uv = geometry.barycentric_transform(location, a, b, c, *uvs)
+            break
+    material = mesh.materials[mesh.polygons[index].material_index]
+    image = next(n.image for n in material.node_tree.nodes if n.type == "TEX_IMAGE")
+    w, h = image.size
+    pixels = np.empty(w * h * 4, np.float32)
+    image.pixels.foreach_get(pixels)
+    x, y = min(int(uv.x * w), w - 1), min(int(uv.y * h), h - 1)
+    return {"hit": True, "material": material.name, "uv": [uv.x, uv.y], "rgb": [round(float(v) * 255) for v in pixels[(y * w + x) * 4:(y * w + x) * 4 + 3]]}
+
+
 def _hook_contract(spec):
     """build_scene.build passes ctx to a hook and rejects returned objects linked to no collection."""
     sys.path.insert(0, spec["blender_dir"])
@@ -222,6 +251,7 @@ def main():
         "rigs": {r["name"]: _rig(r) for r in spec["rigs"]},
         "overlaps": _overlaps(),
         "spans": _spans(spec.get("spans", [])),
+        "texels": {p["name"]: _texel_at(bpy.data.objects[p["object"]], p["origin"], p["direction"]) for p in spec.get("texel_rays", [])},
     }
     facts["measureit_failure"] = _measureit_failure(spec)
     facts["hook"] = _hook_contract(spec)

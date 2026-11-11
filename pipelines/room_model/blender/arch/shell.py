@@ -169,7 +169,9 @@ def build(arch: dict, collections: dict, materials: dict) -> list[bpy.types.Obje
             continue
         if obj.name not in target.objects:
             target.objects.link(obj)
+        obj.data.materials.clear()  # a boolean result carries the empty slots of its cutters, which would take slot 0
         obj.data.materials.append(materials[material])
+        obj.data.polygons.foreach_set("material_index", [0] * len(obj.data.polygons))
         out.append(obj)
     for cutter, *_ in cutters:
         _remove(cutter)
