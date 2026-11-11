@@ -18,6 +18,7 @@ from scipy import ndimage
 from room_model import ortho
 from room_model.capture import colmajor, load_roomplan
 from room_model.context import NoPhotos, StageContext, output_path, require
+from room_model.model import SOURCE_RANK
 from room_model.ortho import FaceFrame
 from room_model.photo_geom import (FACING_COS, LOOSE_TOLERANCE, MIN_BAND_SEEN, DepthMaps, PosedPhoto, load_posed_photos,
                                    load_room_mesh, occluded_mask, project, rect_grid, room_boxes)
@@ -198,6 +199,9 @@ def measure(kind: str, frame: FaceFrame, rect, views: list[tuple[PosedPhoto, np.
                        "width": _value(right["pos"] - left["pos"], np.hypot(left["sigma"], right["sigma"])),
                        "sill": _value(bottom["pos"], bottom["sigma"]),
                        "height": _value(top["pos"] - bottom["pos"], np.hypot(top["sigma"], bottom["sigma"]))}
+    if kind == "window":  # curtains and frosted glass fool the mask: a window waits for an edge pick
+        measures = out.pop("measures")
+        return {**out, "status": "candidates", "proposal": {"edges": edges, "measures": measures}}
     return {**out, "status": "anchored", "edges": edges}
 
 
@@ -340,14 +344,17 @@ def run(ctx: StageContext, segment=None) -> Path:
 
 
 PARAMS = ("center_s", "width", "sill", "height")
+# m; RoomPlan's own stated accuracy: a photo measure looser than the coarsest scan source is a depth ambiguity
+# (one view, an occluded edge), not a measurement. Below it, the photo outranks roomplan, lidar and llm values.
+PLAUSIBLE_SIGMA = 0.03
 
 
 def apply(arch: dict, doc: dict) -> dict:
     """Anchored elements take their photo measures (`source: photo`, scan value kept) and their edge depths.
 
-    A measure replaces a parameter only when its sigma is smaller (a single view or an occluded edge can leave a
-    depth ambiguity worse than the scan); the sill goes with the height, as both rest on the bottom edge. A floor-based
-    bottom is a rule, not a measure: there the top edge's own sigma is what is compared.
+    A measure replaces a parameter of lower source rank (`model.SOURCE_RANK`) when its sigma is at most
+    PLAUSIBLE_SIGMA; the sill goes with the height, as both rest on the bottom edge. A floor-based bottom is a
+    rule, not a measure: there the top edge's own sigma is what is checked.
     """
     elements = {e["id"]: e for e in arch["elements"]}
     report = {"anchored": [], "candidates": [], "open": [], "no_view": [], "no_host": [], "unknown": [], "kept": []}
@@ -362,7 +369,8 @@ def apply(arch: dict, doc: dict) -> dict:
         sigma = {name: m["sigma"] for name, m in item["measures"].items()}
         if item["edges"]["bottom"].get("rule") == "floor":
             sigma["height"] = item["edges"]["top"]["sigma"]
-        better = {name: name in el["params"] and sigma[name] < arch["parameters"][el["params"][name]]["sigma"]
+        better = {name: name in el["params"] and sigma[name] <= PLAUSIBLE_SIGMA
+                  and SOURCE_RANK[arch["parameters"][el["params"][name]]["source"]] < SOURCE_RANK["photo"]
                   for name in ("center_s", "width", "height")}
         better["sill"] = better["height"] and "sill" in el["params"]
         report["kept"] += [f"{ident}.{name}" for name, ok in better.items() if not ok and name in el["params"]]

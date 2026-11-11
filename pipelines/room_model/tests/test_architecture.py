@@ -915,3 +915,13 @@ def test_a_floor_based_bottom_is_applied_by_rule_even_against_a_tighter_claimed_
     doc["elements"]["Door_1"]["measures"]["height"]["sigma"] = 0.5  # the floor's sigma dominates the combined one
     arch = env.merge(anchors=doc)
     assert _param(arch, "Door_1", "height")["source"] == "photo" and _param(arch, "Door_1", "height")["value"] == 2.01
+
+
+def test_a_plausible_photo_measure_outranks_a_tighter_llm_or_lidar_sigma(env):
+    doc = _anchored_door(env)
+    doc["elements"]["Door_1"]["measures"]["width"]["sigma"] = 0.025  # looser than the scan's, within the cap
+    arch = env.merge(anchors=doc)
+    assert _param(arch, "Door_1", "width")["source"] == "photo"
+    assert _param(env.arch, "Door_1", "width")["sigma"] < 0.025  # the scan claimed tighter: rank, not sigma, decides
+    doc["elements"]["Door_1"]["measures"]["width"]["sigma"] = anchor.PLAUSIBLE_SIGMA + 0.001
+    assert _param(env.merge(anchors=doc), "Door_1", "width") == _param(env.arch, "Door_1", "width")

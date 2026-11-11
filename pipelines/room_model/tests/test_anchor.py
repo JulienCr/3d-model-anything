@@ -207,3 +207,11 @@ def test_a_door_is_closed_only_when_the_mesh_in_its_doorway_lies_within_the_wall
     maps = DepthMaps(*_quads(wall + ([leaf] if leaf else [])))
     _, photo = render_face(FRAME, [FacePatch((-2, 3), (-1, 4), 0.0, 100)], (0.9, 1.3, 2.2), (0.9, 1.05, 0.0))
     assert anchor.leaf_closed(maps, photo, FRAME, (0.5, 1.3, 0.0, 2.1), thickness=0.2) is closed
+
+
+def test_a_window_mask_is_only_a_proposal_until_an_edge_pick_confirms_it():
+    sash = [FacePatch((0.5, 1.7), (0.8, 2.2), -0.08, 235)]  # seen through the opening, its edges hidden by the jambs
+    views = _views(_wall((0.60, 1.60), (0.9, 2.1), sash), angles=(-20, 0, 20), target_s=1.1)
+    out = _measure("window", (0.58, 1.65, 0.88, 2.12), views)
+    assert out["status"] == "candidates" and "measures" not in out
+    assert abs(out["proposal"]["measures"]["width"]["value"] - 1.0) < 0.004
