@@ -27,8 +27,7 @@ from room_model import architecture
 from room_model.architecture import _face_point, dimension_endpoints
 from room_model.capture import colmajor, load_photos, load_roomplan
 from room_model.context import ClaudeMissing, NoPhotos, StageContext, output_path, require
-from room_model.photo_geom import DEPTH_TOLERANCE, MIN_DEPTH, DepthMaps, PosedPhoto, best_views, load_posed_photos, load_room_mesh, project, room_boxes, to_upright, upright, upright_size
-from room_model.survey_page import LOOSE_TOLERANCE
+from room_model.photo_geom import DEPTH_TOLERANCE, LOOSE_TOLERANCE, MIN_DEPTH, DepthMaps, PosedPhoto, best_views, load_posed_photos, load_room_mesh, project, rect_views, room_boxes, to_upright, upright, upright_size
 
 PACKAGE = Path(__file__).resolve().parent
 CATALOGUE_FILE = PACKAGE.parent / "blender" / "arch" / "catalogue.py"
@@ -134,17 +133,47 @@ class _Crop:
     photo: PosedPhoto
     box: tuple[int, int, int, int]
     overlays: list[tuple[np.ndarray, tuple[int, int, int], str | None]] = field(default_factory=list)
+    fallback: str | None = None  # "overview" for an element shown on a wall overview because no photo qualified
+
+
+def _in_image(photo: PosedPhoto, pts: np.ndarray) -> bool:
+    """Every point is in front of the camera and inside the sensor image."""
+    uv, depth = project(photo, pts)
+    return bool((depth > MIN_DEPTH).all() and (uv >= 0).all() and (uv <= photo.size).all())
 
 
 def _element_crops(scene: _Scene, el: dict, rect: np.ndarray) -> list[_Crop]:
+    """Up to three eligible views of the element; else one overview of its host face from a photo that shows it whole.
+
+    The overview keeps every rule but the size: the element is small in it, never grazing or hidden.
+    """
     host = next((e for e in scene.arch["elements"] if e["id"] == el["host"]), None)
-    normal = None if host is None else _face_normal(scene.arch, host, el.get("face") or "A")
+    face = el.get("face") or "A"
+    partition = host is not None and host["kind"] == "partition"
+    normal = None if host is None else _face_normal(scene.arch, host, face)
+    args = (scene.photos, rect, scene.maps, normal, partition, scene.boxes)
     crops = []
-    for k, photo in enumerate(scene.views(rect, normal, VIEWS_PER_ELEMENT)):
-        box = _frame_box(photo, rect)
+    for k, view in enumerate(rect_views(*args, VIEWS_PER_ELEMENT)):
+        box = _frame_box(view.photo, rect)
         if box:
-            crops.append(_Crop(f"{el['id']}-{'abc'[k]}", "element", el["id"], photo, box, [(rect, YELLOW, None)]))
-    return crops
+            crops.append(_Crop(f"{el['id']}-{'abc'[k]}", "element", el["id"], view.photo, box, [(rect, YELLOW, None)]))
+    if crops or host is None:
+        return crops
+    for view in rect_views(*args, len(scene.photos), min_side=0):
+        seen_from = face
+        if partition and _face_normal(scene.arch, host, face) @ (view.photo.centre - rect.mean(0)) < 0:
+            seen_from = "B" if face == "A" else "A"
+        box = _frame_box(view.photo, np.vstack([_whole_face(scene.arch, host, seen_from), rect]))
+        if box and _in_image(view.photo, rect):
+            return [_Crop(f"{el['id']}-a", "element", el["id"], view.photo, box, [(rect, YELLOW, None)], fallback="overview")]
+    return []
+
+
+def _whole_face(arch: dict, host: dict, face: str) -> np.ndarray:
+    """The rectangle of the overview crop of a host face: nearly its whole length, 10 cm clear of floor and top."""
+    floor, top = _value(arch, "floor.level"), _value(arch, host["params"]["top"])
+    length = float(np.linalg.norm(np.subtract(host["end"], host["start"])))
+    return _face_rect(arch, host, face, (0.04 * length, 0.96 * length), (floor + 0.1, max(top - 0.1, floor + 0.2)))
 
 
 def _face_crop(scene: _Scene, host: dict, face: str, others: dict) -> _Crop | None:
@@ -279,6 +308,7 @@ def _elements_doc(arch: dict, typed: list[dict], crops: dict[str, list[_Crop]], 
         "room": {"ceiling_height_cm": sorted({round(c * 100) for c in ceilings}), "hosts": [h["id"] for h in arch["elements"] if h["kind"] in HOST_KINDS]},
         "elements": [{"id": e["id"], "kind": e["kind"], "host": e.get("host"), "face": e.get("face"), "flags": e.get("flags", []), **_scan_summary(arch, e),
                       "sheet": f"{e['id']}.jpg" if e["id"] in shown else None,
+                      **({"fallback": "overview"} if any(c.fallback for c in crops[e["id"]]) else {}),
                       "crops": [{"id": c.id, "size": info[c.id]["size"]} for c in crops[e["id"]] if c.id in info]} for e in typed],
         "faces": [{"host": h["id"], "face": f, "kind": h["kind"], "length_cm": round(float(np.linalg.norm(np.subtract(h["end"], h["start"]))) * 100),
                    "crop": c.id if c and c.id in info else None, "sheet": sheet_of.get(c.id) if c else None} for h, f, c in faces],
@@ -323,7 +353,8 @@ def prepare(ctx: StageContext) -> Path:
         sheets.append({"file": f"walls_{k + 1}.jpg", "crops": [c.id for c in group]})
     for c in [c for cs in crops.values() for c in cs] + covered:
         if c.id in info:
-            info[c.id].update(photo=c.photo.name, box=list(c.box), up_turns=c.photo.up_turns, kind=c.kind, target=c.target)
+            info[c.id].update(photo=c.photo.name, box=list(c.box), up_turns=c.photo.up_turns, kind=c.kind, target=c.target,
+                              **({"fallback": c.fallback} if c.fallback else {}))
     elements = _elements_doc(arch, typed, crops, {e["id"] for e in shown}, faces, sheets, info)
     (pending / "crops.json").write_text(json.dumps(info, indent=1), encoding="utf-8")
     (pending / "elements.json").write_text(json.dumps(elements, indent=1), encoding="utf-8")

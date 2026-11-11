@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,11 +16,23 @@ from room_model.frame import world_to_room
 
 DEPTH_SIDE = 320  # px on the long side of the depth maps
 DEPTH_TOLERANCE = 0.03  # m; a point this much nearer than the nearest surface is still visible
+LOOSE_TOLERANCE = 0.06  # m; a skirting or a casing stands out of its wall plane by up to this much and may hide an end
 EDGE_MARGIN = 0.02  # fraction of the image kept clear of a point that must be visible
 MIN_DEPTH = 0.3
 PARALLEL_EPS = 1e-3  # |cos| between a ray and the plane normal below which the ray counts as parallel
 BOX_MARGIN = 0.03  # m; furniture boxes are grown by this much before the sight test
 SIGHT_SAMPLES = 9
+# A planar element is a usable view only if the camera faces it: beyond 60 degrees from its normal the
+# foreshortening makes a corner click unreliable (a 1 px error grows by 1/cos, so more than 2 px).
+FACING_COS = math.cos(math.radians(60))
+# A measured span is only read by a person, who can still tell its two ends apart up to 70 degrees (1/cos < 3).
+SURVEY_FACING_COS = math.cos(math.radians(70))
+GRID_SIDE = 5  # points per side of the grid laid on a rectangle
+# The grid stops 3 cm inside the edges: an opening's interior is empty space in the mesh, where nothing is "visible"
+# by default, so the border of the grid lies against the frame band, where an occluder's edge shows up.
+FRAME_BAND = 0.03
+MIN_SEEN = 0.8  # share of the grid points that must pass the depth test and the furniture box test
+MIN_SIDE_PX = 120  # shorter side of the projected rectangle: below it a corner click is within a few percent of the size
 ROTATE = {1: Image.Transpose.ROTATE_90, 2: Image.Transpose.ROTATE_180, 3: Image.Transpose.ROTATE_270}
 
 
@@ -161,14 +174,12 @@ def room_boxes(roomplan: dict, w2r: np.ndarray) -> list[RoomBox]:
     return out
 
 
-def occluded_fraction(centre: np.ndarray, span: np.ndarray, boxes: list[RoomBox], margin: float = BOX_MARGIN) -> float:
-    """Fraction of the span samples (ends included) whose sight line from `centre` crosses a box grown by `margin`.
+def occluded_mask(centre: np.ndarray, samples: np.ndarray, boxes: list[RoomBox], margin: float = BOX_MARGIN) -> np.ndarray:
+    """Bool (n,): the sight line from `centre` to the sample crosses a box grown by `margin`.
 
     A box holding the sample, or the camera centre, is ignored for that sample.
     """
-    span, centre = np.asarray(span, float), np.asarray(centre, float)
-    t = np.linspace(0.0, 1.0, SIGHT_SAMPLES)[:, None]
-    samples = span[0] + t * (span[-1] - span[0])
+    samples, centre = np.atleast_2d(np.asarray(samples, float)), np.asarray(centre, float)
     blocked = np.zeros(len(samples), bool)
     for box in boxes:
         half = box.half + margin
@@ -183,7 +194,14 @@ def occluded_fraction(centre: np.ndarray, span: np.ndarray, boxes: list[RoomBox]
         hi = np.where(parallel, np.inf, np.maximum(t0, t1)).min(1)
         inside = (np.abs(p) <= half).all(1)
         blocked |= ~inside & (np.maximum(lo, 0.0) <= np.minimum(hi, 1.0))
-    return float(blocked.mean())
+    return blocked
+
+
+def occluded_fraction(centre: np.ndarray, span: np.ndarray, boxes: list[RoomBox], margin: float = BOX_MARGIN) -> float:
+    """Fraction of SIGHT_SAMPLES points along the span (ends included) hidden from `centre` by a box (see `occluded_mask`)."""
+    span = np.asarray(span, float)
+    samples = span[0] + np.linspace(0.0, 1.0, SIGHT_SAMPLES)[:, None] * (span[-1] - span[0])
+    return float(occluded_mask(centre, samples, boxes, margin).mean())
 
 
 class DepthMaps:
@@ -240,12 +258,14 @@ class DepthMaps:
 
 
 def best_views(photos: list[PosedPhoto], pts_room: np.ndarray, mesh: DepthMaps | tuple[np.ndarray, np.ndarray],
-               k: int = 3, normal: np.ndarray | None = None, tolerance: float = DEPTH_TOLERANCE, boxes: list[RoomBox] | None = None) -> list[PosedPhoto]:
+               k: int = 3, normal: np.ndarray | None = None, tolerance: float = DEPTH_TOLERANCE, boxes: list[RoomBox] | None = None,
+               min_cos: float = 0.0) -> list[PosedPhoto]:
     """Up to k photos that see every point (depth test, 3 cm by default), best first.
 
     Score: squared pixel diagonal of the projected points, times the cosine between the optical axis and the
     direction to the points' centroid, times |cos| between `normal` and the direction to the camera when given.
     With `boxes`, photos are ranked by the fraction of the span hidden by furniture first (see `occluded_fraction`).
+    With `normal` and `min_cos`, photos seeing the points at less than `min_cos` from the normal are dropped.
     """
     maps = mesh if isinstance(mesh, DepthMaps) else DepthMaps(*mesh)
     pts = np.atleast_2d(np.asarray(pts_room, float))
@@ -261,6 +281,62 @@ def best_views(photos: list[PosedPhoto], pts_room: np.ndarray, mesh: DepthMaps |
         distance = np.linalg.norm(to_point)
         cos_axis = float(to_point @ photo.c2w_room[:3, 2]) / max(distance, 1e-9)
         cos_surface = 1.0 if normal is None else abs(float(np.asarray(normal, float) @ to_point)) / max(distance, 1e-9)
+        if cos_surface < min_cos:
+            continue
         scored.append(((round(hidden, 6), -diag2 * max(cos_axis, 0.0) * cos_surface), photo))
     scored.sort(key=lambda s: s[0])
     return [p for _, p in scored[:k]]
+
+
+@dataclass
+class RectView:
+    photo: PosedPhoto
+    cos: float  # between the face normal and the direction from the rectangle centre to the camera
+    area_px: float  # of the projected rectangle
+    side_px: float  # its shorter side
+    unseen: int  # grid points failing the depth test or the furniture box test
+
+
+def rect_grid(rect: np.ndarray) -> np.ndarray:
+    """GRID_SIDE x GRID_SIDE points (n, 3) over the rectangle (4 corners, in order) shrunk by FRAME_BAND on every side."""
+    rect = np.asarray(rect, float)
+    u, v = rect[1] - rect[0], rect[3] - rect[0]
+    lo = [min(FRAME_BAND, 0.25 * float(np.linalg.norm(e))) / max(float(np.linalg.norm(e)), 1e-9) for e in (u, v)]
+    s, t = (np.linspace(a, 1.0 - a, GRID_SIDE) for a in lo)
+    return (rect[0] + s[None, :, None] * u + t[:, None, None] * v).reshape(-1, 3)
+
+
+def rect_views(photos: list[PosedPhoto], rect: np.ndarray, mesh: DepthMaps | tuple[np.ndarray, np.ndarray], normal: np.ndarray | None = None,
+               two_sided: bool = False, boxes: list[RoomBox] | None = None, k: int = 3, tolerance: float = LOOSE_TOLERANCE,
+               min_side: float = MIN_SIDE_PX) -> list[RectView]:
+    """Up to k eligible photos of a planar rectangle (4 corners in order), best first; none when no photo qualifies.
+
+    Eligible: the camera faces the rectangle (cosine of `normal`, the face normal towards the viewing side, at least
+    FACING_COS; |cos| when `two_sided` or when no normal is given), the projected rectangle is at least MIN_SIDE_PX on its
+    shorter side, and MIN_SEEN of its grid points pass the depth test (LOOSE_TOLERANCE: casings stand out of the wall
+    plane, an occluder is a wall thickness or more) and the box test. Ranked by area x cos, then by fewest unseen points.
+    """
+    maps = mesh if isinstance(mesh, DepthMaps) else DepthMaps(*mesh)
+    rect = np.asarray(rect, float)
+    if normal is None:
+        normal, two_sided = np.cross(rect[1] - rect[0], rect[3] - rect[0]), True
+    normal = np.asarray(normal, float) / np.linalg.norm(normal)
+    grid, centre = rect_grid(rect), rect.mean(0)
+    found = []
+    for photo in photos:
+        uv, depth = project(photo, rect)
+        to_camera = photo.centre - centre
+        cos = float(normal @ to_camera) / max(float(np.linalg.norm(to_camera)), 1e-9)
+        cos = abs(cos) if two_sided else cos
+        wide, tall = ((np.linalg.norm(uv[a] - uv[b]) + np.linalg.norm(uv[c] - uv[d])) / 2 for a, b, c, d in ((1, 0, 2, 3), (3, 0, 2, 1)))
+        if not (depth > MIN_DEPTH).all() or cos < FACING_COS or min(wide, tall) < min_side:
+            continue
+        seen = maps.visible(photo, grid, tolerance)
+        if boxes:
+            seen &= ~occluded_mask(photo.centre, grid, boxes)
+        if seen.sum() < MIN_SEEN * len(grid) - 1e-9:
+            continue
+        area = 0.5 * abs(float(np.dot(uv[:, 0], np.roll(uv[:, 1], -1)) - np.dot(uv[:, 1], np.roll(uv[:, 0], -1))))
+        found.append(RectView(photo, cos, area, min(wide, tall), int((~seen).sum())))
+    found.sort(key=lambda v: (-v.area_px * v.cos, v.unseen))
+    return found[:k]

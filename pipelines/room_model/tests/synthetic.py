@@ -69,6 +69,8 @@ class SyntheticOptions:
     partition_opening_face: str = "B"  # side the RoomPlan opening +z axis points to; A is the +x face
     orphan_opening: bool = False  # a RoomPlan opening standing in free space
     photos: int = 0  # posed photos (first N of PHOTO_POSES) rendered from the mesh, stored in sensor orientation
+    photo_scale: int = 1  # sensor size and focal length multiplier: element crops need photos larger than PHOTO_SIZE
+    photo_poses: tuple | None = None  # (position, target, roll) tuples replacing PHOTO_POSES; `photos` still counts them
 
 
 @dataclass
@@ -124,6 +126,8 @@ PHOTO_POSES = [
     ((3.0, 1.4, 0.8), (6.0, 1.0, 2.5), 90.0),
     ((2.5, 1.4, 1.3), (1.0, 1.2, 1.3), -90.0),  # the partition
     ((2.0, 1.4, 0.9), (1.5, 1.2, 4.5), 90.0),  # down the wing
+    ((3.2, 1.4, 1.0), (6.0, 1.0, 1.25), -90.0),  # the east door again, from the left
+    ((3.5, 1.4, 1.8), (6.0, 1.0, 1.25), -90.0),  # and from the right: three frontal views of it with the first pose
 ]
 
 
@@ -520,20 +524,21 @@ def _look_at(pos, target, roll_deg: float) -> np.ndarray:
     return m
 
 
-def _render_photos(mesh: _Mesh, world: np.ndarray, count: int, folder: Path) -> list[dict]:
+def _render_photos(mesh: _Mesh, world: np.ndarray, count: int, folder: Path, scale: int = 1, poses: tuple | None = None) -> list[dict]:
     """Photos of the mesh with a flat colour per surface; entries of photos.json with ARKit poses in the world frame."""
-    assert count <= len(PHOTO_POSES), f"photos: at most {len(PHOTO_POSES)}"
+    poses = PHOTO_POSES if poses is None else poses
+    assert count <= len(poses), f"photos: at most {len(poses)}"
     verts, faces = np.concatenate(mesh.verts), np.concatenate(mesh.faces)
     surface, face_cls = np.concatenate(mesh.surface), np.concatenate(mesh.cls)
-    w, h = PHOTO_SIZE
-    K = np.array([[PHOTO_FOCAL, 0, w / 2], [0, PHOTO_FOCAL, h / 2], [0, 0, 1.0]])
+    w, h = PHOTO_SIZE[0] * scale, PHOTO_SIZE[1] * scale
+    K = np.array([[PHOTO_FOCAL * scale, 0, w / 2], [0, PHOTO_FOCAL * scale, h / 2], [0, 0, 1.0]])
     base = np.array([CLASS_COLORS[int(c)] for c in face_cls], float)
     tint = ((surface * 37) % 41 - 20)[:, None].astype(float)
     colours = np.clip(base + tint, 0, 255).astype(np.uint8)
     entries = []
-    for i, (pos, target, roll) in enumerate(PHOTO_POSES[:count]):
+    for i, (pos, target, roll) in enumerate(poses[:count]):
         c2w_local = _look_at(pos, target, roll)
-        _, ids = raster.rasterize(verts, faces, K, np.linalg.inv(c2w_local), PHOTO_SIZE)
+        _, ids = raster.rasterize(verts, faces, K, np.linalg.inv(c2w_local), (w, h))
         image = np.where((ids >= 0)[..., None], colours[np.maximum(ids, 0)], np.array(SKY, np.uint8))
         name = f"{i:04d}.jpg"
         Image.fromarray(image.astype(np.uint8)).save(folder / name, quality=92)
@@ -551,7 +556,7 @@ def make_capture(root: Path, options: SyntheticOptions | None = None) -> Synthet
     world = _world_from_local()
     mesh = _build_mesh(opt)
     n_verts, n_faces = _write_ply(mesh, world, root / "mesh" / "room-0.ply")
-    photo_entries = _render_photos(mesh, world, opt.photos, root / "photos") if opt.photos else []
+    photo_entries = _render_photos(mesh, world, opt.photos, root / "photos", opt.photo_scale, opt.photo_poses) if opt.photos else []
     data, idents, extra, partition, outside = _roomplan(opt, world)
     (root / "rooms" / "room-0.json").write_text(json.dumps(data), encoding="utf-8")
     (root / "photos" / "photos.json").write_text(json.dumps(photo_entries), encoding="utf-8")

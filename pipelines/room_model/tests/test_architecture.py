@@ -15,7 +15,7 @@ from synthetic import DOOR, WINDOW
 @pytest.fixture(scope="module")
 def full(tmp_path_factory):
     root = tmp_path_factory.mktemp("architecture")
-    ctx, truth = make_case(root, "full", window=True, partition=True, partition_opening=True, photos=8)
+    ctx, truth = make_case(root, "full", window=True, partition=True, partition_opening=True, photos=10, photo_scale=3)
     shell.run(ctx)
     model.run(ctx)
     openings.run(ctx)
@@ -175,6 +175,19 @@ def test_survey_alternatives(full):
     assert "swap" in html and "http" not in html and "<script src" not in html
 
 
+@pytest.mark.parametrize("angle, kept", [(65, True), (80, False)])
+def test_survey_photo_must_face_the_span_up_to_70_degrees(tmp_path, angle, kept):
+    a = np.radians(angle)
+    pose = ((3.0 + 2.5 * np.sin(a), 1.4, 2.5 * np.cos(a)), (3.0, 1.4, 0.0), 90.0)
+    ctx, _ = make_case(tmp_path, "cap", window=True, photos=1, photo_poses=(pose,))
+    for stage in (shell, model, openings, architecture):
+        stage.run(ctx)
+    _, rows = _sections((ctx.out / "measurements" / "index.html").read_text(encoding="utf-8"))
+    numbers = json.loads((ctx.out / "measurements" / "plan_numbers.json").read_text(encoding="utf-8"))
+    row = rows[int(next(n for n, d in numbers.items() if d == "Window_1-w"))]
+    assert ("data:image/jpeg;base64," in row) is kept
+
+
 def test_survey_masked_note(full):
     _, _, arch = full
     rows = survey_page.numbered_rows(arch)[:2]
@@ -284,8 +297,10 @@ def test_llm_correction_of_an_elevated_opening_moves_its_sill(env):
 
 
 def test_llm_correction_uses_the_plane_of_the_partition_face(env):
+    borrowed = {**env.crops["Partition_P1-A-ov"], "kind": "element", "target": "Opening_1"}  # no photo shows Opening_1: borrow a crop
+    env = dataclasses.replace(env, crops={**env.crops, "Opening_1-a": borrowed})
     rect = _opening_rect(env.arch, "Opening_1", widen=0.04)
-    arch = env.merge(_answers(env, elements=[{"id": "Opening_1", "corners": _corners(env, ["Opening_1-a", "Opening_1-b"], rect)}]))
+    arch = env.merge(_answers(env, elements=[{"id": "Opening_1", "corners": _corners(env, ["Opening_1-a"], rect)}]))
     assert _param(arch, "Opening_1", "width")["value"] == pytest.approx(_param(env.arch, "Opening_1", "width")["value"] + 0.04, abs=0.002)
     assert _param(arch, "Opening_1", "center_s")["value"] == pytest.approx(_param(env.arch, "Opening_1", "center_s")["value"], abs=0.002)
 
@@ -416,7 +431,7 @@ def test_unusable_answers_are_listed_never_raised(env):
                   {"type": "fixed"}, "not an object",
                   {"id": "Door_1", "corners": [{"crop": "nowhere", "uv": [[0, 0], [1, 0], [1, 1], [0, 1]]}]},
                   {"id": "Window_1", "corners": [{"crop": "Door_1-a", "uv": "garbage"}]},
-                  {"id": "Opening_1", "corners": [{"crop": "Opening_1-a", "uv": [[0, 0], [crops["Opening_1-a"]["size"][0], 0], [0, 1], [1, 1]]}]}],
+                  {"id": "Opening_1", "corners": [{"crop": "Window_1-a", "uv": [[0, 0], [crops["Window_1-a"]["size"][0], 0], [0, 1], [1, 1]]}]}],
         new_elements=[{"kind": "niche", "host_hint": "Nowhere", "corners": _corners(env, ["Wall_M2-ov"], _face_rect(env, "Wall_M2", None, (0.2, 0.5), (1, 1.5)))},
                       {"kind": "niche", "host_hint": "Wall_M2", "corners": []}],
         panel_frames=[{"host_hint": "Nowhere", "profile": "ogee", "corners": []}])

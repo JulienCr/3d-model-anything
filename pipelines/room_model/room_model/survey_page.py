@@ -16,7 +16,7 @@ from room_model.architecture import STATION_HEIGHT, dimension_endpoints
 from room_model.capture import colmajor, load_roomplan
 from room_model.context import StageContext
 from room_model.fmt import fr
-from room_model.photo_geom import DepthMaps, PosedPhoto, best_views, load_posed_photos, load_room_mesh, occluded_fraction, project, room_boxes, to_upright, upright, upright_size
+from room_model.photo_geom import LOOSE_TOLERANCE, SURVEY_FACING_COS, DepthMaps, PosedPhoto, best_views, load_posed_photos, load_room_mesh, occluded_fraction, project, room_boxes, to_upright, upright, upright_size
 
 GROUP = {"opening_width": 0, "opening_height": 0, "opening_sill": 0, "width": 1, "length": 1, "ceiling_height": 2}
 SOURCES = {"lidar": "LiDAR", "roomplan": "RoomPlan", "assumed": "valeur supposée", "llm": "LLM", "tape": "mètre ruban"}
@@ -24,7 +24,6 @@ PRIORITY_SIGMA = 0.02  # m
 PRIORITY_SOURCES = ("roomplan", "llm", "assumed")
 BADGE = "à reprendre en priorité"
 MASKED_NOTE = "vue partiellement masquée par un meuble"
-LOOSE_TOLERANCE = 0.06  # m; second try when no photo passes the 3 cm test (a skirting or a frame hides an end)
 CROP_SIDE = 480  # px on the long side of a crop
 MAX_ALTERNATIVES = 3
 MARKER_RADIUS = 11
@@ -279,8 +278,8 @@ def _crops(ctx: StageContext, arch: dict, rows: list[Row]) -> tuple[dict[int, li
     for row in rows:
         ends, normal = np.array([row.p0, row.p1]), _host_normal(arch, row.dim)
         k = 1 + MAX_ALTERNATIVES
-        views = (best_views(photos, ends, maps, k, normal, boxes=boxes)
-                 or best_views(photos, ends, maps, k, normal, LOOSE_TOLERANCE, boxes))
+        views = (best_views(photos, ends, maps, k, normal, boxes=boxes, min_cos=SURVEY_FACING_COS)
+                 or best_views(photos, ends, maps, k, normal, LOOSE_TOLERANCE, boxes, SURVEY_FACING_COS))
         if views:
             crops[row.number] = [_crop(v, row.p0, row.p1) for v in views]
             if boxes and occluded_fraction(views[0].centre, ends, boxes) > 0:

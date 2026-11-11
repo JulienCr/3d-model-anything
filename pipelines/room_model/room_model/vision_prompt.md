@@ -19,7 +19,7 @@ Your working directory holds:
 
 A sheet holds several panels side by side. Each panel is a **crop** of one photo, turned upright (vertical lines are vertical). A dark band above the panel prints the **crop id** in large letters (for example `Door_1-a`) and the crop size. Use that exact id in `corners[].crop`.
 
-- Element sheets (`<id>.jpg`) show the same element from up to three viewpoints (`-a`, `-b`, `-c`). The **yellow quadrilateral** is where the scan puts the opening. It can be off by several centimetres: do not copy it, look at the real edges.
+- Element sheets (`<id>.jpg`) show the same element from up to three viewpoints (`-a`, `-b`, `-c`). The **yellow quadrilateral** is where the scan puts the opening. It can be off by several centimetres: do not copy it, look at the real edges. Only frontal, unobstructed photos are shown. When none is large enough, the element has `"fallback": "overview"` in `elements.json` and its single crop is a view of the whole wall: the opening is small there, so give corners only if the four of them are still sharp. An element with no sheet has no usable photo: give no corners for it.
 - Overview sheets (`walls_<k>.jpg`) show whole wall and partition faces (crop ids end with `-ov`). Use them for the mouldings, the panel frames and the niches the scan did not see. Known openings are outlined in orange with their id.
 - **uv coordinates** are pixels of the crop image: origin at the top-left corner of the photo part of the panel (not of the title band), `u` to the right, `v` downwards. Ticks every 50 px, numbers every 100 px, and a light grid every 100 px are drawn on the edges so you can read them. A point must stay inside the crop.
 
