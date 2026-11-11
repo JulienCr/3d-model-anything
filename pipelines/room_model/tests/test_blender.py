@@ -1,5 +1,6 @@
 import json
 import math
+import re
 import shutil
 import struct
 from pathlib import Path
@@ -165,6 +166,100 @@ def scene(tmp_path_factory):
     blender_stage.run_blender(["--background", ctx.out / "architecture.blend", "--python-exit-code", "1", "--python", PROBE,
                                "--", spec_path, facts_path], ctx.out / "probe.log")
     return ctx, arch, json.loads(facts_path.read_text(encoding="utf-8"))
+
+
+def _probe(ctx, arch_path):
+    spec = {"rays": [], "rigs": [], "arch": str(arch_path), "blender_dir": str(BLENDER_DIR)}
+    spec_path, facts_path = ctx.out / "spec.json", ctx.out / "facts.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    blender_stage.run_blender(["--background", ctx.out / "architecture.blend", "--python-exit-code", "1", "--python", PROBE,
+                               "--", spec_path, facts_path], ctx.out / "probe.log")
+    return json.loads(facts_path.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def native_scene(tmp_path_factory):
+    ctx, _ = make_case(tmp_path_factory.mktemp("native"), "native", window=True, partition=True, partition_opening=True)
+    shell.run(ctx)
+    model.run(ctx)
+    openings.run(ctx)
+    architecture.run(ctx)
+    arch_path = output_path(ctx, "architecture")
+    mp = pytest.MonkeyPatch()
+    mp.setenv("ROOM_MODEL_NO_MEASUREIT", "1")
+    try:
+        blender_stage.run(ctx)
+    finally:
+        mp.undo()
+    arch = json.loads(arch_path.read_text(encoding="utf-8"))
+    return ctx, arch, _probe(ctx, arch_path)
+
+
+def _expected_text(dim):
+    return f"{dim['value'] * 100:.1f} cm \u00b1 {dim['sigma'] * 100:.1f}".replace(".", ",")
+
+
+def _spanned(arch):
+    return [d for d in arch["dimensions"] if d["endpoints"] is not None]
+
+
+@needs_blender
+def test_dimensions_native(native_scene):
+    _, arch, facts = native_scene
+    spanned = _spanned(arch)
+    assert len(spanned) >= 5
+    assert all(facts["objects"][f"Dim_{d['id']}"]["type"] == "EMPTY" for d in spanned)
+    for dim in spanned:
+        text = facts["objects"][f"Dim_{dim['id']}_Text"]
+        assert re.fullmatch(r"\d+,\d cm \u00b1 \d+,\d", text["text"]) and text["text"] == _expected_text(dim)
+        assert text["parent"] == f"Dim_{dim['id']}" and text["collections"] == ["Cotes"]
+        assert facts["objects"][f"Dim_{dim['id']}"]["collections"] == ["Cotes"]
+
+
+@needs_blender
+def test_dimensions_fallback(native_scene):
+    ctx, arch, facts = native_scene
+    assert facts["scene"]["dimensions_backend"] == "native"
+    report = json.loads((ctx.out / "blender_report.json").read_text(encoding="utf-8"))
+    assert report["dimensions_backend"] == "native" and report["dimensions"] == len(_spanned(arch))
+
+
+@needs_blender
+def test_measureit_failure_falls_back_to_native(scene):
+    _, arch, facts = scene
+    if not facts["scene"]["measureit_available"]:
+        pytest.skip("MeasureIt is not installed")
+    failure = facts["measureit_failure"]
+    assert failure["backend"] == "native" and "measureit API changed" in failure["error"]
+    assert failure["dims"] == sorted(f"Dim_{d['id']}" for d in _spanned(arch))
+
+
+@needs_blender
+def test_native_vertical_text_faces_the_room_and_horizontal_text_faces_up(native_scene):
+    _, arch, facts = native_scene
+    horizontal = next(d for d in _spanned(arch) if d["endpoints"][0][1] == d["endpoints"][1][1])
+    vertical = next(d for d in _spanned(arch) if d["endpoints"][0][1] != d["endpoints"][1][1])
+    up = facts["objects"][f"Dim_{horizontal['id']}_Text"]["normal"]
+    side = facts["objects"][f"Dim_{vertical['id']}_Text"]["normal"]
+    assert up[2] == pytest.approx(1.0, abs=1e-3) and abs(side[2]) < 1e-3
+
+
+@needs_blender
+def test_dimensions_measureit(scene):
+    ctx, arch, facts = scene
+    if not facts["scene"]["measureit_available"]:
+        pytest.skip("MeasureIt is not installed")
+    assert facts["scene"]["dimensions_backend"] == "measureit"
+    for dim in _spanned(arch):
+        obj = facts["objects"][f"Dim_{dim['id']}"]
+        assert obj["collections"] == ["Cotes"] and obj["type"] == "MESH" and obj["verts"] == 2
+        assert obj["measureit"] == [{"a": 0, "b": 1, "txt": _expected_text(dim), "dist": False, "names": True, "view": True}]
+        lo, hi = (np.array(_blender_point(*p)) for p in dim["endpoints"])
+        assert np.array(obj["bbox"][0]) == pytest.approx(np.minimum(lo, hi), abs=1e-4)
+        assert np.array(obj["bbox"][1]) == pytest.approx(np.maximum(lo, hi), abs=1e-4)
+    assert facts["scene"]["show_names"] is True and facts["scene"]["show_all"] is True
+    report = json.loads((ctx.out / "blender_report.json").read_text(encoding="utf-8"))
+    assert report["dimensions_backend"] == "measureit" and report["dimensions"] == len(_spanned(arch))
 
 
 @needs_blender

@@ -85,6 +85,14 @@ def test_dimension_endpoints_lie_on_the_element(full):
     assert architecture.dimension_endpoints(arch, "nope") is None
 
 
+def test_every_dimension_carries_its_endpoints(full):
+    _, _, arch = full
+    for dim in arch["dimensions"]:
+        ends = architecture.dimension_endpoints(arch, dim["id"])
+        assert dim["endpoints"] == (None if ends is None else [list(ends[0]), list(ends[1])])
+    assert sum(d["endpoints"] is not None for d in arch["dimensions"]) >= 5
+
+
 def _sections(html):
     svg = re.search(r"<svg.*?</svg>", html, re.S).group(0)
     rows = {int(m.group(1)): m.group(0) for m in re.finditer(r'<article class="row[^"]*" id="row-(\d+)".*?</article>', html, re.S)}

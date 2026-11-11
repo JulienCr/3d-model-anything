@@ -75,6 +75,16 @@ def export_glb(path: str, colls: dict) -> None:
                               export_cameras=False, export_lights=False, export_yup=True)
 
 
+def write_report(out_dir: str) -> None:
+    """blender_report.json: which dimensions backend ran, how many dimensions, and the MeasureIt error if it fell back."""
+    scene = bpy.context.scene
+    report = {"dimensions_backend": scene.get("dimensions_backend"), "dimensions": scene.get("dimensions_count", 0)}
+    if "measureit_error" in scene:
+        report["measureit_error"] = scene["measureit_error"]
+    with open(os.path.join(out_dir, "blender_report.json"), "w", encoding="utf-8") as fh:
+        json.dump(report, fh, indent=2, ensure_ascii=False)
+
+
 def main(argv: list[str]) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", required=True)
@@ -93,6 +103,7 @@ def main(argv: list[str]) -> None:
     os.makedirs(args.out_dir, exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=os.path.join(args.out_dir, "architecture.blend"))
     export_glb(os.path.join(args.out_dir, "architecture.glb"), colls)
+    write_report(args.out_dir)
     render.render_views(arch, args.out_dir)
 
 

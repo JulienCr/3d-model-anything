@@ -1,6 +1,7 @@
 """Blender stage: decimates the LiDAR scan, then builds the architecture scene headless (blender/build_scene.py)."""
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -16,7 +17,8 @@ DEFAULT_BLENDER = "/mnt/c/Program Files (x86)/Steam/steamapps/common/Blender/ble
 BUILD_SCRIPT = Path(__file__).resolve().parents[1] / "blender" / "build_scene.py"
 SCAN_FILE = "scan_decimated.ply"
 OUTPUTS = ("architecture.blend", "architecture.glb", "renders/top.png", "renders/persp_1.png", "renders/persp_2.png",
-           "renders/open.png")
+           "renders/open.png", "blender_report.json")
+FORWARDED_ENV = ("ROOM_MODEL_NO_MEASUREIT",)
 BACKUPS = ("architecture.blend1",)  # Blender's own copy of the file it overwrites
 
 
@@ -43,7 +45,8 @@ def _resolve() -> str:
 def run_blender(args: list, log: Path) -> None:
     """Runs Blender with `args` (Path items are converted for a Windows exe); the output goes to `log`."""
     exe = _resolve()
-    proc = subprocess.run([exe, *map(_native, args)], capture_output=True, text=True, errors="replace")
+    env = {**os.environ, "WSLENV": ":".join(filter(None, [os.environ.get("WSLENV"), *FORWARDED_ENV]))}  # a Windows exe sees only WSLENV-listed variables
+    proc = subprocess.run([exe, *map(_native, args)], capture_output=True, text=True, errors="replace", env=env)
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text(proc.stdout + proc.stderr, encoding="utf-8")
     if proc.returncode != 0:
@@ -105,4 +108,8 @@ def run(ctx: StageContext) -> Path:
     missing = [name for name in OUTPUTS if not (ctx.out / name).exists()]
     if missing:
         raise RuntimeError(f"Blender finished without writing {', '.join(missing)}, see {ctx.out / 'blender.log'}")
+    report = json.loads((ctx.out / "blender_report.json").read_text(encoding="utf-8"))
+    print(f"dimensions: {report['dimensions']} via {report['dimensions_backend']}")
+    if report.get("measureit_error"):
+        print(f"MeasureIt failed, native fallback used: {report['measureit_error']}")
     return output_path(ctx, "blender")
