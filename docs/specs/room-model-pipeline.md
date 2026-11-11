@@ -181,6 +181,8 @@ did not detect.
   `architecture.blend`, `architecture.glb` (static, doors and windows closed) and viewport
   renders. `model_measured.glb` stays as the M1 output.
 - Blender 5.1+; headless runs use `BLENDER` (default: the Steam install, 5.3.0).
+- Walls are joined by mitre at corners, partitions end on the face they meet, and an opening cuts
+  every wall it crosses. Cornice and skirting run along the wall faces.
 - Collections: `Coque`, `Menuiseries`, `Moulures`, `Cotes`, `À vérifier`, `Scan` (LiDAR mesh,
   decimated, hidden by default).
 
@@ -196,8 +198,9 @@ did not detect.
   `hinged_double`, `sliding`, `pocket`, `french_window`; windows `casement_single`,
   `casement_double`, `tilt_turn`, `sliding`, `fixed`. Parameters: hinge side, swing (in/out),
   moulded panel count, handle.
-- **Rig**: an empty parent per door/window with custom properties `Ouverture` (0–1) and `Sens`
-  (flips swing); drivers rotate leaves (max angle property, default 90°) or translate sliding
+- **Rig**: an empty parent per door/window with custom properties `Ouverture` (0–1) and two
+  checkboxes, `Inverser sens` (flips swing) and `Inverser charnière` (hinges on the other jamb),
+  unchecked = as detected; drivers rotate leaves (max angle property, default 90°) or translate sliding
   leaves. A double door has one slider for both leaves.
 - **Mouldings**: cornice and skirting along the perimeter, architraves around openings, from a
   small profile catalogue; heights estimated by the LLM, source `assumed`. Wall panel frames
