@@ -54,7 +54,7 @@ def recess_depth(arch: dict, geom: dict, el: dict) -> float | None:
 
 
 def _cutter(arch: dict, geom: dict, opening: dict, y_floor: float, host: dict) -> tuple[bpy.types.Object, list] | None:
-    """The cutting box of an opening and its plan quad; None for an opening of no size."""
+    """The cutting box of an opening and the plan quad it cuts through the host (without the overshoots); None for no size."""
     p = opening["params"]
     w, h, sill, centre = (frame.value(arch, p[k]) for k in ("width", "height", "sill", "center_s"))
     if w <= 0 or h <= 0:
@@ -71,7 +71,9 @@ def _cutter(arch: dict, geom: dict, opening: dict, y_floor: float, host: dict) -
         y0 = y_floor - 2 * CUT_OVERSHOOT
     if y1 >= geom["top"] - COPLANAR_TOL:
         y1 = geom["top"] + 2 * CUT_OVERSHOOT
-    return _prism(f"Cutter_{opening['id']}", quad, y0, y1), quad
+    depth = geom["thickness"] if recess is None else recess
+    reach = [(a[0], a[1]), (b[0], b[1]), (b[0] + inward[0] * depth, b[1] + inward[1] * depth), (a[0] + inward[0] * depth, a[1] + inward[1] * depth)]
+    return _prism(f"Cutter_{opening['id']}", quad, y0, y1), reach
 
 
 def _apply_cuts(obj: bpy.types.Object, cutters: list[bpy.types.Object]) -> None:
@@ -103,7 +105,7 @@ def _column(arch: dict, el: dict, y_floor: float) -> bpy.types.Object:
     return _prism(el["id"], quad, y_floor, frame.value(arch, el["params"]["top"]))
 
 
-def _cutters(arch: dict, y_floor: float, hosts: dict, scene_collection) -> list[tuple[bpy.types.Object, list]]:
+def _cutters(arch: dict, y_floor: float, hosts: dict, scene_collection) -> list[tuple[bpy.types.Object, list, str]]:
     """A cutter for every opening on a wall or partition, linked to the scene until `_remove` drops it."""
     out = []
     for o in arch["elements"]:
@@ -113,7 +115,7 @@ def _cutters(arch: dict, y_floor: float, hosts: dict, scene_collection) -> list[
         cutter = _cutter(arch, frame.wall_geometry(arch, host), o, y_floor, host)
         if cutter is not None:
             scene_collection.objects.link(cutter[0])
-            out.append(cutter)
+            out.append((*cutter, host["id"]))
     return out
 
 
@@ -126,13 +128,14 @@ def _remove(obj: bpy.types.Object) -> None:
 def build(arch: dict, collections: dict, materials: dict) -> list[bpy.types.Object]:
     """One object per shell element, named by element id, in `Coque` (`À vérifier` when flagged to_verify).
 
-    Walls are mitred at their corners, partitions end on the face they meet, and every opening cuts
-    each wall or partition its box crosses.
+    Walls are mitred at their corners, partitions are extended to the walls they come near and cut by them, and every
+    opening cuts each wall or partition its box crosses.
     """
     scene_collection = bpy.context.scene.collection
     y_floor = frame.value(arch, "floor.level")
     walls = plan.wall_footprints(arch)
-    footprints = {**walls, **plan.partition_footprints(arch, walls)}
+    partitions = plan.partition_plans(arch, walls)
+    footprints = {**walls, **{pid: p["face"] for pid, p in partitions.items()}}
     hosts = {e["id"]: e for e in arch["elements"] if e["kind"] in ("wall", "partition")}
     cutters = _cutters(arch, y_floor, hosts, scene_collection)
     out = []
@@ -140,11 +143,19 @@ def build(arch: dict, collections: dict, materials: dict) -> list[bpy.types.Obje
         kind = el["kind"]
         target = collections["À vérifier" if "to_verify" in el.get("flags", []) else "Coque"]
         if kind in ("wall", "partition"):
-            obj, material = _prism(el["id"], footprints[el["id"]], y_floor, frame.wall_geometry(arch, el)["top"]), "Mur"
-            crossing = [c for c, quad in cutters if plan.overlap(footprints[el["id"]], quad)]
-            if crossing:
+            top = frame.wall_geometry(arch, el)["top"]
+            solid = partitions[el["id"]]["solid"] if kind == "partition" else footprints[el["id"]]
+            obj, material = _prism(el["id"], solid, y_floor, top), "Mur"
+            crossing = [c for c, quad, host in cutters if host == el["id"] or plan.overlap(footprints[el["id"]], quad)]
+            trims = [_prism(f"Trim_{el['id']}_{k}", poly, y_floor - 0.5, top + 0.5) for k, poly in enumerate(
+                partitions[el["id"]]["cut"] if kind == "partition" else [])]
+            for trim in trims:
+                scene_collection.objects.link(trim)
+            if crossing or trims:
                 target.objects.link(obj)
-                _apply_cuts(obj, crossing)
+                _apply_cuts(obj, [*trims, *crossing])
+            for trim in trims:
+                _remove(trim)
         elif kind == "floor":
             obj, material = _sheet(el["id"], [(el["polygon"], [])], frame.value(arch, el["params"]["level"]), up=True), "Sol"
         elif kind == "ceiling":
@@ -160,6 +171,6 @@ def build(arch: dict, collections: dict, materials: dict) -> list[bpy.types.Obje
             target.objects.link(obj)
         obj.data.materials.append(materials[material])
         out.append(obj)
-    for cutter, _ in cutters:
+    for cutter, *_ in cutters:
         _remove(cutter)
     return out

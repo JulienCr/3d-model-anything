@@ -26,7 +26,7 @@ MIN_SIZE = 0.2  # m: a smaller opening gets no joinery
 DEG = math.pi / 180
 RIG_PROPS = {  # name: (default, description, (min, max) or None for a checkbox)
     "Ouverture": (0.0, "Ouverture : 0 fermé, 1 ouvert", (0.0, 1.0)),
-    "Inverser sens": (False, "Coché : le sens d'ouverture est l'inverse de celui détecté", None),
+    "Inverser sens": (False, "Coché : le sens d'ouverture est l'inverse de celui détecté ; sans effet sur une porte ou une fenêtre coulissante", None),
     "Inverser charnière": (False, "Coché : charnières (ou coulisse) de l'autre côté ; sans effet sur deux vantaux", None),
     "AngleMax": (90.0, "Angle maximal des vantaux battants, en degrés", (0.0, 180.0)),
 }
@@ -134,17 +134,15 @@ def _leaves(j: catalogue.Joinery, inner: float, wall: float) -> list[dict]:
 def _rig(obj: bpy.types.Object, leaf: dict, root: bpy.types.Object) -> None:
     """Drivers of a leaf; a `mirror` leaf is flipped about the centre of the opening by `Inverser charnière`.
 
-    `Inverser sens` reverses a swing, and moves a sliding leaf to the other face of the wall.
+    `Inverser sens` only reverses a rotation: a sliding leaf has no swing.
     """
     flip = HINGE_SIGN if leaf["mirror"] else "1"
-    px, py = leaf["pivot"]
+    px = leaf["pivot"][0]
     if "rotation" in leaf:
         _driver(obj, "rotation_euler", 2, f"({leaf['rotation']})*ouv*amax*{DEG!r}*{SWING_SIGN}*{flip}", root)
     if leaf["mirror"]:
         _driver(obj, "location", 0, f"({px:.6f}+({leaf.get('slide', 0.0):.6f})*ouv)*{flip}", root)
         _driver(obj, "scale", 0, flip, root)
-        if "slide" in leaf and py != 0.0:
-            _driver(obj, "location", 1, f"({py:.6f})*{SWING_SIGN}", root)
 
 
 def _root(arch: dict, el: dict, j: catalogue.Joinery, host: dict, collection) -> bpy.types.Object:

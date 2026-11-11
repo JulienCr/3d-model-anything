@@ -3,6 +3,7 @@ import math
 import re
 import shutil
 import struct
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,8 @@ from helpers import make_case
 
 PROBE = Path(__file__).with_name("blender_probe.py")
 BLENDER_DIR = Path(__file__).resolve().parents[1] / "blender"
+sys.path.insert(0, str(BLENDER_DIR))  # the pure-Python modules of blender/arch are importable as `arch.*`
+from arch import plan as wall_plan  # noqa: E402
 OPEN_RATIO = 0.6
 needs_blender = pytest.mark.skipif(shutil.which(blender_stage.blender_executable()) is None, reason="Blender is not installed")
 
@@ -174,8 +177,8 @@ def scene(tmp_path_factory):
     return ctx, arch, json.loads(facts_path.read_text(encoding="utf-8"))
 
 
-def _probe(ctx, arch_path, rays=()):
-    spec = {"rays": list(rays), "rigs": [], "arch": str(arch_path), "blender_dir": str(BLENDER_DIR)}
+def _probe(ctx, arch_path, rays=(), spans=()):
+    spec = {"rays": list(rays), "rigs": [], "spans": list(spans), "arch": str(arch_path), "blender_dir": str(BLENDER_DIR)}
     spec_path, facts_path = ctx.out / "spec.json", ctx.out / "facts.json"
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
     blender_stage.run_blender(["--background", ctx.out / "architecture.blend", "--python-exit-code", "1", "--python", PROBE,
@@ -500,8 +503,8 @@ def test_rig_sliding(scene, oid, leaf, direction):
     assert mirrored["location"][0] == pytest.approx(-closed["location"][0] - direction * _width(facts, leaf), abs=0.002), "slides to the other side"
     assert mirrored["location"][1] == pytest.approx(closed["location"][1], abs=1e-4)
     flipped = facts["rigs"][f"flipped-{oid}"][leaf]
-    assert flipped["location"][0] == pytest.approx(opened["location"][0], abs=1e-4), "Inverser sens does not change the side it slides to"
-    assert flipped["location"][1] == pytest.approx(-closed["location"][1], abs=1e-4), "it runs on the other face of the wall"
+    assert flipped["location"] == pytest.approx(opened["location"], abs=1e-4), "a sliding leaf has no swing to invert"
+    assert flipped["extent_x"] == pytest.approx(opened["extent_x"], abs=1e-4)
 
 
 @needs_blender
@@ -577,6 +580,17 @@ def _footprint_input(arch, wall):
 
 
 @needs_blender
+@pytest.mark.parametrize("fixture", ["scene", "joined", "junctions"])
+def test_footprints_match_the_test_side_twin(request, fixture):
+    arch = request.getfixturevalue(fixture)[1]
+    walls = [e for e in arch["elements"] if e["kind"] == "wall"]
+    twin = meshes.mitred_wall_footprints([_footprint_input(arch, w) for w in walls])
+    own = wall_plan.wall_footprints(arch)
+    for wall, expected in zip(walls, twin):
+        assert np.array(own[wall["id"]]) == pytest.approx(expected, abs=1e-9), wall["id"]
+
+
+@needs_blender
 def test_wall_matches_the_mitred_footprint(scene):
     _, arch, facts = scene
     walls = [e for e in arch["elements"] if e["kind"] == "wall"]
@@ -603,6 +617,7 @@ JOIN_VARIANTS = [  # a door close to a near-parallel corner, to a right-angle co
     ("Door_1", "Door_9", "Wall_M7", 0.18, 0.3, {}),
     ("Door_1", "Door_10", "Wall_M2", 0.2, 0.3, {}),
     ("Door_1", "Door_11", "Wall_M4", 0.18, 0.3, {}),
+    ("Door_1", "Door_12", "Wall_M1", 1.05, 0.8, {}),  # where Partition_P1 ends on the wall
 ]
 SPLIT_AT, SPLIT_TURN_DEG, SPLIT_JOG = 2.5, -3.0, 0.06  # Wall_M1 splits into itself and Wall_M7, a near-parallel step
 PARTITION_OVERSHOOT = 0.3  # m the partition is drawn into Wall_M1
@@ -614,27 +629,50 @@ def _face_z(arch, wall, x):
     return (_value(arch, wall["params"]["offset"]) - math.cos(az) * x) / math.sin(az)
 
 
+def _split_wall(arch, wall_id, new_id, at, turn_deg, jog):
+    """Splits a wall `at` m from its start; the second part turns by `turn_deg` and its face sits `jog` m behind the first."""
+    wall = _element(arch, wall_id)
+    start, end = np.array(wall["start"]), np.array(wall["end"])
+    cut = start + (end - start) / np.linalg.norm(end - start) * at
+    new = json.loads(json.dumps(wall))
+    new.update(id=new_id, start=list(cut), end=list(end))
+    wall["end"] = list(cut)
+    key = new_id.split("_")[1]
+    for name, pid in new["params"].items():
+        new["params"][name] = f"wall.{key}.{name}"
+        arch["parameters"][new["params"][name]] = dict(arch["parameters"][pid])
+    az = _value(arch, wall["params"]["azimuth"]) + math.radians(turn_deg)
+    arch["parameters"][new["params"]["azimuth"]]["value"] = az
+    arch["parameters"][new["params"]["offset"]]["value"] = float(np.array([math.cos(az), math.sin(az)]) @ cut - jog)
+    arch["elements"].insert(arch["elements"].index(wall) + 1, new)
+
+
 def _join_arch(arch):
     """The synthetic room with a near-parallel step in the south wall and a partition drawn through it."""
+    _split_wall(arch, "Wall_M1", "Wall_M7", SPLIT_AT, SPLIT_TURN_DEG, SPLIT_JOG)
     wall = _element(arch, "Wall_M1")
-    start, end = np.array(wall["start"]), np.array(wall["end"])
-    cut = start + (end - start) / np.linalg.norm(end - start) * SPLIT_AT
-    new = json.loads(json.dumps(wall))
-    new.update(id="Wall_M7", start=list(cut), end=list(end))
-    wall["end"] = list(cut)
-    for name, pid in new["params"].items():
-        new["params"][name] = f"wall.M7.{name}"
-        arch["parameters"][new["params"][name]] = dict(arch["parameters"][pid])
-    az = _value(arch, wall["params"]["azimuth"]) + math.radians(SPLIT_TURN_DEG)
-    arch["parameters"][new["params"]["azimuth"]]["value"] = az
-    arch["parameters"][new["params"]["offset"]]["value"] = float(np.array([math.cos(az), math.sin(az)]) @ cut - SPLIT_JOG)
-    arch["elements"].insert(arch["elements"].index(wall) + 1, new)
     window = _element(arch, "Window_1")  # it stays in the same place, now on the second part
     window["host"] = "Wall_M7"
     arch["parameters"][window["params"]["center_s"]]["value"] -= SPLIT_AT
     partition = _element(arch, "Partition_P1")
     partition["start"][1] = _face_z(arch, wall, partition["start"][0]) - PARTITION_OVERSHOOT
     _add_variants(arch, JOIN_VARIANTS)
+    for pid in ("cornice.height", "cornice.projection", "skirting.height", "skirting.projection"):
+        arch["parameters"][pid] = {"value": MOULDING_PARAMS[pid][0], "sigma": 0.0, "unit": "m", "source": "llm"}
+    arch["elements"] += [json.loads(json.dumps(_element_of(MOULDING_ELEMENTS, i))) for i in ("Cornice", "Skirting")]
+
+
+def _element_of(elements, id_):
+    return next(e for e in elements if e["id"] == id_)
+
+
+def _partition_x(arch):
+    """x of the middle of Partition_P1 (it runs along z)."""
+    partition = _element(arch, "Partition_P1")
+    az = _value(arch, partition["params"]["azimuth"])
+    n = np.array([math.cos(az), math.sin(az)])
+    face = np.array(partition["start"]) + n * (_value(arch, partition["params"]["offset"]) - n @ np.array(partition["start"]))
+    return float((face - n * _value(arch, partition["params"]["thickness"]) / 2)[0])
 
 
 def _shell_ids(arch):
@@ -660,6 +698,11 @@ def joined(tmp_path_factory):
     rays.append(_ray(arch, "Door_11", "Door_11-neighbour", -0.08, 1.0, target="Wall_M3"))
     for ray in rays:
         ray["distance"] = 1.0
+    face_y = -_face_z(arch, _element(arch, "Wall_M1"), _element(arch, "Partition_P1")["start"][0])
+    rays.append({"name": "partition-end", "object": "Partition_P1", "origin": [_partition_x(arch), face_y + 0.1, 1.0],
+                 "direction": [0.0, -1.0, 0.0]})
+    rays += _cornice_rays(arch)
+    rays += _face_rays(arch, "skirting", "Skirting", 0.01, lambda host: _value(arch, "floor.level") + _value(arch, "skirting.height"))
     return ctx, arch, _probe(ctx, arch_path, rays), {r["name"]: r for r in rays}
 
 
@@ -695,6 +738,101 @@ def test_partition_trimmed_at_wall(joined):
     lo, hi = facts["objects"]["Partition_P1"]["bbox"]
     assert hi[1] == pytest.approx(-face_z, abs=0.002), "ends on the face of the wall, not inside it"
     assert lo[1] == pytest.approx(-partition["end"][1], abs=0.005), "the free end stays where it is"
+
+
+@needs_blender
+def test_opening_does_not_notch_a_partition_that_abuts_it(joined):
+    _, arch, facts, _ = joined
+    face_z = _face_z(arch, _element(arch, "Wall_M1"), _element(arch, "Partition_P1")["start"][0])
+    hit = facts["rays"]["partition-end"]
+    assert hit["hit"] and hit["location"][1] == pytest.approx(-face_z, abs=0.002), "the cutter overshoot stays out of the partition"
+
+
+@needs_blender
+def test_mouldings_follow_the_step_between_near_parallel_walls(joined):
+    _, arch, facts, rays = joined
+    level = {"cornice": lambda host: _value(arch, host["params"]["top"]),
+             "skirting": lambda host: _value(arch, "floor.level") + _value(arch, "skirting.height")}
+    names = [n for n in rays if n.startswith("cornice-") and not n.startswith("cornice-Partition_P1-") or n.endswith(("-mid", "-end15", "-end3")) and n.startswith("cornice-Partition_P1-")] + [n for n in rays if n.startswith("skirting-Wall_M1-") and n.endswith(("end3", "end15"))]
+    assert any(n.endswith("Wall_M1-1-end3") for n in names)
+    for name in names:
+        hit = facts["rays"][name]
+        assert hit["hit"], f"{name}: no moulding"
+        assert hit["location"][2] == pytest.approx(level[name.split("-")[0]](_element(arch, name.split("-")[1])), abs=0.001), name
+
+
+def _junction_arch(arch):
+    """The L-shaped room with Partition_P1 carried on from the step wall (3.5 cm off its face line) to a west wall that
+    has a near-parallel jog across the partition, and Partition_P2 ending 15 cm short of Partition_P1."""
+    step = _element(arch, "Wall_M3")
+    az = _value(arch, step["params"]["azimuth"])
+    n = np.array([math.cos(az), math.sin(az)])
+    t = 0.2
+    east, west = np.array(step["end"]) + [0.14, 0.0], np.array([-2.98, step["end"][1]])
+    partition = _element(arch, "Partition_P1")
+    partition.update(start=list(east + n * 0.035), end=list(west + n * 0.035))
+    for name, value in (("azimuth", az), ("offset", float(n @ (east + n * 0.035))), ("thickness", t)):
+        arch["parameters"][partition["params"][name]]["value"] = value
+    band_z = float(east[1] + n[1] * 0.035 - t / 2 * n[1])
+    wall = _element(arch, "Wall_M6")
+    at = math.dist(wall["start"], [wall["start"][0], band_z]) / 1.0
+    _split_wall(arch, "Wall_M6", "Wall_M7", at, -0.5, 0.11)
+    second = json.loads(json.dumps(partition))
+    second.update(id="Partition_P2", start=[-1.5, -1.0], end=[-1.5, float(partition["start"][1]) - 0.15 * 1.0 * np.sign(n[1])])
+    second["params"] = {k: f"partition.P2.{k}" for k in partition["params"]}
+    for k, pid in partition["params"].items():
+        arch["parameters"][second["params"][k]] = dict(arch["parameters"][pid])
+    arch["parameters"][second["params"]["azimuth"]]["value"] = 0.0
+    arch["parameters"][second["params"]["offset"]]["value"] = -1.5 + 0.05
+    arch["parameters"][second["params"]["thickness"]]["value"] = 0.1
+    arch["elements"].append(second)
+    arch["elements"] = [e for e in arch["elements"] if e.get("host") != "Partition_P1"]
+
+
+def _span_segments(arch):
+    """Segments along the partition lines, from inside the partition out through each end and past the wall behind it."""
+    out = []
+    for name, x0, x1, zs in (("west", -2.2, -3.7, (0.24, 0.28, 0.36, 0.40)), ("east", -1.5, 0.6, (0.28, 0.33, 0.40))):
+        for z in zs:
+            out.append({"name": f"{name}-{z}", "p0": _blender_point(x0, 1.0, z), "p1": _blender_point(x1, 1.0, z)})
+    out.append({"name": "face-east", "p0": _blender_point(-0.55, 1.0, 0.15), "p1": _blender_point(-0.55, 1.0, 0.5)})
+    return out
+
+
+@pytest.fixture(scope="module")
+def junctions(tmp_path_factory):
+    ctx, _ = make_case(tmp_path_factory.mktemp("junctions"), "junctions", window=True, partition=True)
+    shell.run(ctx)
+    model.run(ctx)
+    openings.run(ctx)
+    architecture.run(ctx)
+    arch_path = output_path(ctx, "architecture")
+    arch = json.loads(arch_path.read_text(encoding="utf-8"))
+    _junction_arch(arch)
+    arch_path.write_text(json.dumps(arch), encoding="utf-8")
+    blender_stage.run(ctx)
+    return ctx, arch, _probe(ctx, arch_path, spans=_span_segments(arch))
+
+
+@needs_blender
+def test_partitions_fit_jogs_and_reflex_corners_without_a_slot(junctions):
+    facts = junctions[2]
+    for name, runs in ((n, r) for n, r in facts["spans"].items() if n != "face-east"):
+        kinds = [k for k, _ in runs]
+        assert runs[0][0] == "solid", f"{name} starts inside the partition"
+        assert "air" not in kinds[:-1] or kinds.index("air") == len(kinds) - 1 or "solid" not in kinds[kinds.index("air"):], \
+            f"{name}: air between the partition and the wall behind it: {runs}"
+
+
+@needs_blender
+def test_partition_collinear_with_a_wall_comes_flush_with_it(junctions):
+    runs = junctions[2]["spans"]["face-east"]
+    assert runs[0][0] == "air" and runs[0][1] >= 0.09, "its 3.5 cm of protrusion has faded out at the corner"
+
+
+@needs_blender
+def test_junction_walls_do_not_overlap(junctions):
+    assert junctions[2]["overlaps"] == {}
 
 
 MOULDING_PARAMS = {  # id: (value, unit)
@@ -749,9 +887,10 @@ def _stop_short(arch):
             region["exterior"], region["holes"] = inset(region["exterior"], region["holes"]), []
 
 
-def _cornice_rays(arch):
-    """Rays coming down on each face of every wall and partition: at the middle and 15 cm from the ends, and 3 cm from an
-    end that no taller or shorter wall meets (the cornice must reach the corner there)."""
+def _face_rays(arch, prefix, target, reach, level):
+    """Rays coming down on each face of every wall and partition (`level(host)` is the height they must hit `target` at):
+    at the middle and 15 cm from the ends, and 3 cm from an end that no taller or shorter wall meets (the moulding must
+    reach the corner there)."""
     rays = []
     walls = [e for e in arch["elements"] if e["kind"] == "wall"]
     for host in (e for e in arch["elements"] if e["kind"] in ("wall", "partition")):
@@ -769,10 +908,14 @@ def _cornice_rays(arch):
             for label, s in positions.items():
                 p = start + (end - start) / length * s
                 p = p + n * (_value(arch, host["params"]["offset"]) - n @ p) - (n * t if side < 0 else 0)
-                origin = p + side * n * CORNICE_REACH
-                rays.append({"name": f"cornice-{host['id']}-{side}-{label}", "object": "Cornice",
-                             "origin": _blender_point(origin[0], top + 1.0, origin[1]), "direction": [0.0, 0.0, -1.0]})
+                origin = p + side * n * reach
+                rays.append({"name": f"{prefix}-{host['id']}-{side}-{label}", "object": target,
+                             "origin": _blender_point(origin[0], level(host) + 1.0, origin[1]), "direction": [0.0, 0.0, -1.0]})
     return rays
+
+
+def _cornice_rays(arch):
+    return _face_rays(arch, "cornice", "Cornice", CORNICE_REACH, lambda host: _value(arch, host["params"]["top"]))
 
 
 def _across(ray, name, distance):

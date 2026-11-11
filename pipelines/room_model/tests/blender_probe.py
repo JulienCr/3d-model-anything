@@ -96,20 +96,49 @@ def _rig(spec):
 
 
 def _inside(bvh, point):
-    """Whether the point lies inside a closed mesh: odd number of surface crossings along a skew ray."""
-    direction, origin, hits = Vector((0.37, 0.53, 0.76)).normalized(), point.copy(), 0
-    while True:
-        location = bvh.ray_cast(origin, direction)[0]
-        if location is None:
-            return hits % 2 == 1
-        hits, origin = hits + 1, location + direction * 1e-5
+    """Whether the point lies inside a closed mesh: odd number of surface crossings along each of two skew rays.
+
+    One ray can graze an edge and miscount; two unrelated directions must agree.
+    """
+    for direction in (Vector((0.37, 0.53, 0.76)).normalized(), Vector((-0.61, 0.29, 0.74)).normalized()):
+        origin, hits = point.copy(), 0
+        while True:
+            location = bvh.ray_cast(origin, direction)[0]
+            if location is None:
+                break
+            hits, origin = hits + 1, location + direction * 1e-5
+        if hits % 2 == 0:
+            return False
+    return True
+
+
+def _shell_objects():
+    objects = [o for o in bpy.data.objects if o.type == "MESH" and o.name.startswith(("Wall_", "Partition_"))]
+    deps = bpy.context.evaluated_depsgraph_get()
+    return objects, {o.name: BVHTree.FromObject(o, deps) for o in objects}
+
+
+def _spans(segments, step=0.005):
+    """Runs [("solid" | "air", length)] along each segment through the walls and partitions (a slot is air between two solids)."""
+    _, bvh = _shell_objects()
+    out = {}
+    for seg in segments:
+        a, b = Vector(seg["p0"]), Vector(seg["p1"])
+        n = max(1, round((b - a).length / step))
+        runs = []
+        for k in range(n + 1):
+            kind = "solid" if any(_inside(t, a + (b - a) * (k / n)) for t in bvh.values()) else "air"
+            if runs and runs[-1][0] == kind:
+                runs[-1][1] += (b - a).length / n
+            else:
+                runs.append([kind, (b - a).length / n])
+        out[seg["name"]] = runs
+    return out
 
 
 def _overlaps(step=0.01, levels=(0.1, 0.5, 0.9, 1.3, 1.7, 2.1)):
     """{"A|B": area in m2} of the plan overlap of each pair of walls and partitions, sampled on a `step` grid at several heights."""
-    deps = bpy.context.evaluated_depsgraph_get()
-    objects = [o for o in bpy.data.objects if o.type == "MESH" and o.name.startswith(("Wall_", "Partition_"))]
-    bvh = {o.name: BVHTree.FromObject(o, deps) for o in objects}
+    objects, bvh = _shell_objects()
     boxes = {o.name: [[f(v.co[i] for v in o.data.vertices) for i in range(2)] for f in (min, max)] for o in objects}
     out = {}
     for k, a in enumerate(objects):
@@ -192,6 +221,7 @@ def main():
         "rays": {r["name"]: _cast(r) for r in spec["rays"]},
         "rigs": {r["name"]: _rig(r) for r in spec["rigs"]},
         "overlaps": _overlaps(),
+        "spans": _spans(spec.get("spans", [])),
     }
     facts["measureit_failure"] = _measureit_failure(spec)
     facts["hook"] = _hook_contract(spec)
