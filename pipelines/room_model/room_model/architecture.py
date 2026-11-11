@@ -92,11 +92,13 @@ def build(model_doc: dict, openings_doc: dict, vision: dict | None = None, tape:
     arch["dimensions"] = copy.deepcopy(model_doc["dimensions"])
     if tape:
         arch["diagnostics"]["tape"] = tape_merge.apply(arch, tape)
-    centres = {o["id"]: o["center"] for o in openings_doc["openings"]}
     arch["dimensions"] += _wall_length_dimensions(arch)
+    hosts, centres = {e["id"]: e for e in arch["elements"]}, {o["id"]: o["center"] for o in openings_doc["openings"]}
     for el in arch["elements"]:
         if el["kind"] in OPENING_KINDS:
-            arch["dimensions"] += _opening_dimensions(el, arch["parameters"], centres.get(el["id"], el.get("center")))
+            host = hosts.get(el["host"])
+            centre = centres.get(el["id"]) if host is None else _face_point(arch, host, el.get("face"), _value(arch, el["params"]["center_s"]))
+            arch["dimensions"] += _opening_dimensions(el, arch["parameters"], centre)
     for dim in arch["dimensions"]:
         ends = dimension_endpoints(arch, dim["id"])
         dim["endpoints"] = None if ends is None else [[float(c) for c in ends[0]], [float(c) for c in ends[1]]]
@@ -175,9 +177,16 @@ def run(ctx: StageContext) -> Path:
     model_doc = json.loads(require(ctx, "model").read_text(encoding="utf-8"))
     openings_doc = json.loads(require(ctx, "openings").read_text(encoding="utf-8"))
     vision_path, tape_path = ctx.out / VISION_PATH, ctx.out / TAPE_PATH
-    vision = _read(vision_path, "réponses du LLM") if vision_path.exists() else None
+    vision, unreadable = None, None
+    if vision_path.exists():
+        try:
+            vision = _read(vision_path, "réponses du LLM")
+        except StageInputMissing as exc:
+            unreadable = str(exc)
     tape = _read(tape_path, "mesures au mètre") if tape_path.exists() else None
     arch = build(model_doc, openings_doc, vision, tape, ctx)
+    if unreadable:
+        arch["diagnostics"]["vision_unreadable"] = unreadable
     path = output_path(ctx, "architecture")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(arch, indent=2), encoding="utf-8")

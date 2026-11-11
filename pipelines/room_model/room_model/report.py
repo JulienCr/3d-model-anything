@@ -246,7 +246,9 @@ def _typed(value) -> str:
 def _llm_section(arch: dict) -> list[str]:
     vision = arch["diagnostics"].get("vision")
     if vision is None:
-        return ["Aucune réponse du LLM appliquée (étape vision non exécutée, ignorée ou en échec)."]
+        note = arch["diagnostics"].get("vision_unreadable")
+        return [f"Aucune réponse du LLM appliquée : fichier de réponses inutilisable ({note})." if note
+                else "Aucune réponse du LLM appliquée (étape vision non exécutée, ignorée ou en échec)."]
     counts = (("corrigés (au moins deux vues d'accord à 3 cm)", "corrected"), ("corrigés sur une seule vue", "single_view"),
               ("laissés tels quels (vues en désaccord)", "inconsistent"), ("déclarés", "declared"))
     out = ["- " + " ; ".join(f"{len(vision[key])} {label}" for label, key in counts) + f" ; {len(vision['not_applied'])} non appliqués", ""]

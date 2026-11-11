@@ -16,19 +16,21 @@ import numpy as np
 from room_model.architecture import _face_point, _value
 from room_model.capture import colmajor
 from room_model.lidar import SAMPLE_DENSITY, load_samples
+from room_model.openings import SLAB_MARGIN
 from room_model.photo_geom import backproject, load_posed_photos, to_sensor
+from room_model.vision import PAD_RATIO
 
 AGREEMENT = 0.03  # m; crops whose rectangles differ by less than this on every parameter agree
 MIN_SIGMA = 0.01  # m
-MAX_DEVIATION = 0.30  # m between the scan and the LLM rectangle, beyond which the answer is not believed
+FRAME_MARGIN = PAD_RATIO  # a corner farther from the scan rectangle than this share of its size is outside the crop the model saw
 HOST_RANGE = 0.30  # m; a declared element belongs to the nearest host plane within this distance
-FLOOR_REACH = 0.02  # m; an opening whose sill is below this reaches the floor, so its sill is not measured
-BOUNDS_MARGIN = 0.50  # m a back-projected corner may overhang its host before it counts as a mistake
-FACE_B_BAND = 0.04  # m around the far face of a partition that still counts as its surface
+FLOOR_SIGMAS = 2  # a sill within this many sigmas of zero is indistinguishable from the floor, so it is not measured
+BOUNDS_MARGIN = 0.50  # m a back-projected corner may overhang its host before it counts as a mistake (grazing rays)
+FACE_B_BAND = SLAB_MARGIN  # m around the far face of a partition that still counts as its surface
 THROUGH_SHARE = 0.10  # share of the expected LiDAR samples behind a niche below which the niche goes through
-OVERLAP = 0.5  # share of a declared niche covered by an existing opening above which the niche is refused
+OVERLAP = 0.5  # share of a declared niche covered by an existing opening above which it is the same opening
 DEFAULT_RECESS = 0.15  # m; depth assumed for a niche that does not go through, at most half the host thickness
-ASSUMED_SIGMA = 0.02  # m
+ASSUMED_SIGMA = 0.02  # m; the model reads moulding sizes in whole centimetres from a photo
 RECT_KINDS = ("door", "window", "opening", "niche")
 HOST_KINDS = ("wall", "partition")
 TYPING = ("type", "hinge", "swing", "panels", "handle")
@@ -195,16 +197,19 @@ def _correct_opening(arch: dict, el: dict, item: dict, crops: dict, evidence: Ev
     if not found:
         raise Unusable("aucune vue exploitable : " + " ; ".join(reasons))
     scan = {n: arch["parameters"][pid]["value"] for n, pid in el["params"].items()}
+    sill = arch["parameters"][el["params"]["sill"]]
+    floor_reach = sill["value"] <= FLOOR_SIGMAS * sill["sigma"]
     try:
-        values, sigmas, kept, single = _consensus([r for _, r, _ in found], scan["sill"] <= FLOOR_REACH, scan["sill"])
+        values, sigmas, kept, single = _consensus([r for _, r, _ in found], floor_reach, scan["sill"])
     except Unusable:
         _flag(el, "llm_inconsistent")
         rep.doc["inconsistent"].append(el["id"])
         return
-    names = [n for n in ("width", "height", "center_s", "sill") if not (n == "sill" and scan["sill"] <= FLOOR_REACH)]
-    worst = max(names, key=lambda n: abs(values[n] - scan[n]))
-    if abs(values[worst] - scan[worst]) > MAX_DEVIATION:
-        raise Unusable(f"écart au scan de {abs(values[worst] - scan[worst]) * 100:.0f} cm sur la {NAMES[worst]} (au-delà de 30 cm), réponse écartée".replace(".", ","))
+    names = [n for n in ("width", "height", "center_s", "sill") if not (n == "sill" and floor_reach)]
+    size = {"width": scan["width"], "center_s": scan["width"], "height": scan["height"], "sill": scan["height"]}
+    for n in names:
+        if abs(values[n] - scan[n]) > FRAME_MARGIN * size[n]:
+            raise Unusable(f"écart au scan de {abs(values[n] - scan[n]) * 100:.0f} cm sur la {NAMES[n]}, hors du cadre montré au modèle, réponse écartée".replace(".", ","))
     for n in names:
         _set_llm(arch, el, n, values[n], sigmas[n], rep)
     _flag(el, "llm_single_view" if single else "llm_corrected")

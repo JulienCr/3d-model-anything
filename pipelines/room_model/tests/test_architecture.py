@@ -322,7 +322,7 @@ def test_llm_wild_correction_is_refused(env):
     rect = _opening_rect(env.arch, "Door_1", widen=0.6)
     arch = env.merge(_answers(env, elements=[{"id": "Door_1", "corners": _corners(env, ["Door_1-a", "Door_1-b"], rect)}]))
     assert _param(arch, "Door_1", "width") == _param(env.arch, "Door_1", "width")
-    assert [n["id"] for n in _vision(arch)["not_applied"]] == ["Door_1"] and "30" in _vision(arch)["not_applied"][0]["reason"]
+    assert [n["id"] for n in _vision(arch)["not_applied"]] == ["Door_1"] and "cadre" in _vision(arch)["not_applied"][0]["reason"]
 
 
 def test_llm_typing_fields_are_copied_not_parameters(env):
@@ -619,3 +619,63 @@ def test_placeholder_answers_leave_a_plain_report(env, tmp_path):
     assert "vision" not in arch["diagnostics"] and "tape" not in arch["diagnostics"]
     text = (ctx.out / "report.md").read_text(encoding="utf-8")
     assert "Aucune réponse du LLM appliquée" in text and "Aucune mesure au mètre fournie" in text
+
+
+def test_moving_a_wall_carries_the_panel_frames_and_niches_of_its_neighbour(env):
+    niche_rect = _face_rect(env, "Wall_M2", None, (0.1, 0.6), (0.9, 1.5))
+    frame_rect = _face_rect(env, "Wall_M2", None, (1.8, 2.3), (0.9, 1.9))
+    moving_rect = _face_rect(env, "Wall_M1", None, (3.7, 4.1), (0.9, 1.5))
+    answers = _answers(env, new_elements=[{"kind": "niche", "host_hint": "Wall_M2", "corners": _corners(env, ["Wall_M2-ov"], niche_rect)},
+                                          {"kind": "niche", "host_hint": "Wall_M1", "corners": _corners(env, ["Wall_M1-ov"], moving_rect)}],
+                       panel_frames=[{"host_hint": "Wall_M2", "profile": "ogee", "corners": _corners(env, ["Wall_M2-ov"], frame_rect)}])
+    model_doc = copy.deepcopy(env.model_doc)
+    model_doc["parameters"][_element(env.arch, "Wall_M1")["params"]["offset"]]["sigma"] = 0.1  # M1 moves, M2 starts on it
+    before = architecture.build(model_doc, env.openings_doc, answers, None, env.ctx)
+    after = architecture.build(model_doc, env.openings_doc, answers, {"S01": _dim(env.arch, "S01")["value"] - 0.04}, env.ctx)
+    assert after["diagnostics"]["tape"]["moved"][0]["wall"] == "Wall_M1"
+
+    def absolute(arch, s):
+        host = _element(arch, "Wall_M2")
+        u = np.subtract(host["end"], host["start"]) / np.linalg.norm(np.subtract(host["end"], host["start"]))
+        return np.array(host["start"]) + u * s
+
+    shift = np.linalg.norm(np.subtract(_element(after, "Wall_M2")["start"], _element(before, "Wall_M2")["start"]))
+    assert shift > 0.03
+    rect_before, rect_after = _element(before, "PanelFrame_1")["rect"], _element(after, "PanelFrame_1")["rect"]
+    assert rect_after[0] != rect_before[0] and rect_after[1:2] == rect_before[1:2]
+    for k in (0, 2):
+        assert np.linalg.norm(absolute(before, rect_before[k]) - absolute(after, rect_after[k])) < 0.002
+    centre_before, centre_after = (np.array(_element(a, "Niche_1")["center"]) for a in (before, after))
+    assert np.linalg.norm(centre_before - centre_after) < 0.002
+    on_moved_wall = [np.array(_element(a, "Niche_2")["center"]) for a in (before, after)]
+    assert np.linalg.norm(on_moved_wall[1] - on_moved_wall[0]) == pytest.approx(0.04, abs=0.002)  # a niche goes with its wall
+
+
+def test_running_the_stage_twice_gives_the_same_file(env, tmp_path):
+    rect = _opening_rect(env.arch, "Door_1", widen=0.04)
+    answers = _answers(env, elements=[{"id": "Door_1", "type": "fixed", "corners": _corners(env, ["Door_1-a", "Door_1-b"], rect)}])
+    ctx, _ = _run_in_copy(env, tmp_path, answers, {"Window_1-h": 1.03, "S01": _dim(env.arch, "S01")["value"] + 0.02})
+    path = ctx.out / "architecture.json"
+    first, report_first = path.read_bytes(), (ctx.out / "report.md").read_bytes()
+    architecture.run(ctx)
+    assert path.read_bytes() == first and (ctx.out / "report.md").read_bytes() == report_first
+
+
+@pytest.mark.parametrize("content", ['{"elements": [', "[1, 2]", ""])
+def test_unreadable_answers_are_no_answers_with_a_note(env, tmp_path, content):
+    ctx = dataclasses.replace(env.ctx, out=tmp_path / "out")
+    shutil.copytree(env.ctx.out, ctx.out, ignore=shutil.ignore_patterns("pending"))
+    (ctx.out / "vision").mkdir(exist_ok=True)
+    (ctx.out / "vision" / "answers.json").write_text(content, encoding="utf-8")
+    arch = json.loads(architecture.run(ctx).read_text(encoding="utf-8"))
+    assert "vision" not in arch["diagnostics"] and arch["diagnostics"]["vision_unreadable"]
+    assert "inutilisable" in (ctx.out / "report.md").read_text(encoding="utf-8")
+
+
+def test_opening_dimensions_follow_the_final_position(env):
+    rect = _opening_rect(env.arch, "Window_1", shift=0.05)
+    arch = env.merge(_answers(env, elements=[{"id": "Window_1", "corners": _corners(env, ["Window_1-a", "Window_1-b"], rect)}]))
+    host = _element(arch, "Window_1")["host"]
+    expected = architecture._face_point(arch, _element(arch, host), None, _param(arch, "Window_1", "center_s")["value"])
+    assert _dim(arch, "Window_1-w")["at"] == pytest.approx(list(expected))
+    assert _dim(arch, "Window_1-w")["at"] != _dim(env.arch, "Window_1-w")["at"]

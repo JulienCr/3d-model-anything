@@ -11,10 +11,12 @@ import re
 import numpy as np
 
 from room_model import shell
+from room_model.architecture import _face_point
 from room_model.llm_merge import RECT_KINDS, _elements, _flag
 
 TAPE_SIGMA = 0.005  # m
-MAX_WALL_MOVE = 0.50  # m; a station asking for more is taken for a typing mistake
+MOVE_SIGMAS = 10  # a wall moves by at most this many station sigmas or one wall thickness, whichever is larger:
+# beyond it the tape and the scan describe different places (wrong face, typing mistake)
 ON_LINE = 1e-4  # m; a plan point this close to a wall line lies on it
 OPENING_PARAM = {"w": "width", "h": "height", "sill": "sill"}
 STATION_KINDS = ("width", "length")
@@ -95,10 +97,19 @@ def _move_wall(arch: dict, wall: dict, delta: float) -> None:
             for region in el["region"]:
                 region["exterior"] = [[float(c) for c in _remap(v, before, after, moved)] for v in region["exterior"]]
                 region["holes"] = [[[float(c) for c in _remap(v, before, after, moved)] for v in hole] for hole in region["holes"]]
+    hosts = _elements(arch)
     for host_id, shift in moves:
         for el in arch["elements"]:
-            if el.get("host") == host_id and "center_s" in el.get("params", {}):
+            if el.get("host") != host_id:
+                continue
+            if "center_s" in el.get("params", {}):
                 arch["parameters"][el["params"]["center_s"]]["value"] -= shift
+            elif el["kind"] == "panel_frame":
+                el["rect"] = [el["rect"][0] - shift, el["rect"][1], el["rect"][2] - shift, el["rect"][3]]
+    for el in arch["elements"]:
+        if "center" in el and el.get("host") in hosts:
+            x, z = _face_point(arch, hosts[el["host"]], el.get("face"), arch["parameters"][el["params"]["center_s"]]["value"])
+            el["center"] = [float(x), float(z)]
 
 
 def _refresh_stations(arch: dict, anchors: dict, changed: dict) -> None:
@@ -125,8 +136,9 @@ def _apply_station(arch: dict, dim: dict, value: float, anchors: dict, changed: 
     if abs(slope) < 1e-9:
         raise ValueError("murs non parallèles, la cote ne dépend pas d'un déplacement")
     delta = (math.copysign(value, t0) - t0) / slope
-    if abs(delta) > MAX_WALL_MOVE:
-        raise ValueError(f"déplacement du mur {mover['label']} de {abs(delta) * 100:.0f} cm (au-delà de 50 cm), saisie écartée".replace(".", ","))
+    limit = max(MOVE_SIGMAS * dim["sigma"], arch["parameters"][mover["params"]["thickness"]]["value"])
+    if abs(delta) > limit:
+        raise ValueError(f"déplacement du mur {mover['label']} de {abs(delta) * 100:.0f} cm (au-delà de {limit * 100:.0f} cm), saisie écartée".replace(".", ","))
     if abs(delta) > 1e-9:
         _move_wall(arch, mover, delta)
         rep["moved"].append({"wall": mover["id"], "delta": float(delta), "station": dim["id"]})
