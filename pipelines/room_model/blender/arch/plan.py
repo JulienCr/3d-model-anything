@@ -141,7 +141,7 @@ def wall_footprints(arch: dict) -> dict[str, list]:
     return out
 
 
-def _span(a, b, poly: list):
+def span(a, b, poly: list):
     """(enter, leave): parameters (0 at a, 1 at b) where the line a -> b enters and leaves a convex polygon, None if it misses."""
     area = sum(p[0] * q[1] - q[0] * p[1] for p, q in zip(poly, poly[1:] + poly[:1]))
     d = _sub(b, a)
@@ -224,9 +224,9 @@ def _hits(quad: list, hosts: list) -> dict:
                 u = _direction(host)
                 if abs(unit[0] * u[1] - unit[1] * u[0]) < NEAR_PARALLEL:
                     continue
-                span = _span(mid, v, host)
-                if span and 0.0 < span[0] <= 1.0 + REACH * _width(host) / length and (best is None or span[0] < best[0]):
-                    best = (*span, host)
+                crossing = span(mid, v, host)
+                if crossing and 0.0 < crossing[0] <= 1.0 + REACH * _width(host) / length and (best is None or crossing[0] < best[0]):
+                    best = (*crossing, host)
             if best is not None:
                 point = lambda t: (mid[0] + d[0] * t, mid[1] + d[1] * t)  # noqa: E731
                 out[i] = (point(best[0]), point(best[1]), best[2], unit)

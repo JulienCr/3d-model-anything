@@ -1058,6 +1058,98 @@ def test_junction_walls_do_not_overlap(junctions):
     assert junctions[2]["overlaps"] == {}
 
 
+SKIRT_ELEMENTS = [  # (kind, id, host, face, centre along the host, width, sill, height, frame, extra fields)
+    ("opening", "Opening_3", "Partition_P1", "A", 0.9, 0.7, 0.0, 2.0, {"profile": "flat", "width": 0.05}, {}),
+    ("niche", "Niche_3", "Partition_P1", "B", 1.6, 0.5, 0.0, 1.6, None, {"through": False, "dividers": 0, "shelves": [], "depth": 0.08}),
+    ("niche", "Niche_4", "Partition_P1", "A", 2.2, 0.4, 0.8, 0.8, None, {"through": False, "dividers": 0, "shelves": [], "depth": 0.08}),
+    ("door", "Door_13", "Wall_M2", None, 0.2, 0.3, 0.0, 2.0, None, {}),  # 5 cm from the corner it shares with Wall_M1
+]
+# (host, side) -> (centre, half width the skirting stops at): the cuts that reach the floor, on the face they open on
+SKIRT_GAPS = {("Partition_P1", 1): [(0.9, 0.35 + 0.05)], ("Partition_P1", -1): [(0.9, 0.35 + 0.05), (1.6, 0.25)],
+              ("Wall_M2", 1): [(1.25, 0.45), (0.2, 0.15)]}
+SKIRT_STEP, SKIRT_END, SKIRT_EDGE = 0.025, 0.15, 0.04  # m: ray spacing, margin kept from the ends of a face, margin around a gap
+
+
+def _add_skirt_elements(arch):
+    for kind, new_id, host, face, centre, width, sill, height, frame_, extra in SKIRT_ELEMENTS:
+        params = {"center_s": centre, "width": width, "height": height, "sill": sill, "depth": extra.pop("depth", 0.2)}
+        element = {"id": new_id, "kind": kind, "host": host, "face": face, "type": None, "flags": [], "frame": frame_, **extra,
+                   "params": {k: f"opening.{new_id}.{k}" for k in params}}
+        for k, v in params.items():
+            arch["parameters"][element["params"][k]] = {"value": v, "sigma": 0.0, "unit": "m", "source": "llm"}
+        arch["elements"].append(element)
+
+
+def _skirting_samples(arch):
+    """{(host id, side): [(s, ray)]}: rays coming down on the skirting every SKIRT_STEP along the built face of each wall and partition."""
+    footprints = wall_plan.wall_footprints(arch)
+    footprints.update(wall_plan.partition_footprints(arch, footprints))
+    floor, top = _value(arch, "floor.level"), _value(arch, "skirting.height")
+    out = {}
+    for host in (e for e in arch["elements"] if e["kind"] in ("wall", "partition")):
+        quad = np.array(footprints[host["id"]])
+        az = _value(arch, host["params"]["azimuth"])
+        u = np.array(host["end"]) - np.array(host["start"])
+        u = u / np.linalg.norm(u)
+        for side, (a, b) in ((1, (quad[0], quad[1])), (-1, (quad[3], quad[2]))):
+            if side < 0 and host["kind"] == "wall":
+                continue
+            n = np.array([math.cos(az), math.sin(az)]) * side
+            length = np.linalg.norm(b - a)
+            samples = []
+            for k in range(int((length - 2 * SKIRT_END) / SKIRT_STEP) + 1):
+                p = a + (b - a) / length * (SKIRT_END + k * SKIRT_STEP)
+                origin = p + n * 0.008
+                s = float((p - np.array(host["start"])) @ u)
+                samples.append((s, {"name": f"s-{host['id']}-{side}-{k}", "object": "Skirting", "distance": 3.0,
+                                    "origin": _blender_point(origin[0], floor + top + 1.0, origin[1]), "direction": [0.0, 0.0, -1.0]}))
+            out[(host["id"], side)] = samples
+    return out
+
+
+@pytest.fixture(scope="module")
+def skirted(tmp_path_factory):
+    ctx, _ = make_case(tmp_path_factory.mktemp("skirted"), "skirted", window=True, partition=True)
+    shell.run(ctx)
+    model.run(ctx)
+    openings.run(ctx)
+    architecture.run(ctx)
+    arch_path = output_path(ctx, "architecture")
+    arch = json.loads(arch_path.read_text(encoding="utf-8"))
+    _junction_arch(arch)  # Partition_P1 is snapped flush with Wall_M3: its built faces sit up to 3.5 cm off its nominal lines
+    _add_skirt_elements(arch)
+    for pid in ("skirting.height", "skirting.projection"):
+        arch["parameters"][pid] = {"value": MOULDING_PARAMS[pid][0], "sigma": 0.0, "unit": "m", "source": "llm"}
+    arch["elements"].append(json.loads(json.dumps(_element_of(MOULDING_ELEMENTS, "Skirting"))))
+    arch_path.write_text(json.dumps(arch), encoding="utf-8")
+    blender_stage.run(ctx)
+    samples = _skirting_samples(arch)
+    rays = [r for runs in samples.values() for _, r in runs]
+    partition = _element(arch, "Partition_P1")
+    rays.append(_ray(arch, "Opening_3", "opening-through", 0.0, 1.0, target="Partition_P1"))
+    rays.append(_ray(arch, "Opening_3", "opening-through-near-end", -0.3, 1.0, target="Partition_P1"))
+    return ctx, arch, _probe(ctx, arch_path, rays), samples, partition
+
+
+@needs_blender
+def test_skirting_stops_only_at_floor_cuts_on_its_own_face(skirted):
+    _, arch, facts, samples, _ = skirted
+    assert any(len(runs) > 20 for runs in samples.values())
+    for (host, side), runs in samples.items():
+        gaps = [(c - h, c + h) for c, h in SKIRT_GAPS.get((host, side), [])]
+        for s, ray in runs:
+            if any(lo - SKIRT_EDGE < s < hi + SKIRT_EDGE for lo, hi in gaps) and not any(lo + SKIRT_EDGE < s < hi - SKIRT_EDGE for lo, hi in gaps):
+                continue
+            inside = any(lo < s < hi for lo, hi in gaps)
+            assert facts["rays"][ray["name"]]["hit"] == (not inside), f"{host} side {side} at s={s:.2f}: {'gap missing' if inside else 'skirting missing'}"
+
+
+@needs_blender
+def test_opening_in_a_snapped_partition_goes_through_both_faces(skirted):
+    _, _, facts, _, _ = skirted
+    assert not facts["rays"]["opening-through"]["hit"] and not facts["rays"]["opening-through-near-end"]["hit"], "a skin of wall is left"
+
+
 MOULDING_PARAMS = {  # id: (value, unit)
     "niche.1.center_s": (0.3, "m"), "niche.1.sill": (0.8, "m"), "niche.1.width": (0.4, "m"), "niche.1.height": (0.8, "m"),
     "niche.1.depth": (0.05, "m"),  # ignored: the niche is through

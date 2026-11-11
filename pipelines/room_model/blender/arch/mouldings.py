@@ -1,7 +1,7 @@
 """Cornices, skirting, architraves and panel frames: 2D profiles swept along wall faces, mitred at the corners.
 
-A chain is `{"points": plan points, "normals": one inward normal per segment, "tags": (host id, side, s0, s1) per
-segment, "tops": top of the host at each point, "closed": bool}`: consecutive wall faces, then each face of a partition.
+A chain is `{"points": plan points, "normals": one inward normal per segment, "tops": top of the host at each point,
+"closed": bool}`: consecutive wall faces, then each face of a partition.
 """
 import math
 
@@ -73,17 +73,10 @@ def _flags(el: dict, known: bool) -> list[str]:
     return [*el.get("flags", []), *([] if known else ["unknown_profile"])]
 
 
-def _along(geom: dict, point) -> float:
-    """Distance of a plan point along the host from its start, as an opening's `center_s` is measured."""
-    (ox, oz), (ux, uz) = geom["point"](0.0), geom["u"]
-    return (point[0] - ox) * ux + (point[1] - oz) * uz
-
-
 def _segment(arch: dict, host: dict, side: int, a, b) -> dict:
     geom = frame.wall_geometry(arch, host)
     normal = (geom["n"][0] * side, geom["n"][1] * side)
-    return {"a": a, "b": b, "normal": normal, "top": geom["top"],
-            "tag": (host["id"], side, _along(geom, a), _along(geom, b)), "u": geom["u"]}
+    return {"a": a, "b": b, "normal": normal, "top": geom["top"], "u": geom["u"]}
 
 
 def _step(prev: dict, a, b) -> dict:
@@ -94,7 +87,7 @@ def _step(prev: dict, a, b) -> dict:
     if (perp[0] * u[0] + perp[1] * u[1]) * forward < 0:
         perp = (-perp[0], -perp[1])
     size = math.hypot(*jog)
-    return {"a": a, "b": b, "normal": (perp[0] / size, perp[1] / size), "top": prev["top"], "tag": ("", 0, 0.0, size), "u": u}
+    return {"a": a, "b": b, "normal": (perp[0] / size, perp[1] / size), "top": prev["top"], "u": u}
 
 
 def _chain(segments: list, closed: bool) -> dict:
@@ -102,7 +95,7 @@ def _chain(segments: list, closed: bool) -> dict:
     tops = [s["top"] for s in segments]
     shared = [(tops[k - 1] + tops[k]) / 2 for k in range(len(tops))]
     return {"points": [s["a"] for s in segments] + ([] if closed else [segments[-1]["b"]]),
-            "normals": [s["normal"] for s in segments], "tags": [s["tag"] for s in segments], "closed": closed,
+            "normals": [s["normal"] for s in segments], "closed": closed,
             "tops": shared if closed else [tops[0], *shared[1:], tops[-1]]}
 
 
@@ -151,24 +144,25 @@ def _face_chains(arch: dict, step: float | None) -> list[dict]:
     return out
 
 
-def _kept(s0: float, s1: float, spans: list) -> list[tuple[float, float]]:
-    """Parameters (ta, tb) of the parts of the segment s0 -> s1 left once the (lo, hi) spans are removed."""
-    lo, hi = sorted((s0, s1))
-    pieces, cursor = [], lo
+def _kept(length: float, spans: list) -> list[tuple[float, float]]:
+    """Parameter ranges (ta, tb) of a segment of `length` m left once the (enter, leave) spans are removed; short pieces go."""
+    pieces, cursor = [], 0.0
     for a, b in sorted(spans):
+        if cursor >= 1.0:
+            break
         if a > cursor:
-            pieces.append((cursor, min(a, hi)))
+            pieces.append((cursor, min(a, 1.0)))
         cursor = max(cursor, b)
-    if cursor < hi:
-        pieces.append((cursor, hi))
-    span = s1 - s0
-    return sorted(tuple(sorted(((a - s0) / span, (b - s0) / span))) for a, b in pieces if b - a >= MIN_PIECE)
+    if cursor < 1.0:
+        pieces.append((cursor, 1.0))
+    return [(a, b) for a, b in pieces if (b - a) * length >= MIN_PIECE]
 
 
-def _cut(chain: dict, gaps: dict) -> list[dict]:
-    """The chain with the host spans in `gaps` {(host id, side): [(lo, hi)]} removed; each remainder is an open chain."""
-    pts, tags, closed = chain["points"], chain["tags"], chain["closed"]
-    kept = [_kept(s0, s1, gaps.get((hid, side), [])) for hid, side, s0, s1 in tags]
+def _cut(chain: dict, cuts: list) -> list[dict]:
+    """The chain with the parts inside the plan quads `cuts` removed; each remainder is an open chain."""
+    pts, closed = chain["points"], chain["closed"]
+    ends = [(pts[k], pts[(k + 1) % len(pts)]) for k in range(len(chain["normals"]))]
+    kept = [_kept(math.dist(a, b), [c for c in (plan.span(a, b, quad) for quad in cuts) if c]) for a, b in ends]
     if all(k == [(0.0, 1.0)] for k in kept):
         return [chain]
     out, cur, joined = [], None, False
@@ -221,19 +215,22 @@ def _faces(arch: dict, el: dict, host: dict, geom: dict) -> tuple[int, ...]:
     return (1, -1) if shell.recess_depth(arch, geom, el) is None else (frame.side(host, el.get("face")),)
 
 
-def _skirting_gaps(arch: dict, hosts: dict, height: float) -> dict:
-    """{(host id, side): [(lo, hi)]}: the spans of every cut that reaches into the skirting band."""
-    gaps = {}
+def _floor_cuts(arch: dict, hosts: dict, bodies: dict, height: float) -> list[list]:
+    """Plan quads of the cuts that reach into the skirting band, as wide as the casing around them.
+
+    The skirting stops wherever one crosses a face at floor level, whatever wall hosts it: a cut is geometry,
+    not a host's property, and a niche recessed from one face leaves the other face alone.
+    """
+    out = []
     for el in arch["elements"]:
         host = hosts.get(el.get("host"))
         if el["kind"] not in shell.CUT_KINDS or host is None or host["kind"] not in HOST_KINDS:
             continue
-        w, centre, sill = (frame.value(arch, el["params"][k]) for k in ("width", "center_s", "sill"))
-        if sill >= height:
+        if frame.value(arch, el["params"]["sill"]) >= height:
             continue
-        for side in _faces(arch, el, host, frame.wall_geometry(arch, host)):
-            gaps.setdefault((host["id"], side), []).append((centre - w / 2, centre + w / 2))
-    return gaps
+        half = openings.resolve(arch, el).half_outer
+        out.append(shell.cut_quad(arch, frame.wall_geometry(arch, host), el, host, bodies[host["id"]], half)[0])
+    return out
 
 
 def _cornice(arch: dict, el: dict, collection) -> bpy.types.Object | None:
@@ -251,10 +248,11 @@ def _cornice(arch: dict, el: dict, collection) -> bpy.types.Object | None:
 def _skirting(arch: dict, el: dict, hosts: dict, collection) -> bpy.types.Object | None:
     height, projection = _spec(arch, el)
     profile, known = profiles.resolve("skirting", el.get("profile"))
-    gaps = _skirting_gaps(arch, hosts, height)
+    walls = plan.wall_footprints(arch)
+    cuts = _floor_cuts(arch, hosts, {**walls, **plan.partition_footprints(arch, walls)}, height)
     bm = bmesh.new()
     for chain in _face_chains(arch, None):
-        _horizontal(bm, _cut(chain, gaps), frame.value(arch, "floor.level"), profile, projection, height)
+        _horizontal(bm, _cut(chain, cuts), frame.value(arch, "floor.level"), profile, projection, height)
     if not bm.faces:
         bm.free()
         return None
