@@ -266,3 +266,20 @@ did not detect.
 - Survey page: lines on the anchored edges with what to tape spelled out ("vantail", "deux vantaux
   ensemble", "passage", "niche"), a durable store (linked `measurements.json` via the File System
   Access API with autosave, pre-fill from the existing file, browser copy keyed by capture, import).
+
+### Reconciliation with the human survey (2026-11-12)
+
+- The pipeline writes `reconcile.json` (+ a French `reconcile.md`): per parameter, every source
+  (roomplan, lidar, llm, photo, tape, override) with value and sigma, the retained value, residuals,
+  flags, and proposed actions (measure X, choose source Y, set an override); per element, the
+  invariants it fails.
+- Global consistency checks, each with a verdict and a numeric residual: wall segment lengths vs
+  measured room lengths and stations, openings not overlapping and inside their host, leaf ≤ hole,
+  out-of-square deviations justified by sigma, ceilings consistent with wall tops, tape values
+  consistent with each other (a tape value incompatible with everything else is reported as a
+  probable tape error, not forced into the model).
+- A versioned skill `.agents/skills/room-reconcile/` guides an agent through the human survey
+  results: read `measurements.json` (values + notes) and `reconcile.json`, check each human value,
+  sort conflicts into auto-applied / agent-arbitrated (with a numeric reason) / asked to the human
+  (decision sheet), write only `measurements.json` or `overrides.json`, rerun `architecture` and
+  `blender`, verify residuals decreased, log every decision. Generic for any capture.
