@@ -11,6 +11,7 @@ import types
 import bmesh
 import bpy
 from mathutils import Vector
+from mathutils.bvhtree import BVHTree
 
 RIG_PROPS = ("Ouverture", "Sens", "AngleMax")
 
@@ -90,6 +91,36 @@ def _rig(spec):
     return out
 
 
+def _inside(bvh, point):
+    """Whether the point lies inside a closed mesh: odd number of surface crossings along a skew ray."""
+    direction, origin, hits = Vector((0.37, 0.53, 0.76)).normalized(), point.copy(), 0
+    while True:
+        location = bvh.ray_cast(origin, direction)[0]
+        if location is None:
+            return hits % 2 == 1
+        hits, origin = hits + 1, location + direction * 1e-5
+
+
+def _overlaps(step=0.01, levels=(0.1, 0.5, 0.9, 1.3, 1.7, 2.1)):
+    """{"A|B": area in m2} of the plan overlap of each pair of walls and partitions, sampled on a `step` grid at several heights."""
+    deps = bpy.context.evaluated_depsgraph_get()
+    objects = [o for o in bpy.data.objects if o.type == "MESH" and o.name.startswith(("Wall_", "Partition_"))]
+    bvh = {o.name: BVHTree.FromObject(o, deps) for o in objects}
+    boxes = {o.name: [[f(v.co[i] for v in o.data.vertices) for i in range(2)] for f in (min, max)] for o in objects}
+    out = {}
+    for k, a in enumerate(objects):
+        for b in objects[k + 1:]:
+            lo = [max(boxes[a.name][0][i], boxes[b.name][0][i]) for i in range(2)]
+            hi = [min(boxes[a.name][1][i], boxes[b.name][1][i]) for i in range(2)]
+            xs = [lo[0] + 0.0037 + step * i for i in range(max(0, math.ceil((hi[0] - lo[0]) / step)))]
+            ys = [lo[1] + 0.0041 + step * i for i in range(max(0, math.ceil((hi[1] - lo[1]) / step)))]
+            count = sum(1 for x in xs for y in ys for z in levels
+                        if x < hi[0] and y < hi[1] and _inside(bvh[a.name], Vector((x, y, z))) and _inside(bvh[b.name], Vector((x, y, z))))
+            if count:
+                out[f"{a.name}|{b.name}"] = count * step * step / len(levels)
+    return out
+
+
 def _hook_contract(spec):
     """build_scene.build passes ctx to a hook and rejects returned objects linked to no collection."""
     sys.path.insert(0, spec["blender_dir"])
@@ -156,6 +187,7 @@ def main():
         "scene_objects": sorted(o.name for o in bpy.context.scene.collection.objects),
         "rays": {r["name"]: _cast(r) for r in spec["rays"]},
         "rigs": {r["name"]: _rig(r) for r in spec["rigs"]},
+        "overlaps": _overlaps(),
     }
     facts["measureit_failure"] = _measureit_failure(spec)
     facts["hook"] = _hook_contract(spec)

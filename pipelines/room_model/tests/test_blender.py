@@ -106,8 +106,8 @@ JOINERY_VARIANTS = [
 ]
 
 
-def _add_variants(arch):
-    for source, new_id, host, centre, width, fields in JOINERY_VARIANTS:
+def _add_variants(arch, variants=JOINERY_VARIANTS):
+    for source, new_id, host, centre, width, fields in variants:
         element = json.loads(json.dumps(_element(arch, source)))
         element.update(id=new_id, host=host, **fields)
         for name, pid in element["params"].items():
@@ -533,21 +533,23 @@ def test_static_glb_closed(scene):
     assert nodes["Door_3_Leaf_1"].get("translation", [0, 0, 0]) == pytest.approx([x, z, -y], abs=1e-4)
 
 
-@needs_blender
-def test_wall_matches_the_m1_mesh(scene):
-    _, arch, facts = scene
-    wall = _element(arch, "Wall_M3")
+def _footprint_input(arch, wall):
     az = _value(arch, wall["params"]["azimuth"])
-    n = np.array([math.cos(az), math.sin(az)])
-    start, end = np.array(wall["start"]), np.array(wall["end"])
-    offset = _value(arch, wall["params"]["offset"])
-    start, end = start + n * (offset - n @ start), end + n * (offset - n @ end)  # onto the fitted plane, as the scene does
-    vertices, _ = meshes.wall_mesh(start, end, n, _value(arch, wall["params"]["thickness"]), _value(arch, "floor.level"),
-                                   _value(arch, wall["params"]["top"]))
-    mapped = np.column_stack([vertices[:, 0], -vertices[:, 2], vertices[:, 1]])
-    lo, hi = facts["objects"]["Wall_M3"]["bbox"]
-    assert np.array(lo) == pytest.approx(mapped.min(0), abs=0.001)
-    assert np.array(hi) == pytest.approx(mapped.max(0), abs=0.001)
+    return {"start": wall["start"], "end": wall["end"], "normal": [math.cos(az), math.sin(az)],
+            "offset": _value(arch, wall["params"]["offset"]), "thickness": _value(arch, wall["params"]["thickness"])}
+
+
+@needs_blender
+def test_wall_matches_the_mitred_footprint(scene):
+    _, arch, facts = scene
+    walls = [e for e in arch["elements"] if e["kind"] == "wall"]
+    footprints = meshes.mitred_wall_footprints([_footprint_input(arch, w) for w in walls])
+    for index in (2, 3):  # a convex corner on one side, a reflex one on the other
+        vertices, _ = meshes.prism(footprints[index], _value(arch, "floor.level"), _value(arch, walls[index]["params"]["top"]))
+        mapped = np.column_stack([vertices[:, 0], -vertices[:, 2], vertices[:, 1]])
+        lo, hi = facts["objects"][walls[index]["id"]]["bbox"]
+        assert np.array(lo) == pytest.approx(mapped.min(0), abs=0.001)
+        assert np.array(hi) == pytest.approx(mapped.max(0), abs=0.001)
 
 
 @needs_blender
@@ -558,6 +560,104 @@ def test_build_passes_ctx_and_rejects_unlinked_hook_objects(scene):
     assert hook["seen"]["ctx"] == {"textures": None, "scan_path": None, "out_dir": "/probe/out"}
     assert "Menuiseries" in hook["seen"]["collections"]
     assert "zz_probe" in hook["unlinked"]["raised"] and "ProbeLoose" in hook["unlinked"]["raised"]
+
+
+JOIN_VARIANTS = [  # a door close to a near-parallel corner, to a right-angle corner and to a reflex corner
+    ("Door_1", "Door_9", "Wall_M7", 0.18, 0.3, {}),
+    ("Door_1", "Door_10", "Wall_M2", 0.2, 0.3, {}),
+    ("Door_1", "Door_11", "Wall_M4", 0.18, 0.3, {}),
+]
+SPLIT_AT, SPLIT_TURN_DEG, SPLIT_JOG = 2.5, -3.0, 0.06  # Wall_M1 splits into itself and Wall_M7, a near-parallel step
+PARTITION_OVERSHOOT = 0.3  # m the partition is drawn into Wall_M1
+
+
+def _face_z(arch, wall, x):
+    """z of the face line of a wall (not parallel to the z axis) at plan abscissa x."""
+    az = _value(arch, wall["params"]["azimuth"])
+    return (_value(arch, wall["params"]["offset"]) - math.cos(az) * x) / math.sin(az)
+
+
+def _join_arch(arch):
+    """The synthetic room with a near-parallel step in the south wall and a partition drawn through it."""
+    wall = _element(arch, "Wall_M1")
+    start, end = np.array(wall["start"]), np.array(wall["end"])
+    cut = start + (end - start) / np.linalg.norm(end - start) * SPLIT_AT
+    new = json.loads(json.dumps(wall))
+    new.update(id="Wall_M7", start=list(cut), end=list(end))
+    wall["end"] = list(cut)
+    for name, pid in new["params"].items():
+        new["params"][name] = f"wall.M7.{name}"
+        arch["parameters"][new["params"][name]] = dict(arch["parameters"][pid])
+    az = _value(arch, wall["params"]["azimuth"]) + math.radians(SPLIT_TURN_DEG)
+    arch["parameters"][new["params"]["azimuth"]]["value"] = az
+    arch["parameters"][new["params"]["offset"]]["value"] = float(np.array([math.cos(az), math.sin(az)]) @ cut - SPLIT_JOG)
+    arch["elements"].insert(arch["elements"].index(wall) + 1, new)
+    window = _element(arch, "Window_1")  # it stays in the same place, now on the second part
+    window["host"] = "Wall_M7"
+    arch["parameters"][window["params"]["center_s"]]["value"] -= SPLIT_AT
+    partition = _element(arch, "Partition_P1")
+    partition["start"][1] = _face_z(arch, wall, partition["start"][0]) - PARTITION_OVERSHOOT
+    _add_variants(arch, JOIN_VARIANTS)
+
+
+def _shell_ids(arch):
+    return [e["id"] for e in arch["elements"] if e["kind"] in ("wall", "partition")]
+
+
+@pytest.fixture(scope="module")
+def joined(tmp_path_factory):
+    ctx, _ = make_case(tmp_path_factory.mktemp("joined"), "joined", window=True, partition=True, partition_opening=True,
+                       partition_opening_width=0.6)
+    shell.run(ctx)
+    model.run(ctx)
+    openings.run(ctx)
+    architecture.run(ctx)
+    arch_path = output_path(ctx, "architecture")
+    arch = json.loads(arch_path.read_text(encoding="utf-8"))
+    _join_arch(arch)
+    arch_path.write_text(json.dumps(arch), encoding="utf-8")
+    blender_stage.run(ctx)
+    rays = []
+    for oid in ("Door_9", "Door_10"):
+        rays += [_ray(arch, oid, f"{oid}-{k}", along, 1.0, target=_shell_ids(arch)) for k, along in enumerate((-0.12, 0.0, 0.12))]
+    rays.append(_ray(arch, "Door_11", "Door_11-neighbour", -0.08, 1.0, target="Wall_M3"))
+    for ray in rays:
+        ray["distance"] = 1.0
+    return ctx, arch, _probe(ctx, arch_path, rays), {r["name"]: r for r in rays}
+
+
+@needs_blender
+@pytest.mark.parametrize("fixture", ["scene", "joined"])
+def test_walls_do_not_overlap(request, fixture):
+    facts = request.getfixturevalue(fixture)[2]
+    assert facts["overlaps"] == {}
+
+
+@needs_blender
+@pytest.mark.parametrize("door", ["Door_9", "Door_10"])
+def test_door_near_corner_is_clear(joined, door):
+    _, _, facts, _ = joined
+    for k in range(3):
+        assert not facts["rays"][f"{door}-{k}"]["hit"], f"{door} ray {k} hits {facts['rays'][f'{door}-{k}']['object']}"
+
+
+@needs_blender
+def test_cutter_cuts_the_neighbouring_wall(joined):
+    _, arch, facts, rays = joined
+    hit = facts["rays"]["Door_11-neighbour"]
+    assert hit["hit"], "Wall_M3 is still there behind the doorway"
+    distance = np.linalg.norm(np.array(hit["location"]) - np.array(rays["Door_11-neighbour"]["origin"]))
+    assert distance == pytest.approx(0.6 + _value(arch, "wall.M4.thickness") + 0.01, abs=0.005)
+
+
+@needs_blender
+def test_partition_trimmed_at_wall(joined):
+    _, arch, facts, _ = joined
+    partition = _element(arch, "Partition_P1")
+    face_z = _face_z(arch, _element(arch, "Wall_M1"), partition["start"][0])
+    lo, hi = facts["objects"]["Partition_P1"]["bbox"]
+    assert hi[1] == pytest.approx(-face_z, abs=0.002), "ends on the face of the wall, not inside it"
+    assert lo[1] == pytest.approx(-partition["end"][1], abs=0.005), "the free end stays where it is"
 
 
 MOULDING_PARAMS = {  # id: (value, unit)

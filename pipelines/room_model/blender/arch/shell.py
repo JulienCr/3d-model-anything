@@ -3,7 +3,7 @@ import bmesh
 import bpy
 from mathutils import Vector, geometry
 
-from . import frame
+from . import frame, plan
 
 CUT_KINDS = ("door", "window", "opening", "niche")
 CUT_OVERSHOOT = 0.01  # m a cutter sticks out of each face of its host
@@ -19,11 +19,12 @@ def _object(name: str, bm: bmesh.types.BMesh, solid: bool) -> bpy.types.Object:
     return bpy.data.objects.new(name, mesh)
 
 
-def _prism(name: str, quad: list, y0: float, y1: float) -> bpy.types.Object:
-    """Closed box over a plan quad (room-frame [x, z] points) between heights y0 and y1."""
+def _prism(name: str, poly: list, y0: float, y1: float) -> bpy.types.Object:
+    """Closed box over a convex plan polygon (room-frame [x, z] points) between heights y0 and y1."""
     bm = bmesh.new()
-    verts = [bm.verts.new(frame.to_blender(x, y, z)) for y in (y0, y1) for x, z in quad]
-    for ring in ((0, 1, 2, 3), (4, 5, 6, 7), *((k, (k + 1) % 4, (k + 1) % 4 + 4, k + 4) for k in range(4))):
+    n = len(poly)
+    verts = [bm.verts.new(frame.to_blender(x, y, z)) for y in (y0, y1) for x, z in poly]
+    for ring in (range(n), range(n, 2 * n), *((k, (k + 1) % n, (k + 1) % n + n, k + n) for k in range(n))):
         bm.faces.new([verts[i] for i in ring])
     return _object(name, bm, solid=True)
 
@@ -52,7 +53,8 @@ def recess_depth(arch: dict, geom: dict, el: dict) -> float | None:
     return depth if depth < geom["thickness"] - COPLANAR_TOL else None
 
 
-def _cutter(arch: dict, geom: dict, opening: dict, y_floor: float, host: dict) -> bpy.types.Object | None:
+def _cutter(arch: dict, geom: dict, opening: dict, y_floor: float, host: dict) -> tuple[bpy.types.Object, list] | None:
+    """The cutting box of an opening and its plan quad; None for an opening of no size."""
     p = opening["params"]
     w, h, sill, centre = (frame.value(arch, p[k]) for k in ("width", "height", "sill", "center_s"))
     if w <= 0 or h <= 0:
@@ -69,7 +71,7 @@ def _cutter(arch: dict, geom: dict, opening: dict, y_floor: float, host: dict) -
         y0 = y_floor - 2 * CUT_OVERSHOOT
     if y1 >= geom["top"] - COPLANAR_TOL:
         y1 = geom["top"] + 2 * CUT_OVERSHOOT
-    return _prism(f"Cutter_{opening['id']}", quad, y0, y1)
+    return _prism(f"Cutter_{opening['id']}", quad, y0, y1), quad
 
 
 def _apply_cuts(obj: bpy.types.Object, cutters: list[bpy.types.Object]) -> None:
@@ -84,28 +86,6 @@ def _apply_cuts(obj: bpy.types.Object, cutters: list[bpy.types.Object]) -> None:
     obj.modifiers.clear()
     bpy.data.meshes.remove(old)
     baked.name = obj.name
-
-
-def _wall(arch: dict, el: dict, y_floor: float, scene_collection: bpy.types.Collection, collection) -> bpy.types.Object:
-    geom = frame.wall_geometry(arch, el)
-    nx, nz = geom["n"]
-    t = geom["thickness"]
-    reach = geom["length"] + (t if el["kind"] == "wall" else 0.0)  # a wall runs past its end to meet the next one
-    a, b = geom["point"](0.0), geom["point"](reach)
-    quad = [a, b, (b[0] - nx * t, b[1] - nz * t), (a[0] - nx * t, a[1] - nz * t)]
-    obj = _prism(el["id"], quad, y_floor, geom["top"])
-    collection.objects.link(obj)
-    hosted = [o for o in arch["elements"] if o.get("host") == el["id"] and o["kind"] in CUT_KINDS]
-    cutters = [c for c in (_cutter(arch, geom, o, y_floor, el) for o in hosted) if c is not None]
-    for cutter in cutters:
-        scene_collection.objects.link(cutter)
-    if cutters:
-        _apply_cuts(obj, cutters)
-    for cutter in cutters:
-        mesh = cutter.data
-        bpy.data.objects.remove(cutter)
-        bpy.data.meshes.remove(mesh)
-    return obj
 
 
 def _beam(arch: dict, el: dict) -> bpy.types.Object:
@@ -123,16 +103,48 @@ def _column(arch: dict, el: dict, y_floor: float) -> bpy.types.Object:
     return _prism(el["id"], quad, y_floor, frame.value(arch, el["params"]["top"]))
 
 
+def _cutters(arch: dict, y_floor: float, hosts: dict, scene_collection) -> list[tuple[bpy.types.Object, list]]:
+    """A cutter for every opening on a wall or partition, linked to the scene until `_remove` drops it."""
+    out = []
+    for o in arch["elements"]:
+        host = hosts.get(o.get("host"))
+        if o["kind"] not in CUT_KINDS or host is None:
+            continue
+        cutter = _cutter(arch, frame.wall_geometry(arch, host), o, y_floor, host)
+        if cutter is not None:
+            scene_collection.objects.link(cutter[0])
+            out.append(cutter)
+    return out
+
+
+def _remove(obj: bpy.types.Object) -> None:
+    mesh = obj.data
+    bpy.data.objects.remove(obj)
+    bpy.data.meshes.remove(mesh)
+
+
 def build(arch: dict, collections: dict, materials: dict) -> list[bpy.types.Object]:
-    """One object per shell element, named by element id, in `Coque` (`À vérifier` when flagged to_verify)."""
+    """One object per shell element, named by element id, in `Coque` (`À vérifier` when flagged to_verify).
+
+    Walls are mitred at their corners, partitions end on the face they meet, and every opening cuts
+    each wall or partition its box crosses.
+    """
     scene_collection = bpy.context.scene.collection
     y_floor = frame.value(arch, "floor.level")
+    walls = plan.wall_footprints(arch)
+    footprints = {**walls, **plan.partition_footprints(arch, walls)}
+    hosts = {e["id"]: e for e in arch["elements"] if e["kind"] in ("wall", "partition")}
+    cutters = _cutters(arch, y_floor, hosts, scene_collection)
     out = []
     for el in arch["elements"]:
         kind = el["kind"]
         target = collections["À vérifier" if "to_verify" in el.get("flags", []) else "Coque"]
         if kind in ("wall", "partition"):
-            obj, material = _wall(arch, el, y_floor, scene_collection, target), "Mur"
+            obj, material = _prism(el["id"], footprints[el["id"]], y_floor, frame.wall_geometry(arch, el)["top"]), "Mur"
+            crossing = [c for c, quad in cutters if plan.overlap(footprints[el["id"]], quad)]
+            if crossing:
+                target.objects.link(obj)
+                _apply_cuts(obj, crossing)
         elif kind == "floor":
             obj, material = _sheet(el["id"], [(el["polygon"], [])], frame.value(arch, el["params"]["level"]), up=True), "Sol"
         elif kind == "ceiling":
@@ -148,4 +160,6 @@ def build(arch: dict, collections: dict, materials: dict) -> list[bpy.types.Obje
             target.objects.link(obj)
         obj.data.materials.append(materials[material])
         out.append(obj)
+    for cutter, _ in cutters:
+        _remove(cutter)
     return out
