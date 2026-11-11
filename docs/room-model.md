@@ -1,6 +1,6 @@
 # Room model pipeline (CPU, Python)
 
-Turns a House Capture export (`house-capture/5`) into a measured architectural model of one room: walls, floor, ceilings, beams and columns, with a sigma on every measurement. No GPU, no torch, no open3d. Milestone M1.
+Turns a House Capture export (`house-capture/5`) into a measured architectural model of one room: walls, floor, ceilings, beams and columns, with a sigma on every measurement. Milestone M1 measures the shell; milestone M1.5 adds openings, photo-anchored fixture edges, a vision pass, an architecture description and a Blender scene. `docs/specs/room-model-pipeline.md` holds the decisions.
 
 ## Setup
 
@@ -9,21 +9,29 @@ uv venv --python 3.12 pipelines/room_model/.venv
 uv pip install --python pipelines/room_model/.venv/bin/python -r pipelines/room_model/requirements.txt
 ```
 
-The venv is about 0.4 GB and git-ignored. Tests:
+The pipeline needs an NVIDIA GPU: torch and SAM 2.1 (photo anchoring) are regular dependencies of `requirements.txt`, so the venv is several GB and git-ignored. Stages up to `export` run on CPU. Tests:
 
 ```bash
 cd pipelines/room_model && .venv/bin/python -m pytest -q
 ```
+
+Other requirements:
+
+- Blender 5.1+ for the `blender` stage. `BLENDER` names the executable (default: the Steam install). From WSL it can be a Windows `.exe`; paths are converted with `wslpath`.
+- The `claude` CLI for the `vision` stage (`claude -p`, no API key). Without it, or with `--no-llm`, the stage is skipped.
 
 ## Commands
 
 Run from `pipelines/room_model/`:
 
 ```bash
-.venv/bin/python -m room_model <registration|shell|model|export|all> \
-    --capture <capture dir> --out <output dir> [--room 0] [--turn 0] [--force] [--keep-work]
+.venv/bin/python -m room_model <stage|all> --capture <capture dir> --out <output dir> \
+    [--room 0] [--turn 0] [--force] [--keep-work] [--no-llm] [--llm-model opus] [--tape measurements.json] [--overrides overrides.json]
 .venv/bin/python -m room_model compare --model <model.json> --reference <reference.json> [-o compare.md]
+.venv/bin/python -m room_model compare-tape --arch <architecture.json> --tape <measurements.json> [-o tape.md]
 ```
+
+Stages, in `all` order:
 
 | Stage | Reads | Writes (under `--out`) |
 |---|---|---|
@@ -31,8 +39,49 @@ Run from `pipelines/room_model/`:
 | `shell` | RoomPlan, LiDAR PLY | `shell.json` |
 | `model` | `shell.json` | `model.json` (shell plus `dimensions`) |
 | `export` | `model.json`, optional poses | `model_measured.glb`, `plan.svg`, `dimensions.csv`, `report.md` |
+| `openings` | `model.json`, RoomPlan, LiDAR | `openings.json`: doors, windows, openings hosted on walls and partitions |
+| `vision` | `openings.json`, photos | `vision/pending/` (crops, prompt, schema), `vision/answers.json` |
+| `anchor` | `openings.json`, `vision/answers.json`, poses, photos | `anchors.json`: fixture edges anchored in the photos (SAM 2.1) |
+| `architecture` | model, openings, anchors, vision answers, `measurements.json`, `overrides.json` | `architecture.json` (`room-model/arch-1`), `measurements/index.html`, tape report |
+| `textures` | `architecture.json`, photos, LiDAR mesh | `textures/*.png`, `textures/textures.json` |
+| `blender` | `architecture.json`, textures, LiDAR mesh | `architecture.blend`, `architecture.glb`, `renders/*.png`, `blender_report.json` |
 
-`all` runs the four stages in order. A stage whose output exists is skipped unless `--force`. `--room` picks the room of a multi-room capture, `--turn` adds quarter turns to the room frame. Keep outputs under `data/room-model/<room>/` (git-ignored, below 500 MB per room).
+A stage whose output exists is skipped unless `--force`. `anchor`, `architecture`, `textures` and `blender` also rerun when an input they merge (`vision/answers.json`, `measurements.json`, `overrides.json`, `architecture.json`, textures) is newer than their output. In `all`, a stage with no photos, or with `claude` or Blender missing, is skipped with a message; run alone it fails.
+
+- `--room` picks the room of a multi-room capture, `--turn` adds quarter turns to the room frame.
+- `--no-llm` writes a placeholder `vision/answers.json`: the architecture is built from RoomPlan types and scan values. A later run without the flag redoes the stage. `--llm-model` is passed to `claude -p`.
+- `--tape` and `--overrides` (on `architecture` and `all`) copy a file to `<out>/measurements.json` or `<out>/overrides.json`.
+- `compare-tape` compares tape values with an `architecture.json`.
+
+Keep outputs under `data/room-model/<room>/` (git-ignored, below 500 MB per room).
+
+## Files you edit
+
+Both live in `--out` and are merged by `architecture` (priority: tape > LLM > LiDAR > RoomPlan > assumed). Editing one reruns the stages that read it.
+
+- `measurements.json`: tape values in metres, per dimension id. Written by the survey page (legacy and v2 formats: see the survey page); a value moves the scan: an opening dimension replaces the parameter it measures, a ceiling height moves the ceiling level, a station moves the wall of its pair with the larger offset sigma (bounded). Values that cannot be applied are listed in the report, never applied.
+- `overrides.json`: `{"<element id>": {field: value}}`, applied last. Fields: `kind` (door, niche and opening convert between each other), `type`, `hinge`, `swing`, `panels`, `handle`, `frame`, `through`, `dividers`, `shelves_count` (niches only), `remove` (`true` deletes an opening, panel frame, cornice or skirting). Values are checked against the vision answer schema and the Blender catalogue; a rejected field is listed, the rest of the element is applied.
+
+## Survey page
+
+`measurements/index.html` is a local, self-contained page, never published. A numbered SVG plan, one row per measure (what and where to tape, photo crop with the endpoints drawn, current value with source and sigma, priority badge, input in cm; the badge says leaf, both leaves together, passage or niche), and a save of `measurements.json` (linked file with autosave when the browser allows it, download and import otherwise). Rerun `architecture` (or `all`) after saving. `compare-tape` and the tape report compare scan, LLM and tape values.
+
+## Blender scene
+
+`blender/build_scene.py` builds the scene from `architecture.json` only. Walls are mitred at corners, partitions end on the face they meet, an opening cuts every wall it crosses. Cornice, skirting and architraves come from a small profile catalogue (heights from the LLM, source `assumed`).
+
+- Collections: `Coque`, `Menuiseries`, `Moulures`, `Cotes`, `À vérifier`, `Scan` (decimated LiDAR mesh, hidden).
+- Each door and window has an empty parent with custom properties: `Ouverture` (0-1), `Inverser sens` (flips the swing), `Inverser charnière` (hinges on the other jamb), `AngleMax` (degrees, default 90). Checkboxes unchecked = as detected. A double door has one slider for both leaves. Sliding leaves translate.
+- Dimensions are MeasureIt segments in `Cotes`; in the Blender UI, press the MeasureIt "Show" button to display them. If MeasureIt is unavailable, native objects are used (`blender_report.json` names the backend).
+- `architecture.glb` is static, doors and windows closed; `Cotes` and `Scan` are not exported. `model_measured.glb` stays the M1 output.
+
+## Textures
+
+Walls, floor and ceilings are textured from the posed photos at 2 cm per texel. A texel is kept when a photo sees it facing the camera, its depth agrees with the LiDAR mesh and it lies in no RoomPlan object box, so furniture is not printed. The colour is the weighted median of the best views after exposure matching. Texels no photo covers (coverage holes) are filled with a CC0 texture (`fetch_textures.py`) tinted to the measured colour, feathered into the observed colour. Joinery and mouldings use plain named materials. `textures/textures.json` lists the surfaces and their coverage.
+
+## Contributing: generic for any capture
+
+Nothing in code, tests or docs may depend on one capture: no wall labels, counts, dimensions or room names from a real room. Behaviour comes from the capture data, the catalogue and the schema; synthetic fixtures (`tests/synthetic.py`) stand in for rooms. Real-capture values stay in git-ignored outputs.
 
 ## Frame
 
@@ -129,12 +178,15 @@ Edge `i` runs from `polygon[i]` to `polygon[i+1]`; `edge_heights[i]` is its heig
 - the reference edges no wall was paired with (a pillar the model lacks, for example);
 - a dimension table for shared ids: model, reference, difference (cm) and difference in sigmas.
 
-## Limits of M1
+## Limits
 
-- No openings (doors, windows) and no wall thickness from jambs: thickness is assumed.
-- Registration poses are written but not yet consumed by the other stages.
+- Wall thickness is assumed unless a jamb is measured.
+- Open doors are not anchored.
+- A curtained or frosted window defeats the mask: it needs the pick step (the LLM picks a lettered candidate edge), or a tape value.
+- Anchoring and textures need photos; without them the scan and RoomPlan values stand.
+- The LLM can only choose within the catalogue; a fixture it lacks is typed by `overrides.json`.
 - One room per run, no networks (pipes, ducts), no squared variant, no `room.json`.
 - Ducts or trays pressed against the ceiling hide it, so they look like beams.
 - Soffits that drop less than 14 cm below the neighbouring ceiling are not reported as beams.
 - A narrow ceiling region can be classed as an unexplained strip and lower a wall top.
-- Photo silhouettes (M3) and the site survey (M4) are expected to settle these cases.
+- Networks (M2), photo silhouettes (M3) and the site survey (M4) are expected to settle the remaining cases.
