@@ -962,3 +962,12 @@ def test_run_reads_the_anchors(env, tmp_path):
     (ctx.out / "anchors.json").write_text(json.dumps(_anchors(Opening_1=_opening(env))), encoding="utf-8")
     arch = json.loads(architecture.run(ctx).read_text(encoding="utf-8"))
     assert _param(arch, "Opening_1", "width")["source"] == "photo"
+
+
+def test_the_corner_clicks_of_an_anchored_element_are_ignored(env):
+    rect = _opening_rect(env.arch, "Door_1", widen=0.04)
+    answers = _answers(env, elements=[{"id": "Door_1", "type": "hinged_single", "corners": _corners(env, ["Door_1-a", "Door_1-b"], rect)}])
+    arch = env.merge(answers, anchors=_anchors(Door_1=_door(env)))
+    assert _param(arch, "Door_1", "width") == _param(env.arch, "Door_1", "width")
+    assert _vision(arch)["superseded"] == ["Door_1"] and _element(arch, "Door_1")["type"] == "hinged_single"
+    assert _param(env.merge(answers), "Door_1", "width")["source"] == "llm"  # without an anchor the clicks still count

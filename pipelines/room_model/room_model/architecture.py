@@ -19,6 +19,7 @@ VISION_PATH = "vision/answers.json"
 TAPE_PATH = "measurements.json"
 OVERRIDES_PATH = "overrides.json"
 ANCHORS_PATH = "anchors.json"
+PICKS_PATH = "edge_pick/answers.json"
 OPENING_KINDS = ("door", "window", "opening", "niche")
 
 
@@ -78,20 +79,24 @@ def _wall_length_dimensions(model_doc: dict) -> list[dict]:
 
 
 def build(model_doc: dict, openings_doc: dict, vision: dict | None = None, tape: dict | None = None, ctx: StageContext | None = None,
-          overrides: dict | None = None, anchors: dict | None = None) -> dict:
+          overrides: dict | None = None, anchors: dict | None = None, picks: dict | None = None) -> dict:
     """architecture.json: the model, the openings as elements, and their dimensions plus the wall lengths.
 
     `vision` (the answers document), `anchors` (anchors.json), `tape` ({dimension id: metres}) and `overrides`
-    ({element id: fields}) are merged in that order when given: see `llm_merge`, `anchor`, `tape_merge`, `overrides`. `ctx` gives the LLM corners their photos and the niche check its LiDAR samples.
+    ({element id: fields}) are merged in that order when given: see `llm_merge`, `anchor`, `tape_merge`, `overrides`.
+    `picks` (edge_pick answers) complete the anchors first; an anchored element ignores the LLM corner clicks. `ctx` gives the LLM corners their photos and the niche check its LiDAR samples.
     """
-    from room_model import anchor, llm_merge, overrides as user_overrides, tape_merge
+    from room_model import anchor, edge_pick, llm_merge, overrides as user_overrides, tape_merge
 
     arch = {"schema": SCHEMA, "version": VERSION, "source": model_doc.get("source"), "frame": copy.deepcopy(model_doc["frame"]),
             "parameters": copy.deepcopy({**model_doc["parameters"], **openings_doc["parameters"]}),
             "elements": copy.deepcopy([*model_doc["elements"], *map(_opening_element, openings_doc["openings"])]),
             "diagnostics": copy.deepcopy({**model_doc["diagnostics"], "openings": openings_doc["diagnostics"]}), "dimensions": []}
+    if anchors and edge_pick.usable(picks):
+        anchors = edge_pick.merge(anchors, picks, arch["parameters"]["floor.level"]["sigma"])
     if llm_merge.usable(vision):
-        arch["diagnostics"]["vision"] = llm_merge.apply(arch, vision, ctx)
+        anchored = {i for i, item in (anchors or {}).get("elements", {}).items() if item.get("status") == "anchored"}
+        arch["diagnostics"]["vision"] = llm_merge.apply(arch, vision, ctx, frozenset(anchored))
     if anchors:
         arch["diagnostics"]["anchor"] = anchor.apply(arch, anchors)
     arch["dimensions"] = copy.deepcopy(model_doc["dimensions"])
@@ -201,7 +206,8 @@ def run(ctx: StageContext) -> Path:
     tape = _read(tape_path, "mesures au mètre") if tape_path.exists() else None
     overrides = _read(ctx.out / OVERRIDES_PATH, "corrections manuelles") if (ctx.out / OVERRIDES_PATH).exists() else None
     anchors = _read(ctx.out / ANCHORS_PATH, "ancrages photo") if (ctx.out / ANCHORS_PATH).exists() else None
-    arch = build(model_doc, openings_doc, vision, tape, ctx, overrides, anchors)
+    picks = _read(ctx.out / PICKS_PATH, "choix des arêtes") if (ctx.out / PICKS_PATH).exists() else None
+    arch = build(model_doc, openings_doc, vision, tape, ctx, overrides, anchors, picks)
     if unreadable:
         arch["diagnostics"]["vision_unreadable"] = unreadable
     path = output_path(ctx, "architecture")

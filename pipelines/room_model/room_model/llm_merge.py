@@ -63,7 +63,7 @@ class Evidence:
 
 class Report:
     def __init__(self):
-        self.doc = {"corrections": [], "typing": [], "corrected": [], "single_view": [], "inconsistent": [], "declared": [], "not_applied": []}
+        self.doc = {"corrections": [], "typing": [], "corrected": [], "single_view": [], "inconsistent": [], "declared": [], "not_applied": [], "superseded": []}
 
     def refuse(self, ident: str, reason: str) -> None:
         self.doc["not_applied"].append({"id": ident, "reason": reason})
@@ -471,10 +471,20 @@ def _declare_panel_frame(arch: dict, item: dict, crops: dict, evidence: Evidence
     rep.doc["declared"].append(f"PanelFrame_{k}")
 
 
-def apply(arch: dict, answers: dict, ctx=None) -> dict:
-    """Merges the answers into `arch` in place; returns the report stored under diagnostics.vision."""
+def apply(arch: dict, answers: dict, ctx=None, anchored: frozenset = frozenset()) -> dict:
+    """Merges the answers into `arch` in place; returns the report stored under diagnostics.vision.
+
+    The corners of an element in `anchored` are ignored (the photos measured it): only its typing is copied.
+    """
     rep, evidence, crops = Report(), Evidence(arch, ctx), answers.get("crops") or {}
-    groups = (("elements", lambda i, it: it.get("id", f"elements[{i}]"), _apply_element),
+
+    def apply_element(arch, item, crops, evidence, rep):
+        if isinstance(item, dict) and item.get("id") in anchored and item.get("corners"):
+            rep.doc["superseded"].append(item["id"])
+            item = {k: v for k, v in item.items() if k != "corners"}
+        _apply_element(arch, item, crops, evidence, rep)
+
+    groups = (("elements", lambda i, it: it.get("id", f"elements[{i}]"), apply_element),
               ("new_elements", lambda i, it: f"new_elements[{i}] ({it.get('kind', 'niche')}, {it.get('host_hint')})", _declare_niche),
               ("panel_frames", lambda i, it: f"panel_frames[{i}] ({it.get('host_hint')})", _declare_panel_frame))
     for key, label, apply_item in groups:

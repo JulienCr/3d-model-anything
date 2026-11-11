@@ -548,38 +548,46 @@ def _parse_answer(text: str) -> object:
         raise
 
 
-def run_llm(pending: Path, model: str) -> dict:
-    """Runs `claude -p` in `pending` on prompt.md and validates the answer; never raises on a bad answer.
-
-    Returns {"answer", "rejected", "model", "duration_s", "error"}; `error` is a message when the call itself failed
-    (timeout, exit code, OSError, bad envelope) and None otherwise. ClaudeMissing when the executable does not exist.
-    """
+def call_claude(pending: Path, model: str) -> tuple[str | None, str | None, float]:
+    """(result text, error, seconds) of `claude -p` run in `pending` on its prompt.md; `error` is a message when the
+    call itself failed (timeout, exit code, OSError, bad envelope), the text None then. ClaudeMissing if absent."""
     command = _command(model)
-    schema = json.loads((pending / "schema.json").read_text(encoding="utf-8"))
-    elements = json.loads((pending / "elements.json").read_text(encoding="utf-8"))
-    crops = json.loads((pending / "crops.json").read_text(encoding="utf-8"))
-    known = {"kinds": {e["id"]: e["kind"] for e in elements["elements"]}, "hosts": elements["room"]["hosts"]}
     prompt = (pending / "prompt.md").read_text(encoding="utf-8")
-    started = time.monotonic()
-    answer, rejected, error = validate({}, schema, known, crops)[0], [], None  # an empty clean answer
+    started, text, error = time.monotonic(), None, None
     try:
         proc = subprocess.run(command, input=prompt, capture_output=True, text=True, cwd=pending, timeout=LLM_TIMEOUT_S, errors="replace")
         if proc.returncode != 0:
             raise _CallFailed(f"exit code {proc.returncode}: {(proc.stderr.strip() or proc.stdout.strip())[-400:]}")
         text = _result_text(proc.stdout)
-        try:
-            answer, rejected = validate(_parse_answer(text), schema, known, crops)
-        except ValueError as exc:
-            rejected = [{"where": "result", "reason": f"not a JSON answer: {exc}"}]
     except subprocess.TimeoutExpired:
         error = f"timed out after {LLM_TIMEOUT_S} s"
     except OSError as exc:
         error = f"could not run claude: {exc}"
     except _CallFailed as exc:
         error = str(exc)
+    return text, error, round(time.monotonic() - started, 1)
+
+
+def run_llm(pending: Path, model: str) -> dict:
+    """Runs `claude -p` in `pending` on prompt.md and validates the answer; never raises on a bad answer.
+
+    Returns {"answer", "rejected", "model", "duration_s", "error"}; `error` is a message when the call itself failed
+    (timeout, exit code, OSError, bad envelope) and None otherwise. ClaudeMissing when the executable does not exist.
+    """
+    schema = json.loads((pending / "schema.json").read_text(encoding="utf-8"))
+    elements = json.loads((pending / "elements.json").read_text(encoding="utf-8"))
+    crops = json.loads((pending / "crops.json").read_text(encoding="utf-8"))
+    known = {"kinds": {e["id"]: e["kind"] for e in elements["elements"]}, "hosts": elements["room"]["hosts"]}
+    answer, rejected = validate({}, schema, known, crops)[0], []  # an empty clean answer
+    text, error, seconds = call_claude(pending, model)
     if error:
         rejected = [{"where": "claude", "reason": error}]
-    return {"answer": answer, "rejected": rejected, "model": model, "duration_s": round(time.monotonic() - started, 1), "error": error}
+    else:
+        try:
+            answer, rejected = validate(_parse_answer(text), schema, known, crops)
+        except ValueError as exc:
+            rejected = [{"where": "result", "reason": f"not a JSON answer: {exc}"}]
+    return {"answer": answer, "rejected": rejected, "model": model, "duration_s": seconds, "error": error}
 
 
 def run(ctx: StageContext) -> Path:

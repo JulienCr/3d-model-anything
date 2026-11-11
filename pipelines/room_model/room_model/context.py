@@ -12,6 +12,7 @@ STAGE_OUTPUTS = {
     "openings": "openings.json",
     "vision": "vision/answers.json",
     "anchor": "anchors.json",
+    "edge_pick": "edge_pick/answers.json",
     "architecture": "architecture.json",
     "textures": "textures/textures.json",
     "blender": "architecture.blend",
