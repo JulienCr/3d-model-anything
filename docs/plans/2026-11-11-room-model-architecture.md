@@ -76,7 +76,7 @@
 ### Task 3: Photo geometry and the `architecture` stage (no LLM yet) — `sonnet-medium`
 
 **Files:**
-- Create: `room_model/photo_geom.py`, `room_model/raster.py`, `room_model/architecture.py`, `room_model/tape.py`
+- Create: `room_model/photo_geom.py`, `room_model/raster.py`, `room_model/architecture.py`, `room_model/survey_page.py`, `room_model/tape.py`
 - Modify: `room_model/context.py`, `room_model/__main__.py` (stage + subcommand `compare-tape --arch <architecture.json> --tape <measurements.json> [-o tape.md]`), `tests/synthetic.py` (option `photos: int = 0`: posed photos rendered with `raster.py`, flat colour per surface, stored in sensor orientation rotated 90° like the iPhone)
 - Test: `tests/test_photo_geom.py`, `tests/test_architecture.py`
 
@@ -87,10 +87,15 @@
 - `photo_geom.project(photo, pts_room) -> (uv: np.ndarray, depth: np.ndarray)`; `photo_geom.backproject(photo, uv_sensor, plane: (normal3, offset)) -> np.ndarray`.
 - `photo_geom.best_views(photos, pts_room, mesh, k=3) -> list[PosedPhoto]` (visible by depth test within 3 cm, sorted by projected area × cos of view angle).
 - `architecture.build(model: dict, openings: dict, vision: dict | None) -> dict` → `architecture.json` (schema `room-model/arch-1`): model `parameters`/`elements`/`diagnostics` plus opening elements (from `openings.json`, `type: null` until Task 9), `dimensions` = model dimensions + `L-M<k>` (wall length between corners), `<id>-w`, `<id>-h`, `<id>-sill` (windows and niches).
-- `architecture.run` also writes `measurements/measurements.md` + one JPEG per measurement (best upright view, endpoints drawn) for 6–8 dimensions: every door w and h, the widest window w and h, every niche w and h, capped at 8.
+- `architecture.run` also writes the survey page `measurements/index.html` (self-contained: images inlined as base64, no external script; French) via `room_model/survey_page.py`:
+  - a top-view SVG plan (reuse `plan_svg.py` geometry) with a numbered marker on each measured span (1, 2, 3…), the span drawn between its two endpoints;
+  - a form, one row per number: number, French description of what to measure and where (« Largeur de la porte Door_1, entre les tableaux, à mi-hauteur »), the upright photo crop with both endpoints drawn, the current value (scan value, and LLM value when `llm_corrected`), its sigma and source, a priority badge « à reprendre en priorité » when sigma ≥ 2 cm or source is `roomplan`/`llm`/`assumed` or the dimension has flags, and an input in cm;
+  - rows: every opening `-w`/`-h`, every `-sill`, every width/length station, every ceiling height; priority rows first;
+  - buttons « Télécharger measurements.json » (`{"<dimension id>": <metres>}`, only filled inputs) and « Copier »; inputs kept in `localStorage` (wrapped in try/catch).
+  `measurements/plan_numbers.json` maps number → dimension id. Each dimension used in the page needs its two endpoints in the room frame: `architecture.dimension_endpoints(arch, dim_id) -> (p0: [x, y, z], p1: [x, y, z]) | None`.
 - `tape.compare(arch: dict, tape: dict) -> str` (Markdown, French): per tape id, scan value, LLM value (if any), tape value, both differences in cm. `measurements.json` = `{"<dimension id>": <metres>}`.
 
-- [ ] **Step 1: tests.** `test_upright_roundtrip` (random sensor pixels → upright → `to_sensor` identity for each of the 4 `up_turns`); `test_backproject_hits_wall` (pixel of a known synthetic wall corner back-projects within 1 cm); `test_depth_map_occlusion` (a box in front of a wall: wall points behind it fail the 3 cm depth test); `test_architecture_dimensions` (synthetic with door + window: `Door_1-w`, `Door_1-h`, `Window_1-sill`, `L-M1` present and within 2 cm of truth); `test_measurement_sheet` (≤ 8 images written, each id in `measurements.md`); `test_tape_report` (tape value 2 cm off → difference column shows `+2,0`).
+- [ ] **Step 1: tests.** `test_upright_roundtrip` (random sensor pixels → upright → `to_sensor` identity for each of the 4 `up_turns`); `test_backproject_hits_wall` (pixel of a known synthetic wall corner back-projects within 1 cm); `test_depth_map_occlusion` (a box in front of a wall: wall points behind it fail the 3 cm depth test); `test_architecture_dimensions` (synthetic with door + window: `Door_1-w`, `Door_1-h`, `Window_1-sill`, `L-M1` present and within 2 cm of truth); `test_survey_page` (synthetic with door + window: page exists, every number in `plan_numbers.json` appears in the SVG and has one input row, `Door_1-w` row present, a dimension with source `roomplan` carries the priority badge, no `http` URL in the file); `test_tape_report` (tape value 2 cm off → difference column shows `+2,0`).
 - [ ] **Step 2:** FAIL.
 - [ ] **Step 3: implement** per interfaces. Rasterise at most 320 px on the long side.
 - [ ] **Step 4:** full suite passes; run on the real capture: `.venv/bin/python -m room_model architecture --capture ../../data/captures-in/bureau/Room --out ../../data/room-model/bureau` (with `--no-llm`) succeeds and writes the sheet.
@@ -189,12 +194,13 @@
 - Corners → metres: each crop's 4 corners mapped `to_sensor`, back-projected on the host face plane; per corner, the median over crops; width = top/bottom edge mean, height = side mean, `center_s` and `sill` from the rectangle. Sigma = spread across crops (min 1 cm). Applied when ≥ 2 crops agree within 3 cm; the parameter becomes source `llm` with `scan_value`/`scan_sigma`, element flag `llm_corrected`. A single-crop answer is applied too, flag `llm_single_view`.
 - New niche: host = wall whose plane is nearest the back-projected centre (≤ 0.3 m), id `Niche_<k>`; `through` from the answer; LiDAR check: through when the host has no samples behind the niche rect on face B — disagreement adds flag `through_disputed`.
 - Cornice/skirting/panel frames copied with source `assumed` (heights in metres).
+- Tape corrections: `architecture.run` reads `--out/measurements.json` when present (CLI flag `--tape <file>` copies a given file there). Source priority tape > llm > lidar > roomplan > assumed. A tape value replaces the parameter it measures (source `tape`, sigma 0.005, `scan_value` kept, flag `tape_corrected`): opening width/height/sill directly; ceiling height moves the ceiling level; a width/length station moves the wall of the pair with the larger offset sigma along its normal so the station equals the tape value (both walls `lidar` with equal sigma → the second one). Unknown ids are listed in the report, never applied. The survey page shows the tape value in its row once applied.
 
-- [ ] **Step 1: tests.** `test_llm_correction_applied` (canned corners 4 cm wider than RoomPlan on 2 crops → width source `llm`, `scan_value` kept, flag set); `test_llm_disagreeing_crops` (crops 8 cm apart → no correction, flag `llm_inconsistent`); `test_new_niche_hosted`; `test_report_corrections_table`.
+- [ ] **Step 1: tests.** `test_llm_correction_applied` (canned corners 4 cm wider than RoomPlan on 2 crops → width source `llm`, `scan_value` kept, flag set); `test_llm_disagreeing_crops` (crops 8 cm apart → no correction, flag `llm_inconsistent`); `test_new_niche_hosted`; `test_report_corrections_table`; `test_tape_overrides_llm` (tape and LLM both on `Door_1-w` → tape wins, source `tape`); `test_tape_moves_wall` (station 3 cm longer on tape → the higher-sigma wall moves 3 cm, the other stays); `test_tape_unknown_id` (listed, not applied).
 - [ ] **Step 2–4:** FAIL, implement, pass.
 - [ ] **Step 5: commit** `feat(room-model): apply LLM corrections and declared niches with scan values kept`.
 
-**Checkpoint (orchestrator):** run `vision` (Opus) on the capture, rebuild, trace `10-bureau-llm-moulures`; with the user's `measurements.json`, run `compare-tape` and put the report in the trace.
+**Checkpoint (orchestrator):** run `vision` (Opus) on the capture, rebuild, trace `10-bureau-llm-moulures`; hand the survey page (`measurements/index.html`) to the user; with their `measurements.json`, run `compare-tape`, rebuild with `--tape`, and put both reports in the trace.
 
 ### Task 10: Projected textures — `sonnet-high`
 

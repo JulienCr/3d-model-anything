@@ -231,3 +231,12 @@ did not detect.
 - Traces: `D:\dev\room-model-traces\09-…` onward, one per delivery step: 09 openings and rig
   (no LLM), 10 LLM pass and mouldings plus the tape comparison, 11 projected textures, 12 static
   GLB and cleanup.
+
+### Survey page (2026-11-11, user request)
+
+- The pipeline writes `measurements/index.html`, a local self-contained page (never published):
+  a numbered SVG plan, one form row per number (what and where to measure, photo crop with the
+  endpoints drawn, current value with source and sigma, priority badge, input in cm), and a
+  download of `measurements.json`.
+- Rerunning with that file applies the tape values to the model (priority tape > LLM > LiDAR >
+  RoomPlan > assumed) and rebuilds the Blender scene; a station moves the less certain wall.
