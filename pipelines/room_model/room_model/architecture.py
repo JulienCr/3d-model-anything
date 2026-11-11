@@ -17,6 +17,7 @@ SILL_KINDS = ("window", "niche")
 STATION_HEIGHT = 1.2  # m above the floor at which a width or length is read
 VISION_PATH = "vision/answers.json"
 TAPE_PATH = "measurements.json"
+OVERRIDES_PATH = "overrides.json"
 OPENING_KINDS = ("door", "window", "opening", "niche")
 
 
@@ -75,13 +76,14 @@ def _wall_length_dimensions(model_doc: dict) -> list[dict]:
     return out
 
 
-def build(model_doc: dict, openings_doc: dict, vision: dict | None = None, tape: dict | None = None, ctx: StageContext | None = None) -> dict:
+def build(model_doc: dict, openings_doc: dict, vision: dict | None = None, tape: dict | None = None, ctx: StageContext | None = None,
+          overrides: dict | None = None) -> dict:
     """architecture.json: the model, the openings as elements, and their dimensions plus the wall lengths.
 
-    `vision` (the answers document) and `tape` ({dimension id: metres}) are merged when given: see `llm_merge` and
-    `tape_merge`. `ctx` gives the LLM corners their photos and the niche check its LiDAR samples.
+    `vision` (the answers document), `tape` ({dimension id: metres}) and `overrides` ({element id: fields}) are merged
+    in that order when given: see `llm_merge`, `tape_merge` and `overrides`. `ctx` gives the LLM corners their photos and the niche check its LiDAR samples.
     """
-    from room_model import llm_merge, tape_merge
+    from room_model import llm_merge, overrides as user_overrides, tape_merge
 
     arch = {"schema": SCHEMA, "version": VERSION, "source": model_doc.get("source"), "frame": copy.deepcopy(model_doc["frame"]),
             "parameters": copy.deepcopy({**model_doc["parameters"], **openings_doc["parameters"]}),
@@ -92,6 +94,8 @@ def build(model_doc: dict, openings_doc: dict, vision: dict | None = None, tape:
     arch["dimensions"] = copy.deepcopy(model_doc["dimensions"])
     if tape:
         arch["diagnostics"]["tape"] = tape_merge.apply(arch, tape)
+    if overrides:
+        arch["diagnostics"]["overrides"] = user_overrides.apply(arch, overrides)
     arch["dimensions"] += _wall_length_dimensions(arch)
     hosts, centres = {e["id"]: e for e in arch["elements"]}, {o["id"]: o["center"] for o in openings_doc["openings"]}
     for el in arch["elements"]:
@@ -184,7 +188,8 @@ def run(ctx: StageContext) -> Path:
         except StageInputMissing as exc:
             unreadable = str(exc)
     tape = _read(tape_path, "mesures au mètre") if tape_path.exists() else None
-    arch = build(model_doc, openings_doc, vision, tape, ctx)
+    overrides = _read(ctx.out / OVERRIDES_PATH, "corrections manuelles") if (ctx.out / OVERRIDES_PATH).exists() else None
+    arch = build(model_doc, openings_doc, vision, tape, ctx, overrides)
     if unreadable:
         arch["diagnostics"]["vision_unreadable"] = unreadable
     path = output_path(ctx, "architecture")

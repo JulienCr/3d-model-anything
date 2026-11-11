@@ -220,9 +220,9 @@ def render(doc: dict, poses: dict | None = None) -> str:
     return "\n".join(out)
 
 
-PARAMETER_NAMES = {"width": "largeur", "height": "hauteur", "sill": "allège", "center_s": "position", "projection": "saillie",
+PARAMETER_NAMES = {"kind": "nature", "through": "traversante", "dividers": "séparations", "shelves_count": "étagères", "width": "largeur", "height": "hauteur", "sill": "allège", "center_s": "position", "projection": "saillie",
                    "type": "type", "hinge": "charnières", "swing": "sens d'ouverture", "panels": "panneaux", "handle": "poignée", "frame": "cadre"}
-CORRECTION_TITLES = ("Corrections LLM", "Mesures au mètre")
+CORRECTION_TITLES = ("Corrections LLM", "Mesures au mètre", "Corrections manuelles")
 
 
 def _cm(value) -> str:
@@ -279,9 +279,21 @@ def _tape_section(arch: dict) -> list[str]:
     return out
 
 
+def _manual_section(arch: dict) -> list[str]:
+    manual = arch["diagnostics"].get("overrides")
+    if manual is None:
+        return ["Aucune correction manuelle fournie."]
+    rows = [[a["element"], PARAMETER_NAMES.get(a["field"], a["field"]), _typed(a["value"])] for a in manual["applied"]]
+    rows += [[i, "suppression", "oui"] for i in manual["removed"]]
+    out = _table(["Élément", "Champ", "Valeur"], rows) if rows else ["Aucune correction appliquée."]
+    if manual["rejected"]:
+        out += ["", "Refusées :", ""] + [f"- {r['id']}{'' if r['field'] is None else ' / ' + r['field']} : {r['reason']}" for r in manual["rejected"]]
+    return out
+
+
 def render_corrections(arch: dict) -> list[tuple[str, list[str]]]:
-    """The two report sections that come from the architecture stage: LLM corrections and tape measurements."""
-    return [("Corrections LLM", _llm_section(arch)), ("Mesures au mètre", _tape_section(arch))]
+    """The report sections that come from the architecture stage: LLM corrections, tape measurements, manual corrections."""
+    return [("Corrections LLM", _llm_section(arch)), ("Mesures au mètre", _tape_section(arch)), ("Corrections manuelles", _manual_section(arch))]
 
 
 def write_sections(path, arch: dict) -> None:

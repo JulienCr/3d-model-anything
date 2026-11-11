@@ -23,8 +23,8 @@ STAGE_MODULES = {
 }
 
 
-STALE_AFTER = {"architecture": ("vision/answers.json", "measurements.json")}  # the stage reruns when one of these is newer than its output
-TAPE_FILE = "measurements.json"
+STALE_AFTER = {"architecture": ("vision/answers.json", "measurements.json", "overrides.json")}  # the stage reruns when one of these is newer than its output
+TAPE_FILE, OVERRIDES_FILE = "measurements.json", "overrides.json"
 
 
 def _placeholder(path: Path) -> str | None:
@@ -70,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
         stage = sub.add_parser(name, parents=[parent], help=f"run {name}")
         if name in ("architecture", "all"):
             stage.add_argument("--tape", type=Path, help='tape measurements {"<dimension id>": <metres>}, copied to <out>/measurements.json')
+            stage.add_argument("--overrides", type=Path, help='manual corrections {"<element id>": {field: value}}, copied to <out>/overrides.json')
     cmp = sub.add_parser("compare", help="compare a model.json against a reference")
     cmp.add_argument("--model", type=Path, required=True)
     cmp.add_argument("--reference", type=Path, required=True)
@@ -149,15 +150,15 @@ def _compare_tape(args: argparse.Namespace) -> int:
     return 0
 
 
-def _install_tape(source: Path, out: Path) -> str | None:
-    """Copies the tape measurements to <out>/measurements.json; an error message when they cannot be used."""
+def _install_json(source: Path, out: Path, name: str, label: str) -> str | None:
+    """Copies a user JSON object to <out>/<name>; an error message when it cannot be used."""
     try:
         doc = json.loads(source.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        return f"mesures illisibles ({source}) : {exc}"
+        return f"{label} illisibles ({source}) : {exc}"
     if not isinstance(doc, dict):
-        return f"mesures illisibles ({source}) : un objet JSON {{\"<cote>\": <mètres>}} est attendu"
-    target = out / TAPE_FILE
+        return f"{label} illisibles ({source}) : un objet JSON est attendu"
+    target = out / name
     out.mkdir(parents=True, exist_ok=True)
     if not (target.exists() and target.samefile(source)):
         shutil.copyfile(source, target)
@@ -176,8 +177,8 @@ def main(argv: list[str] | None = None) -> int:
     except InvalidCapture as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    if getattr(args, "tape", None):
-        if (problem := _install_tape(args.tape, ctx.out)):
+    for option, name, label in (("tape", TAPE_FILE, "mesures"), ("overrides", OVERRIDES_FILE, "corrections")):
+        if getattr(args, option, None) and (problem := _install_json(getattr(args, option), ctx.out, name, label)):
             print(problem, file=sys.stderr)
             return 1
     for name in STAGE_MODULES if args.command == "all" else [args.command]:

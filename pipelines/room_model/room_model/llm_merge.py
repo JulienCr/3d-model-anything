@@ -310,6 +310,16 @@ def _new_param(arch: dict, pid: str, value: float, sigma: float, source: str) ->
     arch["parameters"][pid] = {"value": float(value), "sigma": float(sigma), "unit": "m", "source": source}
 
 
+def shelf_heights(height: float, count: int) -> list[float]:
+    """`count` shelves evenly spaced inside a niche of `height` m, measured above the sill."""
+    return [height * (i + 1) / (count + 1) for i in range(count)]
+
+
+def recess_depth(thickness: float) -> float:
+    """Depth assumed for a niche that does not go through: DEFAULT_RECESS, kept under half the host thickness."""
+    return min(DEFAULT_RECESS, thickness / 2)
+
+
 def _declare_niche(arch: dict, item: dict, crops: dict, evidence: Evidence, rep: Report) -> None:
     host, face, found = _locate(arch, item["host_hint"], item["corners"], crops, evidence)
     try:
@@ -333,13 +343,13 @@ def _declare_niche(arch: dict, item: dict, crops: dict, evidence: Evidence, rep:
     if through:
         arch["parameters"][params["depth"]] = dict(arch["parameters"][host["params"]["thickness"]])
     else:
-        _new_param(arch, params["depth"], min(DEFAULT_RECESS, thickness / 2), ASSUMED_SIGMA * 2.5, "assumed")
+        _new_param(arch, params["depth"], recess_depth(thickness), ASSUMED_SIGMA * 2.5, "assumed")
     count = int(item.get("shelves_count") or 0)
     spec = item.get("frame")
     x, z = _face_point(arch, host, face, values["center_s"])
     arch["elements"].append({
         "id": ident, "kind": "niche", "host": host["id"], "face": face, "params": params, "through": through,
-        "dividers": int(item.get("dividers") or 0), "shelves": [values["height"] * (i + 1) / (count + 1) for i in range(count)],
+        "dividers": int(item.get("dividers") or 0), "shelves": shelf_heights(values["height"], count),
         "frame": None if not spec else {"profile": spec["profile"], "width": float(spec["width_cm"]) / 100},
         "center": [float(x), float(z)], "flags": flags})
     for n in ("center_s", "sill", "width", "height"):

@@ -180,3 +180,24 @@ def test_tape_flag_rejects_an_unusable_file(build, tmp_path, capsys):
     assert not (tmp_path / "out" / "measurements.json").exists()
     with pytest.raises(SystemExit):
         cli.main(["shell", *args, "--tape", str(bad)])  # only `architecture` and `all` take it
+
+
+def test_overrides_flag_installs_the_file_and_reruns_the_architecture(build, tmp_path, capsys):
+    args = _synthetic(build, tmp_path)
+    out = tmp_path / "out"
+    assert cli.main(["all", *args]) == 0
+    mine = tmp_path / "mine.json"
+    mine.write_text(json.dumps({"Door_1": {"swing": "out", "hinge": "right"}, "Door_9": {"remove": True}}), encoding="utf-8")
+    capsys.readouterr()
+    assert cli.main(["architecture", *args, "--overrides", str(mine)]) == 0  # no --force: the new file makes the output stale
+    assert "skipped" not in capsys.readouterr().out
+    assert json.loads((out / "overrides.json").read_text(encoding="utf-8")) == json.loads(mine.read_text(encoding="utf-8"))
+    arch = json.loads((out / STAGE_OUTPUTS["architecture"]).read_text(encoding="utf-8"))
+    door = next(e for e in arch["elements"] if e["id"] == "Door_1")
+    assert (door["swing"], door["hinge"], "user_override" in door["flags"]) == ("out", "right", True)
+    section = (out / "report.md").read_text(encoding="utf-8").split("## Corrections manuelles")[1]
+    assert "Door_1" in section and "Door_9" in section  # applied and refused ones are both listed
+    assert cli.main(["architecture", *args]) == 0 and "skipped" in capsys.readouterr().out
+    bad = tmp_path / "bad.json"
+    bad.write_text("[]", encoding="utf-8")
+    assert cli.main(["all", *args, "--overrides", str(bad)]) == 1 and len(capsys.readouterr().err.strip().splitlines()) == 1

@@ -194,8 +194,8 @@ class Env:
     crops: dict
     photos: dict
 
-    def merge(self, answers=None, tape_values=None):
-        return architecture.build(self.model_doc, self.openings_doc, answers, tape_values, self.ctx)
+    def merge(self, answers=None, tape_values=None, overrides=None):
+        return architecture.build(self.model_doc, self.openings_doc, answers, tape_values, self.ctx, overrides)
 
 
 @pytest.fixture(scope="module")
@@ -679,3 +679,92 @@ def test_opening_dimensions_follow_the_final_position(env):
     expected = architecture._face_point(arch, _element(arch, host), None, _param(arch, "Window_1", "center_s")["value"])
     assert _dim(arch, "Window_1-w")["at"] == pytest.approx(list(expected))
     assert _dim(arch, "Window_1-w")["at"] != _dim(env.arch, "Window_1-w")["at"]
+
+
+# --- user overrides ---------------------------------------------------------------------------------------------
+
+def _niche_answers(env, through=False):
+    rect = _face_rect(env, "Partition_P1", "A", (0.1, 0.45), (0.8, 1.6))
+    item = {"kind": "niche", "host_hint": "Partition_P1", "through": through, "dividers": 0, "shelves_count": 1,
+            "corners": _corners(env, ["Partition_P1-A-ov"], rect)}
+    return _answers(env, new_elements=[item])
+
+
+def _overrides(arch):
+    return arch["diagnostics"]["overrides"]
+
+
+def test_override_changes_a_niche(env):
+    answers = _niche_answers(env, through=False)
+    arch = env.merge(answers, None, {"Niche_1": {"through": True, "dividers": 2, "shelves_count": 3, "frame": {"profile": "moulded", "width_cm": 5}}})
+    niche = _element(arch, "Niche_1")
+    assert niche["through"] is True and niche["dividers"] == 2
+    height = _param(arch, "Niche_1", "height")["value"]
+    assert niche["shelves"] == pytest.approx([height * k / 4 for k in (1, 2, 3)])
+    assert niche["frame"] == {"profile": "moulded", "width": pytest.approx(0.05)}
+    assert "user_override" in niche["flags"] and _overrides(arch)["rejected"] == []
+    assert {(a["element"], a["field"]) for a in _overrides(arch)["applied"]} >= {("Niche_1", "through"), ("Niche_1", "shelves_count")}
+    back = env.merge(_niche_answers(env, through=True), None, {"Niche_1": {"through": False}})
+    depth = back["parameters"][_element(back, "Niche_1")["params"]["depth"]]["value"]
+    assert 0 < depth < _param(back, "Partition_P1", "thickness")["value"]  # a recess needs a back inside the host
+
+
+def test_override_wins_over_the_llm_typing(env):
+    answers = _answers(env, elements=[{"id": "Door_1", "type": "hinged_double", "hinge": "right"}])
+    arch = env.merge(answers, None, {"Door_1": {"type": "sliding", "hinge": "left", "swing": "out", "panels": 2, "handle": False}})
+    door = _element(arch, "Door_1")
+    assert (door["type"], door["hinge"], door["swing"], door["panels"], door["handle"]) == ("sliding", "left", "out", 2, False)
+    assert "user_override" in door["flags"]
+
+
+def test_override_retypes_between_door_niche_and_opening(env):
+    arch = env.merge(_answers(env, elements=[{"id": "Door_1", "type": "hinged_double", "hinge": "right"}]), None, {"Door_1": {"kind": "niche"}})
+    niche = _element(arch, "Door_1")
+    assert niche["kind"] == "niche" and niche["through"] is False and niche["dividers"] == 0 and niche["shelves"] == []
+    assert "hinge" not in niche and "type" not in niche
+    assert "Door_1-sill" in {d["id"] for d in arch["dimensions"]}  # a niche has a sill
+    depth = arch["parameters"][niche["params"]["depth"]]["value"]
+    assert depth < _param(arch, "Wall_M2", "thickness")["value"]  # a recess, not a hole through the wall
+    arch = env.merge(None, None, {"Door_1": {"kind": "opening"}, "Opening_1": {"type": "sliding", "kind": "door"}, "Window_1": {"frame": None}})
+    assert _element(arch, "Door_1")["kind"] == "opening" and _element(arch, "Door_1")["type"] is None
+    assert _element(arch, "Opening_1")["kind"] == "door" and _element(arch, "Opening_1")["type"] == "sliding"  # checked against the new kind
+    assert _element(arch, "Window_1")["frame"] is None
+    assert _overrides(arch)["rejected"] == []
+
+
+def test_override_removes_an_element_with_its_parameters_and_dimensions(env):
+    arch = env.merge(_niche_answers(env), None, {"Niche_1": {"remove": True}, "Window_1": {"remove": True}})
+    ids = {e["id"] for e in arch["elements"]}
+    assert "Niche_1" not in ids and "Window_1" not in ids and "Door_1" in ids
+    assert not any(k.startswith(("niche.1.", "opening.Window_1.")) for k in arch["parameters"])
+    assert not any(d["id"].startswith(("Niche_1-", "Window_1-")) for d in arch["dimensions"])
+    assert _overrides(arch)["removed"] == ["Niche_1", "Window_1"]
+
+
+def test_override_rejects_what_the_catalogue_does_not_allow(env):
+    bad = {"Door_1": {"type": "hinged_triple", "hinge": "up", "swing": "sideways", "panels": 99, "handle": "yes", "through": True, "kind": "window"},
+           "Window_1": {"type": "hinged_single", "frame": {"profile": "baroque", "width_cm": 5}, "kind": "door"},
+           "Opening_1": {"type": "fixed"}, "Wall_M1": {"remove": True}, "Nope_9": {"remove": True}, "Door_2": "text",
+           "Door_1x": {}, }
+    arch = env.merge(None, None, bad)
+    assert arch["elements"] == env.arch["elements"] and arch["parameters"] == env.arch["parameters"]
+    rejected = {(r["id"], r.get("field")) for r in _overrides(arch)["rejected"]}
+    expected = {("Door_1", f) for f in ("type", "hinge", "swing", "panels", "handle", "through", "kind")} | {
+        ("Window_1", "type"), ("Window_1", "frame"), ("Window_1", "kind"), ("Opening_1", "type"), ("Wall_M1", "remove"), ("Nope_9", None), ("Door_2", None)}
+    assert expected <= rejected and all(r["reason"] for r in _overrides(arch)["rejected"])
+    assert _overrides(arch)["applied"] == []
+    door = _element(arch, "Door_1")
+    assert door["kind"] == "door" and door.get("type") == _element(env.arch, "Door_1").get("type") and "user_override" not in door["flags"]
+    unknown = env.merge(None, None, {"Door_1": {"colour": "red"}})
+    assert ("Door_1", "colour") in {(r["id"], r["field"]) for r in _overrides(unknown)["rejected"]}
+
+
+def test_override_report_section_and_run(env, tmp_path):
+    ctx = dataclasses.replace(env.ctx, out=tmp_path / "out")
+    shutil.copytree(env.ctx.out, ctx.out, ignore=shutil.ignore_patterns("pending"))
+    (ctx.out / "overrides.json").write_text(json.dumps({"Door_1": {"swing": "out", "type": "nope"}, "Window_1": {"remove": True}}), encoding="utf-8")
+    arch = json.loads(architecture.run(ctx).read_text(encoding="utf-8"))
+    assert _element(arch, "Door_1")["swing"] == "out" and not any(e["id"] == "Window_1" for e in arch["elements"])
+    text = (ctx.out / "report.md").read_text(encoding="utf-8")
+    section = text.split("## Corrections manuelles")[1].split("\n## ")[0]
+    assert "Door_1" in section and "out" in section and "Window_1" in section and "nope" in section
