@@ -181,7 +181,7 @@ def test_rect_views_accept_a_frontal_unoccluded_view(tmp_path):
     views = photo_geom.rect_views([_seen_from(0, 3.0, tmp_path, "front"), _seen_from(50, 3.0, tmp_path, "side")], RECT, wall, TOWARDS_VIEWER)
     assert _names(views) == ["front", "side"]  # larger area x cos first
     assert views[0].cos == pytest.approx(1.0) and views[1].cos == pytest.approx(np.cos(np.radians(50)))
-    assert views[0].unseen == 0
+    assert views[0].seen == 1.0
 
 
 def test_rect_views_drop_a_view_behind_an_occluding_wall(tmp_path):
@@ -211,18 +211,38 @@ def test_rect_views_need_a_large_enough_projection(tmp_path):
     assert photo_geom.rect_views([_seen_from(0, 10.0, tmp_path)], RECT, wall, TOWARDS_VIEWER) == []  # 80 px on the shorter side
 
 
-def test_rect_views_tolerate_a_fifth_of_the_grid_hidden_by_furniture(tmp_path):
+def _slab(x0, x1, y0, y1):
+    """A box 30 cm in front of the wall hiding what the camera at z = 2 sees through x0..x1, y0..y1 on the wall (z = 5)."""
+    k = 2.7 / 3.0  # the box sits at z = 4.7: rays from z = 2 cross it at 0.9 of their wall offset
+    return photo_geom.RoomBox(np.array([k * (x0 + x1) / 2, k * (y0 + y1) / 2, 4.7]), np.eye(3), np.array([k * (x1 - x0) / 2 - 0.03, k * (y1 - y0) / 2 - 0.03, 0.1]))
+
+
+def test_rect_views_accept_a_partly_hidden_frame_when_every_corner_is_seen(tmp_path):
+    wall, camera = _plane(5.0, 4.0, 3.0), _seen_from(0, 3.0, tmp_path)
+    top, bottom = _slab(-0.35, 0.35, 0.3, 1.0), _slab(-0.35, 0.35, -1.0, -0.3)  # the middle three points of the top and bottom edges
+    band = photo_geom.rect_band(RECT)
+    assert len(band) == 16 and photo_geom.occluded_mask(camera.centre, band, [top, bottom]).sum() == 6  # 62 % of the band seen
+    kept = photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=[top, bottom])
+    assert _names(kept) == ["cam"] and kept[0].seen == pytest.approx(10 / 16)
+    sides = [_slab(-0.6, -0.1, -1.0, 1.0), _slab(0.1, 0.6, -1.0, 1.0)]  # two thirds of the band hidden
+    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=sides) == []
+
+
+def test_rect_views_drop_a_view_with_one_corner_hidden(tmp_path):
+    wall, camera = _plane(5.0, 4.0, 3.0), _seen_from(0, 3.0, tmp_path)
+    corner = _slab(-0.6, -0.3, 0.2, 1.0)  # the top-left corner of the rectangle only
+    assert photo_geom.occluded_mask(camera.centre, photo_geom.rect_corner_samples(RECT)[3], [corner]).sum() >= 4
+    assert photo_geom.occluded_mask(camera.centre, photo_geom.rect_band(RECT), [corner]).mean() <= 0.25  # the frame band is mostly seen
+    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=[corner]) == []
+    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER)  # without the box it is eligible
+
+
+def test_rect_views_drop_a_view_with_a_corner_outside_the_image(tmp_path):
     wall = _plane(5.0, 4.0, 3.0)
-    camera = _seen_from(0, 3.0, tmp_path)
-
-    def slab(x0, x1):  # in front of the rectangle, hiding the grid columns between the rays x0 and x1
-        return photo_geom.RoomBox(np.array([(x0 + x1) / 2, 0.0, 4.7]), np.eye(3), np.array([(x1 - x0) / 2 - 0.03, 1.0, 0.1]))
-
-    one_column, two_columns = slab(-0.5, -0.35), slab(-0.5, -0.15)
-    assert photo_geom.occluded_mask(camera.centre, photo_geom.rect_grid(RECT), [one_column]).sum() == 5
-    kept = photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=[one_column])
-    assert _names(kept) == ["cam"] and kept[0].unseen == 5  # 20 of 25 points seen: exactly 80 %
-    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=[two_columns]) == []
+    aside = _camera("aside", CENTRE + np.array([0.0, 0.0, -3.0]), CENTRE + np.array([0.6, 0.0, 0.0]), tmp_path)  # one edge leaves the image
+    uv, _ = photo_geom.project(aside, RECT)
+    assert (uv[:, 0] > 640).any() and (uv[:, 0] < 640).any() and (uv[:, 0] > 0).all()
+    assert photo_geom.rect_views([aside], RECT, wall, TOWARDS_VIEWER) == []
 
 
 def test_rect_views_tolerate_a_casing_standing_out_of_the_plane(tmp_path):
@@ -234,9 +254,19 @@ def test_rect_views_tolerate_a_casing_standing_out_of_the_plane(tmp_path):
 def test_rect_grid_stops_three_centimetres_inside_the_edges():
     grid = photo_geom.rect_grid(RECT)
     assert grid.shape == (25, 3) and np.allclose(grid[:, 2], 5.0)
+    corners = photo_geom.rect_corner_samples(RECT)
+    assert corners.shape == (4, 5, 3) and np.allclose(corners[0, 0], [-0.47, -0.37, 5.0]) and np.allclose(corners[2, 0], [0.47, 0.37, 5.0])
+    assert np.abs(corners[:, 1:] - corners[:, :1]).max() == pytest.approx(photo_geom.CORNER_RADIUS)
     assert grid[:, 0].min() == pytest.approx(-0.47) and grid[:, 0].max() == pytest.approx(0.47)
     assert grid[:, 1].min() == pytest.approx(-0.37) and grid[:, 1].max() == pytest.approx(0.37)
     assert len(np.unique(grid[:, 0].round(6))) == 5 and len(np.unique(grid[:, 1].round(6))) == 5
+
+
+def test_an_opening_is_eligible_from_the_side_of_either_face(tmp_path):
+    wall = _plane(5.0, 4.0, 3.0)
+    side_b = _camera("b", CENTRE + np.array([0.0, 0.0, 3.0]), CENTRE, tmp_path)  # the host's face A looks to -z; this camera is on face B
+    assert photo_geom.rect_views([side_b], RECT, wall, TOWARDS_VIEWER, two_sided=True)  # a hole is seen through from either side
+    assert photo_geom.rect_views([side_b], RECT, wall, TOWARDS_VIEWER) == []  # a recess that is not through is not
 
 
 def test_rect_views_without_a_normal_accept_either_side_of_the_rectangle(tmp_path):

@@ -29,9 +29,12 @@ FACING_COS = math.cos(math.radians(60))
 SURVEY_FACING_COS = math.cos(math.radians(70))
 GRID_SIDE = 5  # points per side of the grid laid on a rectangle
 # The grid stops 3 cm inside the edges: an opening's interior is empty space in the mesh, where nothing is "visible"
-# by default, so the border of the grid lies against the frame band, where an occluder's edge shows up.
+# by default, so only its border ring, against the frame (the frame band), is tested.
 FRAME_BAND = 0.03
-MIN_SEEN = 0.8  # share of the grid points that must pass the depth test and the furniture box test
+# Curtains or furniture often hide part of a frame, so half of the band is enough: what is clicked is the corners.
+MIN_BAND_SEEN = 0.5
+CORNER_RADIUS = 0.02  # m; a corner is tested on its grid point and four samples this far around it
+MIN_CORNER_SEEN = 2  # of the 5 samples: a casing or a leaf edge can hide most of a 2 cm disc, 0 or 1 left means a hidden corner
 MIN_SIDE_PX = 120  # shorter side of the projected rectangle: below it a corner click is within a few percent of the size
 ROTATE = {1: Image.Transpose.ROTATE_90, 2: Image.Transpose.ROTATE_180, 3: Image.Transpose.ROTATE_270}
 
@@ -294,7 +297,7 @@ class RectView:
     cos: float  # between the face normal and the direction from the rectangle centre to the camera
     area_px: float  # of the projected rectangle
     side_px: float  # its shorter side
-    unseen: int  # grid points failing the depth test or the furniture box test
+    seen: float  # share of the frame band passing the depth test and the furniture box test
 
 
 def rect_grid(rect: np.ndarray) -> np.ndarray:
@@ -306,22 +309,40 @@ def rect_grid(rect: np.ndarray) -> np.ndarray:
     return (rect[0] + s[None, :, None] * u + t[:, None, None] * v).reshape(-1, 3)
 
 
+def rect_band(rect: np.ndarray) -> np.ndarray:
+    """The border ring of `rect_grid` (4 x (GRID_SIDE - 1) points): the frame band, 3 cm inside the edges."""
+    ring = np.zeros((GRID_SIDE, GRID_SIDE), bool)
+    ring[[0, -1], :] = ring[:, [0, -1]] = True
+    return rect_grid(rect)[ring.ravel()]
+
+
+def rect_corner_samples(rect: np.ndarray) -> np.ndarray:
+    """(4, 5, 3): per corner, its grid point (3 cm inside along both edges) and four samples CORNER_RADIUS around it."""
+    rect = np.asarray(rect, float)
+    centres = rect_grid(rect).reshape(GRID_SIDE, GRID_SIDE, 3)[[0, 0, -1, -1], [0, -1, -1, 0]]
+    u, v = ((e / max(float(np.linalg.norm(e)), 1e-9)) * CORNER_RADIUS for e in (rect[1] - rect[0], rect[3] - rect[0]))
+    steps = np.array([[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]])
+    return centres[:, None, :] + steps[None, :, 0, None] * u + steps[None, :, 1, None] * v
+
+
 def rect_views(photos: list[PosedPhoto], rect: np.ndarray, mesh: DepthMaps | tuple[np.ndarray, np.ndarray], normal: np.ndarray | None = None,
                two_sided: bool = False, boxes: list[RoomBox] | None = None, k: int = 3, tolerance: float = LOOSE_TOLERANCE,
                min_side: float = MIN_SIDE_PX) -> list[RectView]:
     """Up to k eligible photos of a planar rectangle (4 corners in order), best first; none when no photo qualifies.
 
     Eligible: the camera faces the rectangle (cosine of `normal`, the face normal towards the viewing side, at least
-    FACING_COS; |cos| when `two_sided` or when no normal is given), the projected rectangle is at least MIN_SIDE_PX on its
-    shorter side, and MIN_SEEN of its grid points pass the depth test (LOOSE_TOLERANCE: casings stand out of the wall
-    plane, an occluder is a wall thickness or more) and the box test. Ranked by area x cos, then by fewest unseen points.
+    FACING_COS; |cos| when `two_sided`, as for a hole through its host, or when no normal is given), the projected
+    rectangle is at least `min_side` px on its shorter side, every corner is visible (MIN_CORNER_SEEN of its samples)
+    and MIN_BAND_SEEN of the frame band is. Visible = depth test (LOOSE_TOLERANCE: casings stand out of the wall plane,
+    an occluder is a wall thickness or more) and furniture box test. Ranked by seen share x area x cos.
     """
     maps = mesh if isinstance(mesh, DepthMaps) else DepthMaps(*mesh)
     rect = np.asarray(rect, float)
     if normal is None:
         normal, two_sided = np.cross(rect[1] - rect[0], rect[3] - rect[0]), True
     normal = np.asarray(normal, float) / np.linalg.norm(normal)
-    grid, centre = rect_grid(rect), rect.mean(0)
+    band, corners, centre = rect_band(rect), rect_corner_samples(rect), rect.mean(0)
+    points = np.vstack([band, corners.reshape(-1, 3)])
     found = []
     for photo in photos:
         uv, depth = project(photo, rect)
@@ -331,12 +352,13 @@ def rect_views(photos: list[PosedPhoto], rect: np.ndarray, mesh: DepthMaps | tup
         wide, tall = ((np.linalg.norm(uv[a] - uv[b]) + np.linalg.norm(uv[c] - uv[d])) / 2 for a, b, c, d in ((1, 0, 2, 3), (3, 0, 2, 1)))
         if not (depth > MIN_DEPTH).all() or cos < FACING_COS or min(wide, tall) < min_side:
             continue
-        seen = maps.visible(photo, grid, tolerance)
+        seen = maps.visible(photo, points, tolerance)
         if boxes:
-            seen &= ~occluded_mask(photo.centre, grid, boxes)
-        if seen.sum() < MIN_SEEN * len(grid) - 1e-9:
+            seen &= ~occluded_mask(photo.centre, points, boxes)
+        band_seen, corner_seen = seen[:len(band)], seen[len(band):].reshape(4, 5)
+        if (corner_seen.sum(1) < MIN_CORNER_SEEN).any() or band_seen.mean() < MIN_BAND_SEEN - 1e-9:
             continue
         area = 0.5 * abs(float(np.dot(uv[:, 0], np.roll(uv[:, 1], -1)) - np.dot(uv[:, 1], np.roll(uv[:, 0], -1))))
-        found.append(RectView(photo, cos, area, min(wide, tall), int((~seen).sum())))
-    found.sort(key=lambda v: (-v.area_px * v.cos, v.unseen))
+        found.append(RectView(photo, cos, area, min(wide, tall), float(band_seen.mean())))
+    found.sort(key=lambda v: -v.seen * v.area_px * v.cos)
     return found[:k]

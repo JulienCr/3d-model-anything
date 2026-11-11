@@ -145,13 +145,15 @@ def _in_image(photo: PosedPhoto, pts: np.ndarray) -> bool:
 def _element_crops(scene: _Scene, el: dict, rect: np.ndarray) -> list[_Crop]:
     """Up to three eligible views of the element; else one overview of its host face from a photo that shows it whole.
 
-    The overview keeps every rule but the size: the element is small in it, never grazing or hidden.
+    A door, window, opening or through niche is a hole: it is seen from either side of its host. The overview keeps
+    every rule but the size: the element is small in it, never grazing or hidden.
     """
     host = next((e for e in scene.arch["elements"] if e["id"] == el["host"]), None)
     face = el.get("face") or "A"
     partition = host is not None and host["kind"] == "partition"
     normal = None if host is None else _face_normal(scene.arch, host, face)
-    args = (scene.photos, rect, scene.maps, normal, partition, scene.boxes)
+    through = el["kind"] != "niche" or bool(el.get("through"))
+    args = (scene.photos, rect, scene.maps, normal, through, scene.boxes)
     crops = []
     for k, view in enumerate(rect_views(*args, VIEWS_PER_ELEMENT)):
         box = _frame_box(view.photo, rect)
