@@ -55,6 +55,9 @@ class SyntheticOptions:
     wall_duct: bool = False
     offset_wall: str | None = None
     no_ceiling: bool = False  # the mesh has no ceiling at all
+    partition: bool = False  # a full-height partition inside the floor, with its RoomPlan wall
+    partition_faces: str = "ab"  # faces in the mesh: a = +x face, b = -x face
+    outside_roomplan_wall: bool = False  # a RoomPlan wall standing outside the floor polygon
 
 
 @dataclass
@@ -68,6 +71,8 @@ class SyntheticTruth:
     columns: list[dict]
     outline: list[tuple[float, float]] = field(default_factory=lambda: list(OUTLINE))
     extra_ident: str | None = None
+    partition: dict | None = None
+    outside_ident: str | None = None
 
 
 BEAM = {"x": (3.85, 4.15), "z": (0.0, 2.5), "underside": 2.20, "top": 2.50, "width": 0.30}
@@ -88,6 +93,8 @@ STEP_COLUMN = {"x": (2.15, 2.50), "z": (2.50, 2.85), "top": H_WING, "engaged": "
 TABLE = {"x": (0.0, 0.6), "z": (0.5, 1.7), "h": 0.75}
 CABINET = {"x": (0.0, 0.6), "z": (3.0, 4.0), "h": 1.90}
 DOOR = {"z": 1.25, "w": 0.90, "h": 2.05}
+PARTITION = {"x": 1.0, "z": (0.3, 2.3), "thickness": 0.10, "roomplan_offset": 0.015}  # runs along z; face A is the +x one
+OUTSIDE_WALL = {"centre": (-1.5, 2.0), "length": 1.0}  # beyond the west wall
 
 
 def _short_beam_z(opt: SyntheticOptions) -> tuple[float, float]:
@@ -294,6 +301,13 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
         m.rect(np.array([0, 0, z0]), X, Y, -Z, cls, (x0, x1), (0, h))
         m.rect(np.array([0, 0, z1]), X, Y, Z, cls, (x0, x1), (0, h))
 
+    if opt.partition:
+        half = PARTITION["thickness"] / 2
+        if "a" in opt.partition_faces:
+            m.rect(np.array([PARTITION["x"] + half, 0, 0]), Z, Y, X, 1, PARTITION["z"], (0, H_MAIN))
+        if "b" in opt.partition_faces:
+            m.rect(np.array([PARTITION["x"] - half, 0, 0]), Z, Y, -X, 1, PARTITION["z"], (0, H_MAIN))
+
     if opt.other_room_panel:
         m.rect(np.array([0, 0, -0.05]), X, Y, -Z, 1, (1, 3), (0, 2), inroom=0)
 
@@ -349,7 +363,7 @@ def _intersect(p1, d1, p2, d2):
     return np.asarray(p1) + t[0] * np.asarray(d1)
 
 
-def _roomplan(opt: SyntheticOptions, world: np.ndarray) -> tuple[dict, dict[str, list[str]], str | None]:
+def _roomplan(opt: SyntheticOptions, world: np.ndarray) -> tuple[dict, dict[str, list[str]], str | None, str | None, str | None]:
     n_edges = len(OUTLINE)
     lines, info = [], []
     for k, name in enumerate(WALL_NAMES):
@@ -398,6 +412,17 @@ def _roomplan(opt: SyntheticOptions, world: np.ndarray) -> tuple[dict, dict[str,
         extra = _ident("extra")
         walls.append(wall_json(extra, np.array([1.0, 3.5]), np.array([0.0, 1.0]), np.array([-1.0, 0.0]), 1.8))
 
+    outside = None
+    if opt.outside_roomplan_wall:
+        outside = _ident("outside")
+        walls.append(wall_json(outside, np.array(OUTSIDE_WALL["centre"]), np.array([0.0, 1.0]), np.array([-1.0, 0.0]), OUTSIDE_WALL["length"]))
+    partition = None
+    if opt.partition:
+        z0, z1 = PARTITION["z"]
+        centre = np.array([PARTITION["x"] + PARTITION["roomplan_offset"], (z0 + z1) / 2])
+        partition = _ident("partition")
+        walls.append(wall_json(partition, centre, np.array([0.0, 1.0]), np.array([-1.0, 0.0]), z1 - z0))
+
     east = info[WALL_NAMES.index("east")]
     door_c = east[1] + (DOOR["z"] - 1.25) * east[2]
     door = {
@@ -419,7 +444,7 @@ def _roomplan(opt: SyntheticOptions, world: np.ndarray) -> tuple[dict, dict[str,
         "sections": [{"center": [0.0, 0.0, 0.0], "label": "unidentified", "story": 0}],
         "story": 0, "version": 2, "walls": walls, "windows": [],
     }
-    return data, idents, extra
+    return data, idents, extra, partition, outside
 
 
 def make_capture(root: Path, options: SyntheticOptions | None = None) -> SyntheticTruth:
@@ -429,7 +454,7 @@ def make_capture(root: Path, options: SyntheticOptions | None = None) -> Synthet
         (root / sub).mkdir(parents=True, exist_ok=True)
     world = _world_from_local()
     n_verts, n_faces = _write_ply(_build_mesh(opt), world, root / "mesh" / "room-0.ply")
-    data, idents, extra = _roomplan(opt, world)
+    data, idents, extra, partition, outside = _roomplan(opt, world)
     (root / "rooms" / "room-0.json").write_text(json.dumps(data), encoding="utf-8")
     (root / "photos" / "photos.json").write_text("[]", encoding="utf-8")
     mesh_entry = {"anchors": 0, "faces": int(n_faces), "file": "mesh/room-0.ply", "vertices": int(n_verts)}
@@ -445,5 +470,7 @@ def make_capture(root: Path, options: SyntheticOptions | None = None) -> Synthet
         ceilings=[H_MAIN, H_WING], beam=dict(BEAM),
         columns=[{**c, "center": [sum(c["x"]) / 2, sum(c["z"]) / 2], "size": [c["x"][1] - c["x"][0], c["z"][1] - c["z"][0]]}
                  for c in _columns(opt)],
-        extra_ident=extra,
+        extra_ident=extra, outside_ident=outside,
+        partition=None if partition is None else {"ident": partition, "thickness": PARTITION["thickness"],
+                                                  "ends": [(PARTITION["x"] + PARTITION["thickness"] / 2, z) for z in PARTITION["z"]]},
     )

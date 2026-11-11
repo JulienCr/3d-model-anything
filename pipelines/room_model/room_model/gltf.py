@@ -11,6 +11,7 @@ import numpy as np
 MATERIALS = {  # fixed base colours (linear RGBA)
     "floor": [0.55, 0.45, 0.35, 1.0],
     "wall": [0.85, 0.85, 0.80, 1.0],
+    "partition": [0.80, 0.80, 0.75, 1.0],
     "ceiling": [0.92, 0.92, 0.95, 1.0],
     "beam": [0.60, 0.40, 0.25, 1.0],
     "column": [0.45, 0.50, 0.60, 1.0],

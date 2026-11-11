@@ -251,6 +251,14 @@ def build(ctx: StageContext) -> dict:
         top = _wall_top(line, np.array(polygon[k]), np.array(polygon[(k + 1) % len(polygon)]), ceiling_result.levels)
         if top is not None:
             parameters[f"{key}.top"] = _param(top["level"], top["sigma"], "m", "lidar")
+    from room_model import partitions  # imported here: partitions reuses this module's helpers
+
+    found = partitions.find_partitions(room, samples, polygon, ceiling_result.levels)
+    for part in found:
+        elements.append(part["element"])
+        parameters.update(part["parameters"])
+        flags += [f"{part['element']['label']}:{f}" for f in part["element"]["flags"]]
+    partition_ids = {p["element"]["roomplan_id"] for p in found}
     ceiling_elements, ceiling_params, ceiling_diag = _ceiling_elements(ceiling_result)
     elements += ceiling_elements
     parameters.update(ceiling_params)
@@ -275,7 +283,9 @@ def build(ctx: StageContext) -> dict:
             "columns": [{"id": f"Column_{k}", "engaged_walls": c["engaged_walls"]}
                         for k, c in enumerate(column_result.columns, 1)],
             "unexplained_vertical": column_result.unexplained,
-            "off_outline_walls": list(room.off_outline), "orphan_doors": list(room.orphan_doors), "flags": flags,
+            "partitions": [p["diagnostic"] for p in found],
+            "off_outline_walls": [i for i in room.off_outline if i not in partition_ids],
+            "orphan_doors": list(room.orphan_doors), "flags": flags,
         },
     }
 
