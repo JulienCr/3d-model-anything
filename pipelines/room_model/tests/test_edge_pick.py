@@ -69,14 +69,16 @@ def test_prepare_letters_the_candidate_lines_of_each_edge(ctx):
     assert set(door["sides"]) == {"left", "right", "top"}  # a door's bottom is the floor, never asked
     letters = [c["letter"] for side in door["sides"].values() for c in side]
     assert len(letters) == len(set(letters)) >= len(door["sides"])
-    for side in door["sides"].values():
-        assert {"mask", "model"} <= {o for c in side for o in c["origin"]}
-        assert len(side) <= edge_pick.MAX_LETTERS
+    for side, entries in door["sides"].items():
+        assert {"mask", "model"} <= {o for c in entries for o in c["origin"]}
+        positions = sorted(c["pos"] for c in entries)
+        assert len(entries) <= edge_pick.MAX_LETTERS and all(b - a >= edge_pick.PICK_RESOLUTION for a, b in zip(positions, positions[1:]))
+        with Image.open(pending / door["images"][side]) as im:  # one image per edge, two views side by side
+            assert max(im.size) <= edge_pick.SHEET_SIDE
     assert set(cands["Window_1"]["sides"]) == {"left", "right", "bottom", "top"}
-    with Image.open(pending / door["sheet"]) as im:
-        assert max(im.size) <= edge_pick.SHEET_SIDE
     prompt = (pending / "prompt.md").read_text(encoding="utf-8")
-    assert "Door_1" in prompt and "vantail" in prompt and all(f"`{x}`" in prompt for x in letters)
+    assert "vantail" in prompt and all(f"`{x}`" in prompt for x in letters)
+    assert all(f"`{name}`" in prompt for name in door["images"].values()) and "outer edge of the left leaf" in prompt
 
 
 def test_picked_edges_become_anchored_photo_edges(ctx, fake):

@@ -24,26 +24,28 @@ from room_model.photo_geom import LOOSE_TOLERANCE, load_posed_photos
 
 SCHEMA = "room-model/edge-pick-1"
 PICK_STATUSES = ("anchored", "candidates")
-MAX_LETTERS = 6  # per edge: more lines crowd a strip and a model tells them apart less reliably
+MAX_LETTERS = 5  # per edge: more lines crowd a strip and a model tells them apart less reliably
+PICK_RESOLUTION = 0.01  # m; lines closer than this are one choice: below what a pick on a zoomed photo can separate
 SAME_LINE = anchor.SAME_LINE
 UNSEEN_SIGMA = 0.10  # m; a line no view could snap to keeps its position unconfirmed, far above the apply gates
 SHEET_SIDE = vision.SHEET_SIDE
-OVERVIEW_H = 1000  # px of the element overview on a sheet
-STRIP, ZOOM_LEN, ZOOM = 0.12, 0.40, 2  # zoom strips: m across the edge each side, m along it, upscaling
+PANEL_ACROSS, PANEL_ALONG = 560, 420  # px of one view's panel across and along the edge
+PAD = 0.03  # m shown beyond the outermost lines: the context a model needs to tell a leaf from its frame
+LABEL_BAND = 70  # px outside the photo where the letters sit, joined to their line by a leader
+VIEWS_PER_IMAGE = 2
 COLOURS = {"left": (230, 40, 40), "right": (30, 120, 255), "bottom": (240, 190, 0), "top": (20, 190, 70)}
-COLOUR_NAMES = {"left": "red", "right": "blue", "bottom": "yellow", "top": "green"}
 QUESTIONS = {
-    "door": {"left": "the left edge of the door leaf (vantail), the moving panel itself, not the frame (huisserie) nor the casing (chambranle); for a double door, the outer edge of the left leaf",
-             "right": "the right edge of the door leaf (vantail), same rule; for a double door, the outer edge of the right leaf",
-             "top": "the top edge of the door leaf (vantail), not the frame head nor the casing"},
-    "window": {"left": "the outer left edge of the opening sash (ouvrant), both sashes together: not the fixed frame (dormant), the casing or a curtain",
-               "right": "the outer right edge of the opening sash (ouvrant), both sashes together",
-               "bottom": "the bottom edge of the sash (ouvrant)", "top": "the top edge of the sash (ouvrant)"},
-    "niche": {"left": "the left jamb face (tableau) where the recess starts, not a casing or frame around it",
-              "right": "the right jamb face (tableau) where the recess starts",
-              "bottom": "the top of the recess sill (appui)", "top": "the underside of the recess head (linteau)"},
-    "opening": {"left": "the left jamb face (tableau) of the passage, not a casing around it",
-                "right": "the right jamb face (tableau) of the passage", "top": "the underside of the lintel (linteau)",
+    "door": {"left": "the outer edge of the left leaf (vantail): the moving panel itself, not the frame (huisserie) nor the casing (chambranle)",
+             "right": "the outer edge of the right leaf (vantail): the moving panel itself, not the frame nor the casing",
+             "top": "the top edge of the leaf (vantail), not the frame head nor the casing"},
+    "window": {"left": "the outer edge of the left opening sash (ouvrant), not the fixed frame (dormant), the casing or a curtain",
+               "right": "the outer edge of the right opening sash (ouvrant), not the fixed frame, the casing or a curtain",
+               "bottom": "the bottom edge of the opening sash (ouvrant)", "top": "the top edge of the opening sash (ouvrant)"},
+    "niche": {"left": "the inner face of the left jamb (tableau) of the niche, where the recess starts, not a frame around it",
+              "right": "the inner face of the right jamb (tableau) of the niche, where the recess starts",
+              "bottom": "the top of the niche sill (appui)", "top": "the underside of the niche head (linteau)"},
+    "opening": {"left": "the inner face of the left jamb (tableau) of the passage, not a casing around it",
+                "right": "the inner face of the right jamb (tableau) of the passage", "top": "the underside of the lintel (linteau)",
                 "bottom": "the floor of the passage"},
 }
 
@@ -58,7 +60,8 @@ def _footprint(pos: float, delta: float, cams) -> np.ndarray:
 
 
 def _distinct(lines: list[dict], cams) -> list[dict]:
-    """One entry per line (footprints within SAME_LINE in every view, origins merged), mask and scan lines first."""
+    """One entry per line (footprints within SAME_LINE in every view, then positions within PICK_RESOLUTION; origins
+    merged), at most MAX_LETTERS, mask and scan lines kept first."""
     out = []
     for line in lines:
         at = _footprint(line["pos"], line["delta"], cams)
@@ -67,6 +70,13 @@ def _distinct(lines: list[dict], cams) -> list[dict]:
             out.append({**line, "at": at})
         else:
             same["origin"] += [o for o in line["origin"] if o not in same["origin"]]
+    merged = []
+    for line in sorted(out, key=lambda ln: ln["pos"]):
+        if merged and line["pos"] - merged[-1]["pos"] < PICK_RESOLUTION:
+            merged[-1]["origin"] += [o for o in line["origin"] if o not in merged[-1]["origin"]]
+        else:
+            merged.append(line)
+    out = merged
     keep = [ln for ln in out if {"mask", "model"} & set(ln["origin"])]
     keep += [ln for ln in out if ln not in keep][:MAX_LETTERS - len(keep)]
     return sorted(keep, key=lambda ln: ln["pos"])
@@ -123,60 +133,62 @@ def _element(arch: dict, el: dict, item: dict, photos: list) -> dict | None:
                      for line in drawn]
         out[side] = [{"letter": next(letters), "shown": c["pos"], **{k: v for k, v in c.items() if k != "at"}}
                      for c in _distinct(confirmed, cams)]
-    return {"kind": el["kind"], "floor_based": floor_based, "sides": out, "sheet": f"{el['id']}.jpg",
-            "_draw": (views[int(np.argmax([anchor._rect_pixels(o, rect) for o in faces]))], frame, box, reference)}
+    return {"kind": el["kind"], "floor_based": floor_based, "sides": out,
+            "images": {side: f"{el['id']}-{side}.jpg" for side in out}, "_draw": (views, frame, rect, reference)}
 
 
 # --- sheets --------------------------------------------------------------------------------------------------------
 
-def _draw_lines(image: Image.Image, o: ortho.Ortho, sides: dict, scale: float, offset=(0.0, 0.0)) -> None:
-    draw, font = ImageDraw.Draw(image), vision._font(max(14, int(9 * scale)))
-    for side, entries in sides.items():
-        for k, c in enumerate(entries):
-            if anchor._axis(side) == "s":
-                x = (float(o.col(c["shown"])) + 0.5 - offset[0]) * scale
-                draw.line([(x, 0), (x, image.height)], fill=COLOURS[side], width=2)
-                at = (x + 3, 6 + (k % 3) * (font.size + 4))
-            else:
-                y = (float(o.row(c["shown"])) + 0.5 - offset[1]) * scale
-                draw.line([(0, y), (image.width, y)], fill=COLOURS[side], width=2)
-                at = (6 + (k % 3) * (2 * font.size), y + 3)
-            box = draw.textbbox(at, c["letter"], font=font)
-            draw.rectangle(box, fill=(0, 0, 0))
-            draw.text(at, c["letter"], font=font, fill=COLOURS[side])
-
-
-def _sheet(path: Path, ident: str, entry: dict) -> None:
-    """Overview of the element on its rectified face with every candidate line, and a zoom strip per side."""
-    (photo, image), frame, box, reference = entry["_draw"]
-    o = ortho.ortho(photo, image, frame, box, reference)
+def _panel(photo, image, frame, side: str, entries: list[dict], model: float, rect, reference: float):
+    """(panel image, valid share): the edge zoomed so that its candidate band fills PANEL_ACROSS px, lines drawn,
+    the scan edge dashed, letters in a LABEL_BAND outside the photo with leader lines."""
+    vertical = anchor._axis(side) == "s"
+    shown = [c["shown"] for c in entries]
+    lo, hi = min(shown + [model]) - PAD, max(shown + [model]) + PAD
+    res = (hi - lo) / PANEL_ACROSS
+    along = (anchor._bands(rect)["s" if vertical else "y"])
+    mid, half = (along[0] + along[1]) / 2, PANEL_ALONG * res / 2
+    box = (lo, hi, mid - half, mid + half) if vertical else (mid - half, mid + half, lo, hi)
+    o = ortho.ortho(photo, image, frame, box, reference, res)
     rgb = Image.fromarray(o.rgb)
-    scale = OVERVIEW_H / rgb.height
-    overview = rgb.resize((max(1, int(rgb.width * scale)), OVERVIEW_H), Image.BILINEAR)
-    _draw_lines(overview, o, entry["sides"], scale)
-    strips = []
-    for side, entries in entry["sides"].items():
-        mid = float(np.median([c["shown"] for c in entries]))
-        s0, s1, y0, y1 = box
-        if anchor._axis(side) == "s":
-            ym = (y0 + y1) / 2
-            crop = (o.col(mid - STRIP), o.row(ym + ZOOM_LEN / 2), o.col(mid + STRIP), o.row(ym - ZOOM_LEN / 2))
+    w, h = rgb.size
+    panel = Image.new("RGB", (w, h + LABEL_BAND) if vertical else (w + LABEL_BAND, h), (25, 25, 30))
+    panel.paste(rgb, (0, LABEL_BAND) if vertical else (LABEL_BAND, 0))
+    draw, font = ImageDraw.Draw(panel), vision._font(26)
+    at = lambda v: float(o.col(v)) + 0.5 if vertical else float(o.row(v)) + 0.5  # noqa: E731
+    m = at(model)
+    for k in range(0, int(h if vertical else w), 16):  # the scan edge, dashed, as context
+        seg = [(m, LABEL_BAND + k), (m, LABEL_BAND + k + 8)] if vertical else [(LABEL_BAND + k, m), (LABEL_BAND + k + 8, m)]
+        draw.line(seg, fill=(255, 255, 255), width=2)
+    order = sorted(entries, key=lambda c: c["shown"])
+    for n, c in enumerate(order):
+        x = at(c["shown"])
+        slot = (n + 0.5) * (w if vertical else h) / len(order)  # letters spread evenly, in line order
+        if vertical:
+            draw.line([(x, LABEL_BAND), (x, LABEL_BAND + h)], fill=COLOURS[side], width=2)
+            draw.line([(slot, 40), (x, LABEL_BAND)], fill=COLOURS[side], width=1)
+            draw.text((slot, 22), c["letter"], font=font, fill=COLOURS[side], anchor="mm")
         else:
-            sm = (s0 + s1) / 2
-            crop = (o.col(sm - ZOOM_LEN / 2), o.row(mid + STRIP), o.col(sm + ZOOM_LEN / 2), o.row(mid - STRIP))
-        crop = tuple(int(round(v)) for v in crop)
-        strip = rgb.crop(crop)
-        strip = strip.resize((strip.width * ZOOM, strip.height * ZOOM), Image.BILINEAR)
-        _draw_lines(strip, o, {side: entries}, ZOOM, offset=(crop[0], crop[1]))
-        strips.append(strip)
-    width = overview.width + sum(s.width for s in strips) + vision.GAP * (len(strips) + 1)
-    height = vision.HEADER + max([overview.height, *(s.height for s in strips)])
-    sheet = Image.new("RGB", (width, height), (40, 40, 48))
-    ImageDraw.Draw(sheet).text((10, 8), f"{ident}  ({entry['kind']})", font=vision._font(26), fill=(255, 255, 255))
-    x = 0
-    for part in (overview, *strips):
-        sheet.paste(part, (x, vision.HEADER))
-        x += part.width + vision.GAP
+            draw.line([(LABEL_BAND, x), (LABEL_BAND + w, x)], fill=COLOURS[side], width=2)
+            draw.line([(46, slot), (LABEL_BAND, x)], fill=COLOURS[side], width=1)
+            draw.text((24, slot), c["letter"], font=font, fill=COLOURS[side], anchor="mm")
+    return panel, float(o.valid.mean())
+
+
+def _edge_image(path: Path, ident: str, side: str, entry: dict) -> None:
+    """One image per edge: the VIEWS_PER_IMAGE views that show most of the edge, side by side."""
+    views, frame, rect, reference = entry["_draw"]
+    model = dict(zip(SIDES, rect))[side]
+    panels = [_panel(p, image, frame, side, entry["sides"][side], model, rect, reference) for p, image in views]
+    best = [pn for pn, share in sorted(panels, key=lambda t: -t[1])[:VIEWS_PER_IMAGE] if share > 0]
+    best = best or [panels[0][0]]
+    width = sum(pn.width for pn in best) + vision.GAP * (len(best) + 1)
+    sheet = Image.new("RGB", (width, vision.HEADER + max(pn.height for pn in best)), (40, 40, 48))
+    ImageDraw.Draw(sheet).text((10, 8), f"{ident}: {side} edge", font=vision._font(26), fill=(255, 255, 255))
+    x = vision.GAP
+    for pn in best:
+        sheet.paste(pn, (x, vision.HEADER))
+        x += pn.width + vision.GAP
     if max(sheet.size) > SHEET_SIDE:
         f = SHEET_SIDE / max(sheet.size)
         sheet = sheet.resize((int(sheet.width * f), int(sheet.height * f)), Image.BILINEAR)
@@ -185,20 +197,19 @@ def _sheet(path: Path, ident: str, entry: dict) -> None:
 
 def _prompt(candidates: dict) -> str:
     lines = ["# Picking the edges of doors, windows, niches and openings", "",
-             "Each JPEG in this folder is one element, to open with the Read tool. On the left, a straightened view of the "
-             "element on its wall (vertical lines are vertical, distances are true); on the right, zoomed strips of each edge. "
-             "Coloured lines with a letter are candidate positions: "
-             + ", ".join(f"{COLOUR_NAMES[s]} = {s} edge" for s in SIDES) + ".",
-             "", "For every element and every edge listed below, answer the letter of the line lying exactly on the edge "
-             "described, or null when no line does. Never guess: null is a good answer.", "", "## Elements", ""]
+             "Each JPEG in this folder shows ONE edge of one element, to open with the Read tool. The photo is "
+             "straightened onto the wall (vertical lines are vertical) and zoomed on the edge; two panels are the same "
+             "edge seen from two photos. Coloured lines are candidate positions, each joined by a thin leader to its "
+             "letter outside the photo. The dashed white line is where the scan put the edge: context only, not a choice.",
+             "", "For every image below, answer the letter of the line lying exactly on the edge described, or null "
+             "when no line does. Never guess: null is a good answer.", "", "## Images", ""]
     for ident, entry in candidates.items():
-        lines.append(f"### {ident} ({entry['kind']}), sheet `{entry['sheet']}`")
         for side, entries in entry["sides"].items():
             letters = ", ".join(f"`{c['letter']}`" for c in entries)
-            lines.append(f"- {side}: {QUESTIONS[entry['kind']][side]}. Letters: {letters}.")
-        lines.append("")
+            lines.append(f"- `{entry['images'][side]}` ({ident}, {side}): {QUESTIONS[entry['kind']][side]}. Letters: {letters}.")
     example = {"elements": [{"id": "Door_1", "picks": {"left": "B", "right": None, "top": "H"}}]}
-    lines += ["## Answer", "", "Only one JSON object, nothing else, for example:", "", json.dumps(example)]
+    lines += ["", "## Answer", "", "Only one JSON object, one entry per element, `picks` keyed by edge (left, right, "
+              "bottom, top), for example:", "", json.dumps(example)]
     return "\n".join(lines) + "\n"
 
 
@@ -217,7 +228,8 @@ def prepare(ctx: StageContext) -> Path:
         if item.get("status") not in PICK_STATUSES or el is None or el["kind"] != item.get("kind") or not seen:
             continue
         entry = _element(arch, el, item, seen)
-        _sheet(pending / entry["sheet"], ident, entry)
+        for side in entry["sides"]:
+            _edge_image(pending / entry["images"][side], ident, side, entry)
         candidates[ident] = {k: v for k, v in entry.items() if k != "_draw"}
     (pending / "candidates.json").write_text(json.dumps(candidates, indent=2), encoding="utf-8")
     (pending / "prompt.md").write_text(_prompt(candidates), encoding="utf-8")
