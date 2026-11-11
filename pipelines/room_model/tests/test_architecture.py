@@ -351,6 +351,20 @@ def test_a_parameter_whose_corners_are_missing_keeps_the_scan_value(env):
     assert "llm_corrected" in _element(arch, "Window_1")["flags"]  # every corner used has two agreeing crops
 
 
+@pytest.mark.parametrize("given, applied", [({0, 1}, {"width", "center_s", "height"}), ({0, 2}, {"width", "center_s", "height"}), ({0, 3}, {"height"})])
+def test_a_door_reaches_the_floor_so_a_top_corner_gives_its_height(env, given, applied):
+    scan = {n: _param(env.arch, "Door_1", n)["value"] for n in ("width", "height", "center_s", "sill")}
+    rect = [[x, y + 0.03, z] for x, y, z in _opening_rect(env.arch, "Door_1", widen=0.04)]  # 4 cm wider, 3 cm higher
+    arch = env.merge(_answers(env, elements=[{"id": "Door_1", "corners": _keep(_corners(env, ["Door_1-a"], rect), given)}]))
+    expected = {"width": scan["width"] + 0.04, "height": scan["height"] + 0.03, "center_s": scan["center_s"]}
+    for name in ("width", "height", "center_s"):
+        value = _param(arch, "Door_1", name)["value"]
+        assert value == pytest.approx(expected[name] if name in applied else scan[name], abs=0.002), name
+    assert _param(arch, "Door_1", "sill") == _param(env.arch, "Door_1", "sill")
+    refused = [n["reason"] for n in _vision(arch)["not_applied"] if n["id"] == "Door_1"]
+    assert len(refused) == len({"width", "center_s"} - applied) and ("largeur" in " ".join(refused)) is ("width" not in applied)
+
+
 def test_corner_order_in_the_answer_does_not_decide_the_side(env):
     rect = _opening_rect(env.arch, "Door_1", widen=0.04)
     reversed_order = [rect[1], rect[0], rect[3], rect[2]]  # entries in the wrong order: left and right swapped

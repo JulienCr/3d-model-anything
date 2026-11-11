@@ -148,7 +148,7 @@ def test_element_crops_are_frontal_and_large_else_the_overview_else_nothing(tmp_
         return
     assert list(shown) == ["Window_1-a"] and shown["Window_1-a"]["kind"] == "element" and entry["sheet"] == "Window_1.jpg"
     assert (pending / "Window_1.jpg").exists() and shown["Window_1-a"].get("fallback") == entry.get("fallback")
-    assert entry["covered_corners"] == [True] * 4 and shown["Window_1-a"]["visible_corners"] == [True] * 4
+    assert shown["Window_1-a"]["visible_corners"] == [True] * 4 and "covered_corners" not in entry
     if expected == "element":
         assert "fallback" not in entry
         return
@@ -302,7 +302,7 @@ def test_prompt_states_the_hinge_convention(pending):
         assert word in text
     assert "{{" not in text and all(t in text for t in catalogue.CATALOGUE["door"]) and all(t in text for t in catalogue.CATALOGUE["window"])
     assert "Door_1.jpg" in text
-    assert "`null`" in text and "coin" in text  # corners hidden or outside the crop, explained in French
+    assert "`null`" in text and "left and a right corner" in text and "français" not in text  # hidden corners, explained in English
 
 
 def test_schema_enums_match_the_catalogue(pending):

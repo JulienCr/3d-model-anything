@@ -3,7 +3,8 @@
 `prepare` writes vision/pending/ (sheets, elements.json, crops.json, prompt.md, schema.json); `run_llm` runs the
 model there and validates what comes back item by item; `run` writes vision/answers.json and vision/rejected.json.
 crops.json maps a crop id to its photo, its box in upright pixels, `up_turns` and its size: a crop pixel (u, v) is
-the upright pixel box[:2] + (u, v) * box_size / size, then `photo_geom.to_sensor`.
+the upright pixel box[:2] + (u, v) * box_size / size, then `photo_geom.to_sensor`. An element crop also lists
+`visible_corners`, in the answer order (top-left, top-right, bottom-right, bottom-left): for the pipeline, not the model.
 """
 from __future__ import annotations
 
@@ -307,7 +308,6 @@ def _elements_doc(arch: dict, typed: list[dict], crops: dict[str, list[_Crop]], 
         "elements": [{"id": e["id"], "kind": e["kind"], "host": e.get("host"), "face": e.get("face"), "flags": e.get("flags", []), **_scan_summary(arch, e),
                       "sheet": f"{e['id']}.jpg" if e["id"] in shown else None,
                       **({"fallback": "overview"} if any(c.fallback for c in crops[e["id"]]) else {}),
-                      "covered_corners": [any(c.corners[i] for c in crops[e["id"]] if c.corners) for i in (3, 2, 1, 0)],  # TL, TR, BR, BL
                       "crops": [{"id": c.id, "size": info[c.id]["size"]} for c in crops[e["id"]] if c.id in info]} for e in typed],
         "faces": [{"host": h["id"], "face": f, "kind": h["kind"], "length_cm": round(float(np.linalg.norm(np.subtract(h["end"], h["start"]))) * 100),
                    "crop": c.id if c and c.id in info else None, "sheet": sheet_of.get(c.id) if c else None} for h, f, c in faces],

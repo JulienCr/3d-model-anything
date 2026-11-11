@@ -36,7 +36,15 @@ MIN_BAND_SEEN = 0.5
 # Each corner is cast on the host plane on its own, so two visible corners per crop are enough and other crops add the rest.
 MIN_CORNERS = 2
 CORNER_RADIUS = 0.02  # m; a corner is tested on its grid point and four samples this far around it
-MIN_CORNER_SEEN = 2  # of the 5 samples: a casing or a leaf edge can hide most of a 2 cm disc, 0 or 1 left means a hidden corner
+# A casing or a leaf edge is 5 cm or more wide: it can cover most of a disc 4 cm across while the corner itself shows.
+# Two samples left of the five still means part of the disc, so the corner, is seen; with one or none it is hidden.
+MIN_CORNER_SEEN = 2
+# Per corner, the camera must face the host plane too: a close camera can face the centre of a large element at 50 degrees
+# and its far corner at 80, where the same 1/cos argument as FACING_COS makes a click unreliable.
+# A rectangle whose opposite projected edges differ by more than 2 to 1 is foreshortened or too close, whatever its size.
+MIN_PERSPECTIVE = 0.5
+# A corner closer to the image border than 5 % of the long side is at risk of being cut by the crop or by a pose error.
+CORNER_BORDER = 0.05
 MIN_SIDE_PX = 120  # shorter side of the projected rectangle: below it a corner click is within a few percent of the size
 ROTATE = {1: Image.Transpose.ROTATE_90, 2: Image.Transpose.ROTATE_180, 3: Image.Transpose.ROTATE_270}
 
@@ -335,10 +343,11 @@ def rect_views(photos: list[PosedPhoto], rect: np.ndarray, mesh: DepthMaps | tup
 
     Eligible: the camera faces the rectangle (cosine of `normal`, the face normal towards the viewing side, at least
     FACING_COS; |cos| when `two_sided`, as for a hole through its host, or when no normal is given), the projected
-    rectangle is at least `min_side` px on its shorter side, at least MIN_CORNERS corners are visible (MIN_CORNER_SEEN
-    of their samples) and MIN_BAND_SEEN of the frame band is. Visible = depth test (LOOSE_TOLERANCE: casings stand out
-    of the wall plane, an occluder is a wall thickness or more) and furniture box test. Ranked by visible corners, then
-    seen share x area x cos; the k kept views cover as many corners as possible (`cover`).
+rectangle is at least `min_side` px on its shorter side with opposite edges within MIN_PERSPECTIVE of each other,
+    at least MIN_CORNERS corners are visible and MIN_BAND_SEEN of the frame band is. A visible corner has MIN_CORNER_SEEN
+    samples passing the depth test (LOOSE_TOLERANCE: casings stand out of the wall plane, an occluder is a wall
+    thickness or more) and the furniture box test, FACING_COS from the camera, and CORNER_BORDER inside the image.
+    Ranked by visible corners, then seen share x area x cos; the k kept views cover the most corners (`cover`).
     """
     maps = mesh if isinstance(mesh, DepthMaps) else DepthMaps(*mesh)
     rect = np.asarray(rect, float)
@@ -353,14 +362,22 @@ def rect_views(photos: list[PosedPhoto], rect: np.ndarray, mesh: DepthMaps | tup
         to_camera = photo.centre - centre
         cos = float(normal @ to_camera) / max(float(np.linalg.norm(to_camera)), 1e-9)
         cos = abs(cos) if two_sided else cos
-        wide, tall = ((np.linalg.norm(uv[a] - uv[b]) + np.linalg.norm(uv[c] - uv[d])) / 2 for a, b, c, d in ((1, 0, 2, 3), (3, 0, 2, 1)))
+        pairs = [(np.linalg.norm(uv[a] - uv[b]), np.linalg.norm(uv[c] - uv[d])) for a, b, c, d in ((1, 0, 2, 3), (3, 0, 2, 1))]
+        wide, tall = ((x + y) / 2 for x, y in pairs)
         if not (depth > MIN_DEPTH).all() or cos < FACING_COS or min(wide, tall) < min_side:
             continue
+        if min(min(x, y) / max(x, y, 1e-9) for x, y in pairs) < MIN_PERSPECTIVE:
+            continue
+        to_corners = photo.centre - rect
+        incidence = (to_corners @ normal) / np.linalg.norm(to_corners, axis=1)
+        incidence = np.abs(incidence) if two_sided else incidence
+        margin, (w, h) = CORNER_BORDER * max(photo.size), photo.size
+        inside = (uv >= margin).all(1) & (uv[:, 0] <= w - margin) & (uv[:, 1] <= h - margin)
         seen = maps.visible(photo, points, tolerance)
         if boxes:
             seen &= ~occluded_mask(photo.centre, points, boxes)
         band_seen, corner_seen = seen[:len(band)], seen[len(band):].reshape(4, 5)
-        visible = tuple(bool(n >= MIN_CORNER_SEEN) for n in corner_seen.sum(1))
+        visible = tuple(bool(n >= MIN_CORNER_SEEN and i >= FACING_COS and e) for n, i, e in zip(corner_seen.sum(1), incidence, inside))
         if sum(visible) < MIN_CORNERS or band_seen.mean() < MIN_BAND_SEEN - 1e-9:
             continue
         area = 0.5 * abs(float(np.dot(uv[:, 0], np.roll(uv[:, 1], -1)) - np.dot(uv[:, 1], np.roll(uv[:, 0], -1))))

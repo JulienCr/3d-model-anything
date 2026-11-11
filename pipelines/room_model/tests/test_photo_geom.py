@@ -302,3 +302,49 @@ def test_best_views_drop_the_photos_that_do_not_face_the_span(tmp_path):
 
 def _names_of(photos):
     return [p.name for p in photos]
+
+
+def test_a_corner_needs_two_of_its_five_samples(tmp_path):
+    wall, camera = _plane(5.0, 4.0, 3.0), _seen_from(0, 3.0, tmp_path)
+    samples = photo_geom.rect_corner_samples(RECT)[2]  # the top-right corner (RECT is ordered BL, BR, TR, TL)
+    k = 2.93 / 3.0  # a thin box 7 cm from the wall: rays from z = 2 cross it at 0.977 of their wall offset
+
+    def flat(x0, y0):  # hides the wall from (x0, y0) up and to the right
+        return photo_geom.RoomBox(np.array([k * (x0 + 0.6) / 2, k * (y0 + 1.0) / 2, 4.93]), np.eye(3), np.array([k * (0.6 - x0) / 2 - 0.03, k * (1.0 - y0) / 2 - 0.03, 0.0]))
+
+    three_hidden, four_hidden = flat(0.46, 0.36), flat(0.46, 0.34)  # the samples are at x 0.45 0.47 0.49 and y 0.35 0.37 0.39
+    assert photo_geom.occluded_mask(camera.centre, samples, [three_hidden]).sum() == 3
+    assert photo_geom.occluded_mask(camera.centre, samples, [four_hidden]).sum() == 4
+    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=[three_hidden])[0].corners == (True, True, True, True)
+    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=[four_hidden])[0].corners == (True, True, False, True)
+
+
+def _corner_cos(camera):
+    to = camera.centre - RECT
+    return (to @ TOWARDS_VIEWER) / np.linalg.norm(to, axis=1)
+
+
+def test_a_far_corner_seen_at_a_grazing_angle_is_not_counted(tmp_path):
+    wall = _plane(5.0, 4.0, 3.0)
+    close = _camera("close", np.array([1.2, 0.0, 4.1]), CENTRE, tmp_path, f=400.0)  # 60 degrees at the centre, 63 at the far corners
+    to_centre = close.centre - CENTRE
+    assert to_centre @ TOWARDS_VIEWER / np.linalg.norm(to_centre) == pytest.approx(0.6, abs=0.01)
+    assert _corner_cos(close)[[0, 3]].max() < 0.5 < _corner_cos(close)[[1, 2]].min()
+    assert photo_geom.rect_views([close], RECT, wall, TOWARDS_VIEWER)[0].corners == (False, True, True, False)  # the near corners only
+
+
+def test_a_view_with_strong_perspective_is_dropped(tmp_path):
+    wall = _plane(5.0, 4.0, 3.0)
+    close = _camera("close", np.array([0.9, 0.0, 4.325]), CENTRE, tmp_path, f=400.0)  # the near edge is twice the far one
+    uv, _ = photo_geom.project(close, RECT)
+    near, far = np.linalg.norm(uv[2] - uv[1]), np.linalg.norm(uv[3] - uv[0])
+    assert min(near, far) / max(near, far) < 0.5 and photo_geom.project(close, RECT)[1].min() > 0.3
+    assert photo_geom.rect_views([close], RECT, wall, TOWARDS_VIEWER) == []
+
+
+def test_a_corner_near_the_image_border_is_not_counted(tmp_path):
+    wall = _plane(5.0, 4.0, 3.0)
+    inside = _camera("inside", CENTRE + np.array([0.0, 0.0, -3.0]), CENTRE + np.array([0.3, 0.0, 0.0]), tmp_path)  # corners at 591 px of 640
+    edge = _camera("edge", CENTRE + np.array([0.0, 0.0, -3.0]), CENTRE + np.array([0.4, 0.0, 0.0]), tmp_path)  # at 627 px, 2 % from the border
+    assert photo_geom.rect_views([inside], RECT, wall, TOWARDS_VIEWER)[0].corners == (True,) * 4
+    assert photo_geom.rect_views([edge], RECT, wall, TOWARDS_VIEWER)[0].corners == (False, True, True, False)
