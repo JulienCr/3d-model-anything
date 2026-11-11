@@ -24,14 +24,18 @@ from scipy import ndimage
 from room_model import raster
 from room_model.capture import colmajor, load_mesh_ply, load_roomplan, mesh_path
 from room_model.context import NoPhotos, StageContext, output_path, require
-from room_model.photo_geom import PosedPhoto, RoomBox, load_posed_photos, occluded_mask, project, room_boxes
+from room_model.photo_geom import (DEPTH_TOLERANCE, EDGE_MARGIN, MIN_DEPTH, PosedPhoto, RoomBox, load_posed_photos, occluded_mask,
+                                   project, room_boxes)
 
 TEXEL = 0.02  # m per texel: finer than the ~1 cm LiDAR noise would justify, coarse enough to stay small
-DEPTH_TOLERANCE = 0.03  # m between a texel and the nearest mesh surface along its ray (LiDAR noise plus plane fit error)
-BOX_MARGIN = 0.05  # m RoomPlan boxes are grown by: their sigma is of that order
-DEPTH_SIDE = 640  # px on the long side of the depth maps: about 8 mm per pixel at 3 m, finer than a texel
-EDGE_MARGIN = 0.02  # fraction of the image border left unused (vignetting, stabilisation crop)
-MIN_DEPTH = 0.3  # m
+# Depth test: the mesh must lie within `Surface.tolerance` of the plane. Nearer is an occluder, farther a hole in the
+# surface (opening, recess): both are rejected. DEPTH_TOLERANCE (photo_geom, 3 cm) is the floor, for a perfectly fitted plane.
+LIDAR_NOISE = 0.01  # m, 1 sigma of the ARKit LiDAR mesh against a flat wall at room range
+TOLERANCE_K = 3.0  # sigmas: a texel on the right plane then passes 99.7% of the time
+TOLERANCE_CAP = 0.10  # m: furniture and radiators stand 10 cm or more proud of a wall; frames, casings and skirtings (< 10 cm) belong to its surface
+TEX_BOX_MARGIN = 0.05  # m RoomPlan boxes are grown by: their sigma is of that order
+TEX_DEPTH_SIDE = 640  # px on the long side of the depth maps: about 8 mm per pixel at 3 m, finer than a texel
+SMALL_HOLE = 9  # texels: an isolated hole this small is speckle (3 x 3 texels = 6 cm), closed from its neighbours instead of feathered
 GRAZING_COS = math.cos(math.radians(75.0))  # beyond 75 degrees a texel is stretched 4 times along the view: too coarse to trust
 POOL = 6  # best candidates kept per texel; the 3 best colour it, all of them serve to match the exposures
 BEST = 3
@@ -44,7 +48,7 @@ FILL_TILE_M = 1.0  # m covered by one fill tile
 DEFAULT_FILL = {"wall": "polyhaven:white_plaster_02", "ceiling": "polyhaven:white_plaster_02", "floor": "polyhaven:oak_veneer_01"}
 FETCH_SCRIPT = Path(__file__).resolve().parents[3] / ".agents" / "skills" / "scan-to-threejs" / "scripts" / "fetch_textures.py"
 BLENDER_DIR = Path(__file__).resolve().parents[1] / "blender"
-FETCH_TIMEOUT = 300  # s
+FETCH_TIMEOUT = 30  # s per asset: three small maps; a slower link means no usable network
 
 
 @dataclass
@@ -59,6 +63,12 @@ class Surface:
     normal: np.ndarray  # towards the side the surface is seen from
     size: tuple[int, int]  # (nu, nv) texels
     mask: np.ndarray | None = None  # (nv, nu) bool: texels inside the outline; all of them when None
+    sigma: float = 0.0  # m, 1 sigma of the fitted plane position over the surface (offset or level, plus the tilt over half its length)
+
+    @property
+    def tolerance(self) -> float:
+        """Depth-test tolerance in m: TOLERANCE_K sigmas of the plane error and the LiDAR noise, between DEPTH_TOLERANCE and TOLERANCE_CAP."""
+        return float(np.clip(TOLERANCE_K * math.hypot(self.sigma, LIDAR_NOISE), DEPTH_TOLERANCE, TOLERANCE_CAP))
 
     @property
     def key(self) -> tuple[str, str]:
@@ -83,24 +93,28 @@ def _arch_modules():
     return frame, plan
 
 
-def _upright(p0, p1, y0: float, y1: float, normal, element: str, face: str) -> Surface:
+def _upright(p0, p1, y0: float, y1: float, normal, element: str, face: str, sigma: float = 0.0) -> Surface:
     """A vertical surface along the plan segment p0 -> p1 between heights y0 and y1; u runs start to end, v up."""
     length = math.dist(p0, p1)
     u = np.array([(p1[0] - p0[0]) / length, 0.0, (p1[1] - p0[1]) / length])
     perpendicular = np.array([-u[2], 0.0, u[0]])  # the face is the segment itself, which a snapped partition end can turn away from its azimuth
     side = perpendicular if perpendicular @ np.array([normal[0], 0.0, normal[1]]) > 0 else -perpendicular
     return Surface(element, face, "wall", np.array([p0[0], y0, p0[1]]), u, np.array([0.0, 1.0, 0.0]), side,
-                   (math.ceil(length / TEXEL - 1e-9), math.ceil((y1 - y0) / TEXEL - 1e-9)))
+                   (math.ceil(length / TEXEL - 1e-9), math.ceil((y1 - y0) / TEXEL - 1e-9)), sigma=sigma)
 
 
-def _horizontal(element: str, kind: str, rings: list, level: float, normal_y: float) -> Surface:
+def _horizontal(element: str, kind: str, rings: list, level: float, normal_y: float, sigma: float = 0.0) -> Surface:
     """A floor or ceiling over the union of (exterior, holes) polygons; u is x, v is z."""
     shape = shapely.union_all([shapely.Polygon(ext, holes) for ext, holes in rings])
     x0, z0, x1, z1 = shape.bounds
     nu, nv = math.ceil((x1 - x0) / TEXEL - 1e-9), math.ceil((z1 - z0) / TEXEL - 1e-9)
     xs, zs = np.meshgrid(x0 + (np.arange(nu) + 0.5) * TEXEL, z0 + (np.arange(nv) + 0.5) * TEXEL)
     return Surface(element, "A", kind, np.array([x0, level, z0]), np.array([1.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0]),
-                   np.array([0.0, normal_y, 0.0]), (nu, nv), shapely.contains_xy(shape, xs, zs))
+                   np.array([0.0, normal_y, 0.0]), (nu, nv), shapely.contains_xy(shape, xs, zs), sigma)
+
+
+def _sigma(arch: dict, pid: str) -> float:
+    return float(arch["parameters"][pid].get("sigma") or 0.0)
 
 
 def surfaces_of(arch: dict) -> list[Surface]:
@@ -119,15 +133,18 @@ def surfaces_of(arch: dict) -> list[Surface]:
         if kind in ("wall", "partition"):
             geom = frame.wall_geometry(arch, el)
             n, top = geom["n"], geom["top"]
+            sigma = math.hypot(_sigma(arch, el["params"]["offset"]), _sigma(arch, el["params"]["azimuth"]) * geom["length"] / 2)
             quad = walls[el["id"]] if kind == "wall" else partitions[el["id"]]["face"]
-            out.append(_upright(quad[0], quad[1], y_floor, top, n, el["id"], "A"))
+            out.append(_upright(quad[0], quad[1], y_floor, top, n, el["id"], "A", sigma))
             if kind == "partition":
-                out.append(_upright(quad[3], quad[2], y_floor, top, (-n[0], -n[1]), el["id"], "B"))
+                out.append(_upright(quad[3], quad[2], y_floor, top, (-n[0], -n[1]), el["id"], "B", sigma))
         elif kind == "floor":
-            out.append(_horizontal(el["id"], "floor", [(el["polygon"], [])], frame.value(arch, el["params"]["level"]), 1.0))
+            out.append(_horizontal(el["id"], "floor", [(el["polygon"], [])], frame.value(arch, el["params"]["level"]), 1.0,
+                                    _sigma(arch, el["params"]["level"])))
         elif kind == "ceiling":
             rings = [(r["exterior"], r["holes"]) for r in el["region"]]
-            out.append(_horizontal(el["id"], "ceiling", rings, frame.value(arch, el["params"]["level"]), -1.0))
+            out.append(_horizontal(el["id"], "ceiling", rings, frame.value(arch, el["params"]["level"]), -1.0,
+                                    _sigma(arch, el["params"]["level"])))
     return out
 
 
@@ -140,10 +157,10 @@ def _to_srgb(linear: np.ndarray) -> np.ndarray:
 
 
 def _in_grown_box(points: np.ndarray, boxes: list[RoomBox]) -> np.ndarray:
-    """Bool (n,): the point lies inside a RoomPlan box grown by BOX_MARGIN (a wall behind furniture is not there to see)."""
+    """Bool (n,): the point lies inside a RoomPlan box grown by TEX_BOX_MARGIN (a wall behind furniture is not there to see)."""
     hit = np.zeros(len(points), bool)
     for box in boxes:
-        hit |= (np.abs((points - box.centre) @ box.axes) <= box.half + BOX_MARGIN).all(axis=1)
+        hit |= (np.abs((points - box.centre) @ box.axes) <= box.half + TEX_BOX_MARGIN).all(axis=1)
     return hit
 
 
@@ -172,7 +189,7 @@ class Observation:
         """(linear colour (n, 3), seen (n,)) after matching the exposure of the photos on the texels they share."""
         filled = self.photo >= 0
         linear = _to_linear(self.colour)
-        gains = _match_exposure(linear, self.photo, filled)
+        gains = _match_exposure(linear, self.photo, filled & ~(self.colour == 255).any(axis=2))
         linear = linear * gains[np.maximum(self.photo, 0)]
         order = np.argsort(-self.weight, axis=1)[:, :BEST]
         weights = np.take_along_axis(self.weight, order, axis=1)
@@ -180,18 +197,18 @@ class Observation:
         return _weighted_median(values, weights), filled.any(axis=1)
 
 
-def _match_exposure(linear: np.ndarray, photo: np.ndarray, filled: np.ndarray) -> np.ndarray:
-    """Per photo and channel gain (linear light) that brings it to the per-texel median of the photos sharing its texels.
+def _match_exposure(linear: np.ndarray, photo: np.ndarray, usable: np.ndarray) -> np.ndarray:
+    """Per photo and channel gain (linear light, shape (photos, 3)) that brings it to the per-texel median of the photos sharing its texels.
 
-    Index with `photo` (-1 slots read the last entry); the gains are normalised to a median of 1 so the overall
-    exposure stays that of the photos.
+    Only `usable` slots count (filled and not clipped at 255, whose true value is unknown). The gains are normalised to a
+    median of 1, so the overall exposure stays that of the photos, then clipped to GAIN_RANGE.
     """
     count = int(photo.max()) + 1
-    gains = np.ones((count + 1, 3), np.float32)
-    shared = filled.sum(axis=1) >= 2
-    if count == 0 or not shared.any():
+    gains = np.ones((max(count, 1), 3), np.float32)
+    shared = usable.sum(axis=1) >= 2
+    if not shared.any():
         return gains
-    lin, ids, ok = linear[shared], photo[shared], filled[shared]
+    lin, ids, ok = linear[shared], photo[shared], usable[shared]
     for _ in range(GAIN_ROUNDS):
         adjusted = np.maximum(lin * gains[np.maximum(ids, 0)], 1e-6)
         reference = np.nanmedian(np.where(ok[..., None], adjusted, np.nan), axis=1)
@@ -202,7 +219,7 @@ def _match_exposure(linear: np.ndarray, photo: np.ndarray, filled: np.ndarray) -
         names, starts = np.unique(flat, return_index=True)
         for name, chunk in zip(names, np.split(ratio, starts[1:])):
             gains[name] = np.clip(gains[name] * np.median(chunk, axis=0), *GAIN_RANGE)
-        gains[names] /= np.median(gains[names], axis=0)
+        gains[names] = np.clip(gains[names] / np.median(gains[names], axis=0), *GAIN_RANGE)
     return gains
 
 
@@ -231,19 +248,20 @@ def _bilinear(image: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
 class _Pyramid:
     """A photo and its box-filtered reductions, loaded when first used."""
 
-    def __init__(self, path: Path):
-        self.path, self.levels, self._image = path, {}, None
+    def __init__(self, photo: PosedPhoto):
+        self.photo, self.levels, self._image, self._scale = photo, {}, None, (1.0, 1.0)
 
     def sample(self, uv: np.ndarray, level: np.ndarray) -> np.ndarray:
         out = np.zeros((len(uv), 3), np.float32)
         for k in np.unique(level):
             if k not in self.levels:
                 if self._image is None:
-                    with Image.open(self.path) as im:
+                    with Image.open(self.photo.path) as im:
                         self._image = im.convert("RGB")
+                    self._scale = (self._image.width / self.photo.size[0], self._image.height / self.photo.size[1])  # K is in manifest pixels
                 self.levels[k] = np.asarray(self._image.reduce(2 ** int(k)) if k else self._image, np.float32)
             sel = level == k
-            out[sel] = _bilinear(self.levels[k], uv[sel, 0] / 2 ** k, uv[sel, 1] / 2 ** k)
+            out[sel] = _bilinear(self.levels[k], uv[sel, 0] * self._scale[0] / 2 ** k, uv[sel, 1] * self._scale[1] / 2 ** k)
         return out
 
 
@@ -252,7 +270,7 @@ class _DepthView:
 
     def __init__(self, photo: PosedPhoto, vertices: np.ndarray, faces: np.ndarray):
         w, h = photo.size
-        scale = min(1.0, DEPTH_SIDE / max(w, h))
+        scale = min(1.0, TEX_DEPTH_SIDE / max(w, h))
         size = (max(1, round(w * scale)), max(1, round(h * scale)))
         self.photo, self.sx, self.sy = photo, size[0] / w, size[1] / h
         K = np.diag([self.sx, self.sy, 1.0]) @ photo.K
@@ -264,7 +282,7 @@ class _DepthView:
         Each pixel is compared with the plane depth along its own ray, so the slope of an oblique surface (about 2 cm
         per pixel at 70 degrees) does not count as a disagreement. A pixel without mesh is no evidence against the texel.
         """
-        photo = self.photo
+        photo, tolerance = self.photo, surface.tolerance
         h, w = self.depth.shape
         col, row = np.floor(uv[:, 0] * self.sx).astype(int), np.floor(uv[:, 1] * self.sy).astype(int)
         normal_cam = photo.w2c[:3, :3] @ surface.normal
@@ -278,8 +296,8 @@ class _DepthView:
                 with np.errstate(divide="ignore", invalid="ignore"):
                     plane = reach / slope
                 mesh = self.depth[r, c]
-                nearer = mesh < plane - DEPTH_TOLERANCE
-                ok &= ~nearer if (dr or dc) else (np.isinf(mesh) | (np.abs(mesh - plane) < DEPTH_TOLERANCE))
+                nearer = mesh < plane - tolerance
+                ok &= ~nearer if (dr or dc) else (np.isinf(mesh) | (np.abs(mesh - plane) < tolerance))
         return ok
 
 
@@ -302,13 +320,13 @@ def observe(surfaces: list[Surface], photos: list[PosedPhoto], mesh: tuple[np.nd
                 views[key] = (np.nonzero(ok)[0], uv, depth, cos, distance)
         if not views:
             continue
-        zbuffer, pyramid = _DepthView(photo, vertices, faces), _Pyramid(photo.path)
+        zbuffer, pyramid = _DepthView(photo, vertices, faces), _Pyramid(photo)
         for key, (sel, uv, depth, cos, distance) in views.items():
             obs = observations[key]
             keep = zbuffer.passes(obs.surface, uv[sel])
             sel = sel[keep]
             if boxes and len(sel):
-                sel = sel[~occluded_mask(photo.centre, obs.points[sel], boxes, BOX_MARGIN)]
+                sel = sel[~occluded_mask(photo.centre, obs.points[sel], boxes, TEX_BOX_MARGIN)]
             if not len(sel):
                 continue
             footprint = TEXEL * photo.K[0, 0] / depth[sel]
@@ -342,7 +360,7 @@ class Fill:
         """The fill for each role, from ROOM_MODEL_FILL ("none", or an image) or downloaded once into `directory`.
 
         Assets come from arch["materials"] ({role: "site:asset"}) over DEFAULT_FILL. A failed download leaves that
-        role flat and the reason in `note`.
+        role and every role after it flat, with the reason in `note`.
         """
         setting = os.environ.get("ROOM_MODEL_FILL")
         if setting == "none":
@@ -353,11 +371,12 @@ class Fill:
         tiles, sources, notes = {}, {}, []
         for asset in dict.fromkeys(wanted.values()):
             slug = re.sub(r"\W+", "_", asset)
-            try:
-                tile = _fetched(asset, slug, Path(directory))
-            except Exception as exc:  # noqa: BLE001 - any failure of the download leaves the surface a flat colour
-                notes.append(f"{asset}: {exc}")
-                tile = None
+            tile = None
+            if not notes:  # one failure means no network: the other assets are not tried
+                try:
+                    tile = _fetched(asset, slug, Path(directory))
+                except Exception as exc:  # noqa: BLE001 - any failure of the download leaves the surface a flat colour
+                    notes.append(f"{asset}: {exc}")
             for role, wanted_asset in wanted.items():
                 if wanted_asset == asset:
                     tiles[role], sources[role] = tile, asset if tile is not None else "flat"
@@ -403,6 +422,19 @@ class Painting:
     note: str | None = None
 
 
+def _close_small_holes(colour: np.ndarray, observed: np.ndarray, inside: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(colour, observed) with every hole of at most SMALL_HOLE texels taking the colour of its nearest observed texel."""
+    labels, count = ndimage.label(inside & ~observed)
+    if not count:
+        return colour, observed
+    sizes = ndimage.sum_labels(np.ones_like(labels), labels, np.arange(1, count + 1))
+    small = np.isin(labels, np.nonzero(sizes <= SMALL_HOLE)[0] + 1)
+    if not small.any():
+        return colour, observed
+    rows, cols = ndimage.distance_transform_edt(~observed, return_distances=False, return_indices=True)
+    return np.where(small[..., None], colour[rows, cols], colour), observed | small
+
+
 def paint(surface: Surface, observation: Observation, fill: Fill) -> Painting | None:
     """The texture: observed colours, fill in the holes, faded over FEATHER texels; None when no photo saw the surface."""
     nu, nv = surface.size
@@ -414,10 +446,11 @@ def paint(surface: Surface, observation: Observation, fill: Fill) -> Painting | 
     colour = colour.reshape(nv, nu, 3)
     median = np.median(colour[observed], axis=0)
     role = surface.kind
-    holes = inside & ~observed
-    alpha = observed.astype(np.float32)
+    colour, closed = _close_small_holes(colour, observed, inside)
+    holes = inside & ~closed
+    alpha = closed.astype(np.float32)
     if holes.any():
-        alpha = np.where(observed, np.clip(ndimage.distance_transform_edt(~holes) / FEATHER, 0.0, 1.0), 0.0).astype(np.float32)
+        alpha = np.where(closed, np.clip(ndimage.distance_transform_edt(~holes) / FEATHER, 0.0, 1.0), 0.0).astype(np.float32)
     mixed = alpha[..., None] * colour + (1 - alpha[..., None]) * fill.render(role, surface.size, median)
     return Painting(_to_srgb(mixed), float(observed.sum() / inside.sum()), fill.sources.get(role, "flat"), fill.note if fill.sources.get(role) == "flat" else None)
 

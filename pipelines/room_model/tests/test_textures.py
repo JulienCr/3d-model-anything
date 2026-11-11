@@ -22,13 +22,13 @@ def _quad(a, b, c, d):
     return np.array([a, b, c, d], float), np.array([[0, 1, 2], [0, 2, 3]])
 
 
-def _wall_mesh():
-    """The red wall z = 0, x in [0, 4], y in [0, 2.5], facing +z."""
-    return _quad((0, 0, 0), (4, 0, 0), (4, 2.5, 0), (0, 2.5, 0))
+def _wall_mesh(z=0.0):
+    """The red wall at depth z (0 unless the mesh is off the fitted plane), x in [0, 4], y in [0, 2.5], facing +z."""
+    return _quad((0, 0, z), (4, 0, z), (4, 2.5, z), (0, 2.5, z))
 
 
-def _box_mesh():
-    (x0, x1), (z0, z1), (y0, y1) = BOX["x"], BOX["z"], BOX["y"]
+def _box_mesh(z=None):
+    (x0, x1), (z0, z1), (y0, y1) = BOX["x"], z or BOX["z"], BOX["y"]
     faces = [_quad((x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)), _quad((x0, y1, z0), (x0, y1, z1), (x1, y1, z1), (x1, y1, z0)),
              _quad((x0, y0, z0), (x0, y0, z1), (x0, y1, z1), (x0, y1, z0)), _quad((x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1))]
     return np.concatenate([v for v, _ in faces]), np.concatenate([f + 4 * k for k, (_, f) in enumerate(faces)])
@@ -39,9 +39,9 @@ def _room_box():
     return RoomBox(centre, np.eye(3), np.array([(BOX[k][1] - BOX[k][0]) / 2 for k in ("x", "y", "z")]))
 
 
-def _photos(tmp_path, wall_colour=WALL_RED, gains=(1.0,) * len(EYES), with_box=True):
+def _photos(tmp_path, wall_colour=WALL_RED, gains=(1.0,) * len(EYES), with_box=True, wall_z=0.0, box_z=None):
     """Posed photos of the wall (and the blue box in front of it) rendered at one exposure gain each."""
-    parts = [(*_wall_mesh(), wall_colour)] + ([(*_box_mesh(), BOX_BLUE)] if with_box else [])
+    parts = [(*_wall_mesh(wall_z), wall_colour)] + ([(*_box_mesh(box_z), BOX_BLUE)] if with_box else [])
     verts = np.concatenate([v for v, _, _ in parts])
     offsets = np.cumsum([0] + [len(v) for v, _, _ in parts[:-1]])
     faces = np.concatenate([f + o for (_, f, _), o in zip(parts, offsets)])
@@ -57,13 +57,15 @@ def _photos(tmp_path, wall_colour=WALL_RED, gains=(1.0,) * len(EYES), with_box=T
     return out
 
 
-def _wall_surface():
-    return textures.Surface("Wall_M1", "A", "wall", np.zeros(3), np.array([1.0, 0, 0]), np.array([0, 1.0, 0]), np.array([0, 0, 1.0]), (200, 125))
+def _wall_surface(size=(200, 125), sigma=0.0):
+    return textures.Surface("Wall_M1", "A", "wall", np.zeros(3), np.array([1.0, 0, 0]), np.array([0, 1.0, 0]), np.array([0, 0, 1.0]), size,
+                            sigma=sigma)
 
 
-def _texture(tmp_path, mesh="wall+box", boxes=(), fill=None, **photo_args):
-    surface = _wall_surface()
-    parts = {"wall": [_wall_mesh()], "wall+box": [_wall_mesh(), _box_mesh()]}[mesh]
+def _texture(tmp_path, mesh="wall+box", boxes=(), fill=None, sigma=0.0, **photo_args):
+    surface = _wall_surface(sigma=sigma)
+    wall_z, box_z = photo_args.get("wall_z", 0.0), photo_args.get("box_z")
+    parts = {"wall": [_wall_mesh(wall_z)], "wall+box": [_wall_mesh(wall_z), _box_mesh(box_z)]}[mesh]
     verts = np.concatenate([v for v, _ in parts])
     faces = np.concatenate([f + sum(len(v) for v, _ in parts[:k]) for k, (_, f) in enumerate(parts)])
     photos = _photos(tmp_path, **photo_args)
@@ -96,6 +98,76 @@ def test_furniture_masked(tmp_path, lidar_has_box, roomplan_box):
     assert 0.5 < painting.coverage < 0.97
     shadow = painting.rgb[10:25, 90:110]  # wall behind the box, near the floor: nothing sees it
     assert np.abs(np.median(shadow.reshape(-1, 3), axis=0) - WALL_RED).max() <= 5
+
+
+def test_tolerance_follows_the_plane_error_between_the_brief_floor_and_the_cap():
+    assert _wall_surface(sigma=0.0).tolerance == pytest.approx(textures.DEPTH_TOLERANCE)
+    assert _wall_surface(sigma=0.02).tolerance == pytest.approx(3 * np.hypot(0.02, textures.LIDAR_NOISE))
+    assert _wall_surface(sigma=0.5).tolerance == textures.TOLERANCE_CAP
+
+
+def test_a_plane_off_the_mesh_by_its_sigma_keeps_its_texels(tmp_path):
+    kept = _texture(tmp_path, mesh="wall", with_box=False, wall_z=0.05, sigma=0.02)[1]
+    assert kept.coverage > 0.9 and np.abs(np.median(kept.rgb.reshape(-1, 3), axis=0) - WALL_RED).max() <= 5
+    strict = _texture(tmp_path, mesh="wall", with_box=False, wall_z=0.05, sigma=0.0)[1]  # a tight plane is not 5 cm off: that is not the wall
+    assert strict is None or strict.coverage < 0.1
+
+
+def test_furniture_standing_proud_is_rejected_whatever_the_sigma(tmp_path):
+    _, painting = _texture(tmp_path, wall_z=0.05, box_z=(0.05, 0.25), sigma=0.5)  # sigma beyond any fit: the cap alone decides
+    assert _bluish(painting.rgb) == 0 and 0.5 < painting.coverage < 0.97
+
+
+def test_photo_files_of_another_size_than_the_manifest_are_scaled(tmp_path):
+    photos = _photos(tmp_path, with_box=False)
+    for photo in photos:
+        with Image.open(photo.path) as im:
+            im.resize((SIZE[0] // 2, SIZE[1] // 2)).save(photo.path)
+    surface = _wall_surface()
+    observed = textures.observe([surface], photos, (*_wall_mesh(),), [])
+    painting = textures.paint(surface, observed[surface.key], textures.Fill.flat())
+    assert painting.coverage > 0.9 and np.abs(np.median(painting.rgb.reshape(-1, 3), axis=0) - WALL_RED).max() <= 5
+
+
+def _filled(size, colours):
+    """An observation whose slots hold `colours` ({slot: (photo, weight, (n, 3) uint8)})."""
+    obs = textures.Observation(_wall_surface(size), [])
+    for slot, (photo, weight, rgb) in colours.items():
+        obs.photo[:, slot], obs.weight[:, slot], obs.colour[:, slot] = photo, weight, rgb
+    return obs
+
+
+def test_clipped_texels_do_not_set_the_exposure_gain(tmp_path):
+    n = 200
+    clipped = np.where((np.arange(n) < 120)[:, None], 255, 120).astype(np.uint8) * np.ones((1, 3), np.uint8)
+    obs = _filled((20, 10), {0: (0, 1.0, np.full((n, 3), 120, np.uint8)), 1: (1, 2.0, clipped)})
+    colour, _ = obs.colours()
+    rgb = textures._to_srgb(colour)
+    assert np.abs(rgb[120:].astype(int) - 120).max() <= 3, "the photo clipped on 60% of the shared texels keeps its true level elsewhere"
+
+
+def test_isolated_holes_are_closed_and_large_ones_filled(tmp_path):
+    size = (60, 60)
+    obs = _filled(size, {0: (0, 1.0, np.full((3600, 3), 100, np.uint8))})
+    grid = obs.weight[:, 0].reshape(60, 60)
+    grid[10, 10] = 0.0  # one speckle
+    grid[30:50, 30:50] = 0.0  # a real hole
+    obs.photo[:, 0] = np.where(obs.weight[:, 0] > 0, 0, -1)
+    surface = _wall_surface(size)
+    painting = textures.paint(surface, obs, _tile(tmp_path))
+    assert np.abs(painting.rgb[8:13, 8:13].astype(int) - 100).max() <= 1, "no feathered blob around a speckle"
+    assert painting.rgb[35:45, 35:45].reshape(-1, 3).std(axis=0).max() > 3, "the hole takes the fill"
+    assert painting.coverage == pytest.approx(1 - 401 / 3600)
+
+
+def test_the_fill_download_stops_at_the_first_failure(tmp_path, monkeypatch):
+    calls = tmp_path / "calls.txt"
+    script = tmp_path / "fetch.py"
+    script.write_text(f"import sys\nopen({str(calls)!r}, 'a').write('x\\n')\nsys.exit('offline')\n")
+    monkeypatch.setenv("ROOM_MODEL_FETCH_TEXTURES", str(script))
+    monkeypatch.delenv("ROOM_MODEL_FILL", raising=False)
+    fill = textures.Fill.load({}, tmp_path / "fill")
+    assert len(calls.read_text().splitlines()) == 1 and set(fill.sources.values()) == {"flat"} and "offline" in fill.note
 
 
 def test_unmasked_furniture_leaks_into_the_wall(tmp_path):
