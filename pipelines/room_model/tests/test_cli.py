@@ -10,8 +10,9 @@ from synthetic import make_capture
 
 
 @pytest.fixture(autouse=True)
-def _capture_folder(tmp_path):
+def _capture_folder(tmp_path, monkeypatch):
     make_capture(tmp_path / "cap")
+    monkeypatch.setenv("BLENDER", str(tmp_path / "no-such-blender"))  # `all` skips the Blender stage instead of launching it
 
 
 def _run(tmp_path, *args):
@@ -59,7 +60,7 @@ def test_all_runs_stages_in_order(tmp_path, monkeypatch):
 
         _fake_stage(monkeypatch, stage, run)
     assert _run(tmp_path, "all") == 0
-    assert order == ["registration", "shell", "model", "export", "openings", "architecture"]
+    assert order == ["registration", "shell", "model", "export", "openings", "architecture", "blender"]
 
 
 def _synthetic(build, tmp_path):
@@ -74,6 +75,15 @@ def test_all_skips_registration_of_a_capture_without_photos(build, tmp_path, cap
         assert (tmp_path / "out" / STAGE_OUTPUTS[stage]).exists()
     assert (tmp_path / "out" / "measurements" / "index.html").exists()
     assert not (tmp_path / "out" / STAGE_OUTPUTS["registration"]).exists()
+
+
+def test_all_skips_the_blender_stage_without_blender(build, tmp_path, capsys):
+    assert cli.main(["all", *_synthetic(build, tmp_path)]) == 0
+    assert "blender skipped: Blender not found" in capsys.readouterr().out
+    assert (tmp_path / "out" / STAGE_OUTPUTS["architecture"]).exists()
+    assert not (tmp_path / "out" / STAGE_OUTPUTS["blender"]).exists()
+    assert cli.main(["blender", *_synthetic(build, tmp_path)]) == 1  # asked for alone, it is an error
+    assert "Blender not found" in capsys.readouterr().err
 
 
 def test_registration_alone_without_photos_exits_with_one_line(build, tmp_path, capsys):
