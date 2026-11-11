@@ -5,7 +5,7 @@ from mathutils import Vector, geometry
 
 from . import frame
 
-CUT_KINDS = ("door", "window", "opening")
+CUT_KINDS = ("door", "window", "opening", "niche")
 CUT_OVERSHOOT = 0.01  # m a cutter sticks out of each face of its host
 COPLANAR_TOL = 0.005  # m: a cutter edge closer than this to a wall edge is pushed past it
 
@@ -44,16 +44,26 @@ def _sheet(name: str, regions: list[tuple[list, list]], y: float, up: bool) -> b
     return _object(name, bm, solid=False)
 
 
-def _cutter(arch: dict, geom: dict, opening: dict, y_floor: float) -> bpy.types.Object | None:
+def recess_depth(arch: dict, geom: dict, el: dict) -> float | None:
+    """Depth of a niche that stops short of the far face; None when it goes right through (or `el` is not a niche)."""
+    if el["kind"] != "niche" or el.get("through"):
+        return None
+    depth = frame.value(arch, el["params"]["depth"])
+    return depth if depth < geom["thickness"] - COPLANAR_TOL else None
+
+
+def _cutter(arch: dict, geom: dict, opening: dict, y_floor: float, host: dict) -> bpy.types.Object | None:
     p = opening["params"]
     w, h, sill, centre = (frame.value(arch, p[k]) for k in ("width", "height", "sill", "center_s"))
     if w <= 0 or h <= 0:
         return None
-    a, b = geom["point"](centre - w / 2), geom["point"](centre + w / 2)
-    nx, nz = geom["n"]
-    front, back = CUT_OVERSHOOT, geom["thickness"] + CUT_OVERSHOOT
-    quad = [(a[0] + nx * front, a[1] + nz * front), (b[0] + nx * front, b[1] + nz * front),
-            (b[0] - nx * back, b[1] - nz * back), (a[0] - nx * back, a[1] - nz * back)]
+    side = frame.side(host, opening.get("face"))
+    a, b = (frame.face_point(geom, centre + d, side) for d in (-w / 2, w / 2))
+    inward = (-geom["n"][0] * side, -geom["n"][1] * side)  # from the cut face into the wall
+    recess = recess_depth(arch, geom, opening)
+    front, back = CUT_OVERSHOOT, (geom["thickness"] + CUT_OVERSHOOT if recess is None else recess)
+    quad = [(a[0] - inward[0] * front, a[1] - inward[1] * front), (b[0] - inward[0] * front, b[1] - inward[1] * front),
+            (b[0] + inward[0] * back, b[1] + inward[1] * back), (a[0] + inward[0] * back, a[1] + inward[1] * back)]
     y0, y1 = y_floor + sill, y_floor + sill + h
     if sill <= COPLANAR_TOL:
         y0 = y_floor - 2 * CUT_OVERSHOOT
@@ -86,7 +96,7 @@ def _wall(arch: dict, el: dict, y_floor: float, scene_collection: bpy.types.Coll
     obj = _prism(el["id"], quad, y_floor, geom["top"])
     collection.objects.link(obj)
     hosted = [o for o in arch["elements"] if o.get("host") == el["id"] and o["kind"] in CUT_KINDS]
-    cutters = [c for c in (_cutter(arch, geom, o, y_floor) for o in hosted) if c is not None]
+    cutters = [c for c in (_cutter(arch, geom, o, y_floor, el) for o in hosted) if c is not None]
     for cutter in cutters:
         scene_collection.objects.link(cutter)
     if cutters:

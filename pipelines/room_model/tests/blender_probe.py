@@ -20,6 +20,7 @@ def _object_facts(obj):
              "hide_render": obj.hide_render, "hide_viewport": obj.hide_viewport, "location": list(obj.location),
              "parent": obj.parent.name if obj.parent else None, "dims": list(obj.dimensions),
              "props": {k: obj[k] for k in RIG_PROPS if k in obj},
+             "flags": obj.get("flags"),
              "drivers": len(obj.animation_data.drivers) if obj.animation_data else 0}
     if obj.type == "FONT":
         facts["text"] = obj.data.body
@@ -42,12 +43,20 @@ def _object_facts(obj):
 
 
 def _cast(ray):
-    obj = bpy.data.objects[ray["object"]]
-    inv = obj.matrix_world.inverted()
-    origin = inv @ Vector(ray["origin"])
-    direction = (inv.to_3x3() @ Vector(ray["direction"])).normalized()
-    hit, location, _, _ = obj.ray_cast(origin, direction, distance=ray.get("distance", 1e4))
-    return {"hit": bool(hit), "location": list(obj.matrix_world @ location) if hit else None}
+    """Nearest hit of the ray against the object (or the list of objects) it names."""
+    names = ray["object"] if isinstance(ray["object"], list) else [ray["object"]]
+    best = {"hit": False, "location": None, "object": None}
+    for name in names:
+        obj = bpy.data.objects[name]
+        inv = obj.matrix_world.inverted()
+        origin = inv @ Vector(ray["origin"])
+        direction = (inv.to_3x3() @ Vector(ray["direction"])).normalized()
+        hit, location, _, _ = obj.ray_cast(origin, direction, distance=ray.get("distance", 1e4))
+        if hit:
+            world = obj.matrix_world @ location
+            if not best["hit"] or (world - Vector(ray["origin"])).length < (Vector(best["location"]) - Vector(ray["origin"])).length:
+                best = {"hit": True, "location": list(world), "object": name}
+    return best
 
 
 def _descendants(obj):

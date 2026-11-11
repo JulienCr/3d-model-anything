@@ -168,8 +168,8 @@ def scene(tmp_path_factory):
     return ctx, arch, json.loads(facts_path.read_text(encoding="utf-8"))
 
 
-def _probe(ctx, arch_path):
-    spec = {"rays": [], "rigs": [], "arch": str(arch_path), "blender_dir": str(BLENDER_DIR)}
+def _probe(ctx, arch_path, rays=()):
+    spec = {"rays": list(rays), "rigs": [], "arch": str(arch_path), "blender_dir": str(BLENDER_DIR)}
     spec_path, facts_path = ctx.out / "spec.json", ctx.out / "facts.json"
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
     blender_stage.run_blender(["--background", ctx.out / "architecture.blend", "--python-exit-code", "1", "--python", PROBE,
@@ -558,6 +558,218 @@ def test_build_passes_ctx_and_rejects_unlinked_hook_objects(scene):
     assert hook["seen"]["ctx"] == {"textures": None, "scan_path": None, "out_dir": "/probe/out"}
     assert "Menuiseries" in hook["seen"]["collections"]
     assert "zz_probe" in hook["unlinked"]["raised"] and "ProbeLoose" in hook["unlinked"]["raised"]
+
+
+MOULDING_PARAMS = {  # id: (value, unit)
+    "niche.1.center_s": (0.3, "m"), "niche.1.sill": (0.8, "m"), "niche.1.width": (0.4, "m"), "niche.1.height": (0.8, "m"),
+    "niche.1.depth": (0.05, "m"),  # ignored: the niche is through
+    "niche.2.center_s": (1.5, "m"), "niche.2.sill": (0.9, "m"), "niche.2.width": (0.5, "m"), "niche.2.height": (0.6, "m"),
+    "niche.2.depth": (0.1, "m"),
+    "cornice.height": (0.08, "m"), "cornice.projection": (0.1, "m"), "skirting.height": (0.1, "m"),
+    "skirting.projection": (0.02, "m"),
+}
+NICHE_PARAMS = ("center_s", "sill", "width", "height", "depth")
+MOULDING_ELEMENTS = [
+    {"id": "Niche_1", "kind": "niche", "host": "Partition_P1", "face": "A", "through": True, "dividers": 2, "shelves": [],
+     "frame": {"profile": "flat", "width": 0.06}, "flags": []},
+    {"id": "Niche_2", "kind": "niche", "host": "Wall_M3", "face": None, "through": False, "dividers": 0, "shelves": [0.3],
+     "frame": None, "flags": []},
+    {"id": "Cornice", "kind": "cornice", "profile": "cove", "params": {"height": "cornice.height", "projection": "cornice.projection"}},
+    {"id": "Skirting", "kind": "skirting", "profile": "baroque",
+     "params": {"height": "skirting.height", "projection": "skirting.projection"}},
+    {"id": "PanelFrame_1", "kind": "panel_frame", "host": "Wall_M3", "face": None, "rect": [2.5, 0.9, 3.3, 1.9],
+     "profile": "quarter_round", "flags": ["to_verify"]},
+]
+ARCHITRAVES = {"Door_1": {"profile": "moulded", "width": 0.07}, "Opening_1": {"profile": "flat", "width": 0.05}}
+SKIRTING_HEIGHT, NICHE_1_COMPARTMENTS = 0.1, 3
+
+
+def _add_mouldings(arch):
+    for pid, (value, unit) in MOULDING_PARAMS.items():
+        arch["parameters"][pid] = {"value": value, "sigma": 0.0, "unit": unit, "source": "llm"}
+    for element in json.loads(json.dumps(MOULDING_ELEMENTS)):
+        if element["kind"] == "niche":
+            n = element["id"].split("_")[1]
+            element["params"] = {name: f"niche.{n}.{name}" for name in NICHE_PARAMS}
+        arch["elements"].append(element)
+    for oid, spec in ARCHITRAVES.items():
+        _element(arch, oid)["frame"] = spec
+
+
+def _across(ray, name, distance):
+    """The same ray started `distance` m further along, travelling back (the view from the other face of a host)."""
+    direction = np.array(ray["direction"])
+    return {**ray, "name": name, "origin": list(np.array(ray["origin"]) + direction * distance), "direction": list(-direction)}
+
+
+def _corner_ray(arch):
+    """A ray down the diagonal into the corner of Wall_M1 and Wall_M2, 2 mm off the tip of the skirting mitre."""
+    lines = []
+    for wall in (_element(arch, "Wall_M1"), _element(arch, "Wall_M2")):
+        az = _value(arch, wall["params"]["azimuth"])
+        lines.append((np.array([math.cos(az), math.sin(az)]), _value(arch, wall["params"]["offset"])))
+    (n1, o1), (n2, o2) = lines
+    corner = np.linalg.solve(np.array([n1, n2]), np.array([o1, o2]))
+    inward = (n1 + n2) / np.linalg.norm(n1 + n2)
+    origin = corner + (n1 + n2) * 0.5 + (n1 - n2) * 0.002 / np.sqrt(2)
+    floor = _value(arch, "floor.level")
+    return {"name": "skirt-corner", "object": "Skirting", "origin": _blender_point(origin[0], floor + 0.05, origin[1]),
+            "direction": _blender_point(-inward[0], 0.0, -inward[1])}
+
+
+@pytest.fixture(scope="module")
+def moulded(tmp_path_factory):
+    ctx, _ = make_case(tmp_path_factory.mktemp("moulded"), "moulded", window=True, partition=True, partition_opening=True,
+                       partition_opening_width=0.6)
+    shell.run(ctx)
+    model.run(ctx)
+    openings.run(ctx)
+    architecture.run(ctx)
+    arch_path = output_path(ctx, "architecture")
+    arch = json.loads(arch_path.read_text(encoding="utf-8"))
+    _add_mouldings(arch)
+    arch_path.write_text(json.dumps(arch), encoding="utf-8")
+    blender_stage.run(ctx)
+
+    niche = _element(arch, "Niche_1")
+    width, thickness = _value(arch, niche["params"]["width"]), _value(arch, "partition.P1.thickness")
+    boards = ["Partition_P1", "Niche_1_Divider_1", "Niche_1_Divider_2"]
+    mid = _value(arch, niche["params"]["sill"]) + 0.4
+    rays = []
+    for k in range(NICHE_1_COMPARTMENTS):
+        rays.append(_ray(arch, "Niche_1", f"compartment-{k}", -width / 2 + width * (2 * k + 1) / 6, mid, target=boards))
+    for k in (1, 2):
+        rays.append(_ray(arch, "Niche_1", f"divider-{k}", -width / 2 + width * k / 3, mid, target=boards))
+    rays += [_ray(arch, "Niche_1", "beside-low", 0.0, 0.3, target="Partition_P1"),
+             _ray(arch, "Niche_1", "beside", width / 2 + 0.1, mid, target="Partition_P1"),
+             _ray(arch, "Niche_1", "above", 0.0, mid + 0.6, target="Partition_P1"),
+             _ray(arch, "Niche_1", "centre", 0.0, mid, target="Partition_P1")]
+    rays.append(_across(rays[-1], "centre-back", 1.2 + thickness))
+    sill = _value(arch, _element(arch, "Niche_2")["params"]["sill"])
+    rays += [_ray(arch, "Niche_2", "recess-back", 0.0, sill + 0.15, target="Wall_M3"),
+             _ray(arch, "Niche_2", "recess-above", 0.0, sill + 0.7, target="Wall_M3"),
+             _ray(arch, "Niche_2", "shelf", 0.0, sill + 0.3, target="Niche_2_Shelf_1")]
+    low = SKIRTING_HEIGHT / 2
+    for oid in ("Door_1", "Window_1", "Opening_1"):  # the rays stop short of the next wall
+        w = _value(arch, _element(arch, oid)["params"]["width"])
+        rays += [_ray(arch, oid, f"skirt-{oid}-centre", 0.0, low, target="Skirting"),
+                 _ray(arch, oid, f"skirt-{oid}-beside", w / 2 + 0.2, low, target="Skirting"),
+                 _ray(arch, oid, f"skirt-{oid}-beside-minus", -(w / 2 + 0.2), low, target="Skirting")]
+    for name in ("centre", "beside"):
+        rays.append(_across(next(r for r in rays if r["name"] == f"skirt-Opening_1-{name}"), f"skirt-Opening_1-{name}-back",
+                            1.2 + thickness))
+    for ray in rays:
+        if ray["name"].startswith("skirt-") and "corner" not in ray["name"]:
+            ray["distance"] = 0.65
+    rays.append(_corner_ray(arch))
+    return ctx, arch, _probe(ctx, arch_path, rays), {r["name"]: r for r in rays}
+
+
+@needs_blender
+def test_niche_through(moulded):
+    _, arch, facts, _ = moulded
+    rays = facts["rays"]
+    for k in range(NICHE_1_COMPARTMENTS):
+        assert not rays[f"compartment-{k}"]["hit"], "light passes through every compartment"
+    assert [rays[f"divider-{k}"]["object"] for k in (1, 2)] == ["Niche_1_Divider_1", "Niche_1_Divider_2"]
+    assert not rays["centre"]["hit"] and not rays["centre-back"]["hit"], "open on both faces"
+    assert all(rays[n]["hit"] for n in ("beside", "beside-low", "above")), "the partition is still there around it"
+    assert sorted(n for n in facts["objects"] if n.startswith("Niche_1_")) == [
+        "Niche_1_Architrave_A", "Niche_1_Architrave_B", "Niche_1_Divider_1", "Niche_1_Divider_2"]
+    for n in (1, 2):
+        board = facts["objects"][f"Niche_1_Divider_{n}"]
+        assert board["collections"] == ["Menuiseries"] and board["materials"] == ["Menuiserie"]
+        assert board["dims"] == pytest.approx([0.02, _value(arch, "partition.P1.thickness"), 0.8], abs=1e-3)
+
+
+@needs_blender
+def test_niche_recess_has_a_back(moulded):
+    _, arch, facts, rays = moulded
+    for name, expected in (("recess-back", 0.6 + 0.1), ("recess-above", 0.6)):
+        assert facts["rays"][name]["hit"], name
+        assert np.linalg.norm(np.array(facts["rays"][name]["location"]) - np.array(rays[name]["origin"])) == pytest.approx(expected, abs=0.002)
+    assert facts["rays"]["shelf"]["hit"]
+    wall = facts["objects"]["Wall_M3"]
+    assert wall["modifiers"] == 0 and wall["non_manifold"] == 0
+    assert not any("utter" in name for name in facts["objects"])
+
+
+@needs_blender
+def test_skirting_gaps(moulded):
+    _, _, facts, _ = moulded
+    rays = facts["rays"]
+    for oid in ("Door_1", "Opening_1"):
+        assert not rays[f"skirt-{oid}-centre"]["hit"], oid
+        assert rays[f"skirt-{oid}-beside"]["hit"] and rays[f"skirt-{oid}-beside-minus"]["hit"], oid
+    assert rays["skirt-Window_1-centre"]["hit"], "a window sill does not interrupt the skirting"
+    assert not rays["skirt-Opening_1-centre-back"]["hit"] and rays["skirt-Opening_1-beside-back"]["hit"], "both faces of a partition"
+
+
+@needs_blender
+def test_skirting_corner_is_mitred(moulded):
+    _, arch, facts, rays = moulded
+    hit = facts["rays"]["skirt-corner"]
+    assert hit["hit"]
+    distance = np.linalg.norm(np.array(hit["location"]) - np.array(rays["skirt-corner"]["origin"]))
+    assert distance == pytest.approx(math.sqrt(2) * (0.5 - _value(arch, "skirting.projection")), abs=0.0045)
+
+
+@needs_blender
+def test_cornice_height(moulded):
+    _, arch, facts, _ = moulded
+    cornice = facts["objects"]["Cornice"]
+    levels = [_value(arch, e["params"]["level"]) for e in arch["elements"] if e["kind"] == "ceiling"]
+    height = _value(arch, "cornice.height")
+    assert cornice["collections"] == ["Moulures"] and cornice["materials"] == ["Moulure"]
+    assert cornice["bbox"][1][2] == pytest.approx(max(levels), abs=0.001)
+    for level in levels:
+        zs = np.array(cornice["zs"])
+        assert np.abs(zs - level).min() < 0.001 and np.abs(zs - (level - height)).min() < 0.001, level
+    assert cornice["bbox"][0][2] == pytest.approx(min(levels) - height, abs=0.001)
+    assert cornice["flags"] is None
+
+
+@needs_blender
+def test_unknown_profile(moulded):
+    _, _, facts, _ = moulded
+    skirting = facts["objects"]["Skirting"]
+    assert skirting["flags"] == "unknown_profile" and skirting["verts"] > 0
+    assert skirting["collections"] == ["Moulures"] and skirting["materials"] == ["Moulure"]
+
+
+@needs_blender
+def test_architraves_frame_the_openings(moulded):
+    _, arch, facts, _ = moulded
+    objects = facts["objects"]
+    assert "Window_1_Architrave" not in objects, "no frame, no architrave"
+    for oid, spec in ARCHITRAVES.items():
+        el = _element(arch, oid)
+        host, p, n = _on_face(arch, el)
+        w, h = (_value(arch, el["params"][k]) for k in ("width", "height"))
+        names = [f"{oid}_Architrave_A", f"{oid}_Architrave_B"] if host["kind"] == "partition" else [f"{oid}_Architrave"]
+        assert [k for k in objects if k.startswith(f"{oid}_Architrave")] == names
+        floor = _value(arch, "floor.level") + _value(arch, el["params"]["sill"])
+        n_b = _plan_dir(n)
+        for name in names:
+            obj = objects[name]
+            lo, hi = np.array(obj["bbox"])
+            assert obj["collections"] == ["Moulures"] and obj["materials"] == ["Moulure"]
+            assert hi[2] - floor == pytest.approx(h + spec["width"], abs=0.003) and lo[2] == pytest.approx(floor, abs=0.003)
+            assert (hi - lo)[:2] @ np.abs(np.array([-n_b[1], n_b[0]])) == pytest.approx(w + 2 * spec["width"], abs=0.012)
+    t = _value(arch, "partition.P1.thickness")
+    a, b = (np.array(objects[f"Opening_1_Architrave_{f}"]["bbox"]).mean(0) for f in "AB")
+    assert abs((a - b)[:2] @ _plan_dir(_on_face(arch, _element(arch, "Opening_1"))[2])) == pytest.approx(t + 0.015, abs=0.004)
+
+
+@needs_blender
+def test_panel_frame_goes_to_the_verify_collection(moulded):
+    _, arch, facts, _ = moulded
+    frame_ = facts["objects"]["PanelFrame_1"]
+    assert frame_["collections"] == ["\u00c0 v\u00e9rifier"] and frame_["flags"] == "to_verify"
+    lo, hi = np.array(frame_["bbox"])
+    floor = _value(arch, "floor.level")
+    assert (lo[2], hi[2]) == pytest.approx((floor + 0.9, floor + 1.9), abs=0.004)
+    assert np.hypot(*(hi - lo)[:2]) == pytest.approx(0.8, abs=0.02)
 
 
 def test_stage_deletes_stale_outputs_before_launching_blender(tmp_path, monkeypatch):

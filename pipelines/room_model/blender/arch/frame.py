@@ -33,3 +33,16 @@ def wall_geometry(arch: dict, el: dict) -> dict:
 
     return {"point": point, "length": length, "u": u, "n": n, "thickness": value(arch, p["thickness"]),
             "top": value(arch, p["top"])}
+
+
+def side(host: dict, face: str | None) -> int:
+    """+1 for the face the interior normal points out of (a wall's interior face, a partition's face A), -1 for a partition's face B."""
+    return -1 if host["kind"] == "partition" and face == "B" else 1
+
+
+def face_point(geom: dict, s: float, side_: int) -> tuple[float, float]:
+    """Plan point `s` m along the host on the face line of `side_` (+1: the front face, -1: the back one)."""
+    x, z = geom["point"](s)
+    if side_ < 0:
+        x, z = x - geom["n"][0] * geom["thickness"], z - geom["n"][1] * geom["thickness"]
+    return x, z
