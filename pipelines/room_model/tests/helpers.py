@@ -31,3 +31,14 @@ def truth_to_room(ctx, truth):
 def plan_point(T, x, z):
     """Truth-local (x, z) on the floor plane mapped to the room frame (x, z)."""
     return (T @ [x, 0.0, z, 1.0])[[0, 2]]
+
+
+def colour_stub(rgb, box, points=None):
+    """Stand-in for SAM: the region of uniform colour under the box centre (a sliver when the centre is a gap)."""
+    from scipy import ndimage
+
+    x0, y0, x1, y1 = (int(round(v)) for v in box)
+    cy, cx = (y0 + y1) // 2, (x0 + x1) // 2
+    ref = np.median(rgb[cy - 2:cy + 3, cx - 2:cx + 3].reshape(-1, 3), axis=0)
+    labels, _ = ndimage.label(np.abs(rgb.astype(float) - ref).max(axis=2) < 20)
+    return [(labels == labels[cy, cx], 0.9)]

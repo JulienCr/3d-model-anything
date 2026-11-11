@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+import warnings
 from functools import lru_cache
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from scipy import ndimage
 
 from room_model import ortho
 from room_model.capture import colmajor, load_roomplan
-from room_model.context import NoPhotos, StageContext, output_path, require
+from room_model.context import NoPhotos, StageContext, StageInputMissing, output_path, require
 from room_model.model import SOURCE_RANK
 from room_model.ortho import FaceFrame
 from room_model.photo_geom import (FACING_COS, LOOSE_TOLERANCE, MIN_BAND_SEEN, DepthMaps, PosedPhoto, load_posed_photos,
@@ -28,8 +29,8 @@ KINDS = ("door", "window", "opening", "niche")
 FLOOR_KINDS = ("door", "opening")
 SIDES = ("left", "right", "bottom", "top")
 MARGIN = 0.15  # m around the scan rectangle: a casing (up to 12 cm) plus RoomPlan's 3 cm sigma
-SNAP = 0.015  # m from a mask edge to its gradient peak: SAM's boundary is good to a few photo pixels (< 1 cm at 3 m)
-MIN_SCORE = 0.6  # SAM's own predicted IoU below which a mask is a guess (failed masks scored < 0.3 in the spike)
+SNAP = 0.015  # m from a mask edge to its gradient peak: SAM's boundary error, about ten photo pixels at 3 m
+MIN_SCORE = 0.6  # SAM's own predicted IoU: below it SAM itself expects to miss or spill over 40 % of the region
 # Share of the scan rectangle a leaf or a clear opening fills: the hole minus two casings (<= 15 cm) on an opening
 # >= 0.5 m wide leaves at least 35 %; SAM may spill past the scan by its 3 cm sigma.
 AREA = (0.35, 1.1)
@@ -38,8 +39,11 @@ MIN_LINES = 10  # rows or columns (2 cm at 2 mm) a mask edge needs
 MEETING_GAP = 0.03  # m between the two leaves of a double door: the meeting stiles and their rebate
 SKIRTING_TOP = 0.15  # m; a niche starting below a skirting's height stands on the floor
 CLOSED_SHARE = 0.5  # share of the doorway where the mesh lies within the wall slab (casings included) for a closed leaf
-MAX_VIEWS = 6  # the median of 6 views survives two bad ones; SAM and the profiles cost per view
+MAX_VIEWS = 6  # SAM and the profiles cost per view; 6 leave baseline after `ortho.triangulate` drops an outlier
 CANDIDATES = 4  # candidate lines kept per side for a later pick
+CANDIDATE_STEP = 0.005  # m between depth hypotheses: half a step of depth error shifts a line < 5 mm at 60 degrees
+SAME_LINE = 0.005  # m; two candidate lines closer than this are one line (2.5 ortho pixels)
+STRENGTH_TIE = 0.05  # gradient strengths within 5 % are the same line seen at depths the views cannot separate
 
 
 def _px_box(o: ortho.Ortho, s0: float, s1: float, y0: float, y1: float) -> list[float]:
@@ -131,25 +135,51 @@ def _axis(side: str) -> str:
     return "s" if side in ("left", "right") else "y"
 
 
-def candidates(orthos: list[ortho.Ortho], rect) -> dict[str, list[dict]]:
-    """Per side, the strongest edges of the view-median gradient profile (delta 0) within MARGIN of the scan edge."""
-    bands, out = _bands(rect), {}
-    edge = dict(zip(SIDES, (rect[0], rect[1], rect[2], rect[3])))
+def candidates(orthos: list[ortho.Ortho], cams: list[np.ndarray], rect, bounds) -> dict[str, list[dict]]:
+    """Per side, the strongest lines within MARGIN of the scan edge, each with the depth where the views agree.
+
+    Each view's gradient profile is read once at delta 0, then sheared to every depth hypothesis in `bounds` (a line
+    at depth d shows at x + (cam - x) * -d / (cam_delta - d)) and fused by median: a recessed sash or leaf edge
+    stands out at its own depth, where fusing at delta 0 would blur it away.
+    """
+    bands, edge, out = _bands(rect), dict(zip(SIDES, rect)), {}
+    depths = np.arange(bounds[0], bounds[1] + CANDIDATE_STEP / 2, CANDIDATE_STEP)
     for side in SIDES:
         axis = _axis(side)
         profs = []
-        for o in orthos:
+        for o, cam in zip(orthos, cams):
             x, p = ortho.profile(o, axis, bands[axis])
             scale = np.nanpercentile(p, 95) if np.isfinite(p).any() else np.nan
-            profs.append(p / scale if scale > 0 else np.full_like(p, np.nan))
-        if not profs or not np.isfinite(profs).any():
-            out[side] = []
-            continue
-        with np.errstate(all="ignore"):
-            fused = np.nanmedian(np.array(profs), axis=0)
-        found = ortho.peaks(x, fused, edge[side] - MARGIN, edge[side] + MARGIN, CANDIDATES)
-        out[side] = [{"pos": round(p, 4), "strength": round(s, 3)} for p, s in found]
+            if scale > 0:
+                profs.append((p / scale, cam[0] if axis == "s" else cam[1], cam[2]))
+        found = []
+        for d in depths if profs else ():
+            order = np.argsort(x)  # y profiles run top-down
+            sheared = [np.interp(x + (c - x) * -d / (cd - d), x[order], p[order], left=np.nan, right=np.nan) for p, c, cd in profs]
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", "All-NaN slice", RuntimeWarning)
+                fused = np.nanmedian(np.array(sheared), axis=0)
+            found += [(pos, float(d), strength) for pos, strength in ortho.peaks(x, fused, edge[side] - MARGIN, edge[side] + MARGIN, CANDIDATES)]
+        out[side] = [{"pos": round(p, 4), "delta": round(d, 4), "strength": round(st, 3)}
+                     for p, d, st in sorted(_distinct_lines(found, [(c, cd) for _, c, cd in profs]))]
     return out
+
+
+def _distinct_lines(found, cams) -> list[tuple[float, float, float]]:
+    """The CANDIDATES strongest of (pos, depth, strength), one per line: two hypotheses are one line when they fall
+    within SAME_LINE of each other in every view at delta 0. Among hypotheses of one line within STRENGTH_TIE of its
+    best (no baseline across it), the depth nearest the face is kept, where the scan puts the element."""
+    def footprint(pos, d):
+        return np.array([pos + (c - pos) * -d / (cd - d) for c, cd in cams])
+
+    groups = []
+    for pos, d, strength in sorted(found, key=lambda t: -t[2]):
+        group = next((g for g in groups if np.abs(footprint(pos, d) - g["at"]).max() <= SAME_LINE), None)
+        if group is None:
+            groups.append({"at": footprint(pos, d), "best": strength, "members": [(pos, d, strength)]})
+        elif strength >= (1 - STRENGTH_TIE) * group["best"]:
+            group["members"].append((pos, d, strength))
+    return [min(g["members"], key=lambda m: abs(m[1])) for g in groups[:CANDIDATES]]
 
 
 def _value(v: float, sigma: float) -> dict:
@@ -165,12 +195,13 @@ def measure(kind: str, frame: FaceFrame, rect, views: list[tuple[PosedPhoto, np.
     """
     s0, s1, y0, y1 = rect
     box = (s0 - MARGIN, s1 + MARGIN, y0 - MARGIN, y1 + MARGIN)
-    floor_based = kind in FLOOR_KINDS or (kind == "niche" and y0 < SKIRTING_TOP)
+    floor_based = is_floor_based(kind, rect)
     bands = _bands(rect)
-    obs, used, orthos = {side: [] for side in SIDES}, [], []
+    obs, used, orthos, cams = {side: [] for side in SIDES}, [], [], []
     for photo, image in views:
         o = ortho.ortho(photo, image, frame, box)
         orthos.append(o)
+        cams.append(ortho.camera_coords(frame, photo))
         mask = leaf_mask(o, rect, segment)
         if mask is None:
             continue
@@ -182,27 +213,45 @@ def measure(kind: str, frame: FaceFrame, rect, views: list[tuple[PosedPhoto, np.
             axis = _axis(side)
             snapped = ortho.snap(o, axis, bands[axis], pos, SNAP)
             obs[side].append((pos if snapped is None else snapped, cam[0] if axis == "s" else cam[1], cam[2]))
-    out = {"kind": kind, "views": used, "candidates": candidates(orthos, rect)}
+    out = {"kind": kind, "views": used, "photos": [p.name for p, _ in views], "floor_based": floor_based,
+           "candidates": candidates(orthos, cams, rect, bounds)}
     fix = {side: ortho.triangulate(obs[side], bounds) for side in ("left", "right")}
     # A leaf, a sash or a niche head is one plane parallel to the face: its horizontal edges take the depths its
     # vertical edges allow, as photos taken at one height give no baseline across a horizontal edge.
     plane = [f.depths for f in fix.values() if f] or [bounds]
     fix.update({side: ortho.triangulate(obs[side], (min(d[0] for d in plane), max(d[1] for d in plane))) for side in ("bottom", "top")})
-    needed = ("left", "right", "top") if floor_based else SIDES
-    if any(fix[side] is None for side in needed):
+    edges = {side: edge_entry(f) for side, f in fix.items() if f}
+    found = measures_from(edges, floor_based, floor_sigma)
+    if found is None:
         return {**out, "status": "candidates"}
-    edges = {side: {"pos": f.pos, "delta": f.delta, "sigma": f.sigma, "views": f.views} for side, f in fix.items() if f}
-    if floor_based:
-        edges["bottom"] = {"pos": 0.0, "delta": fix["top"].delta, "sigma": floor_sigma, "views": 0, "rule": "floor"}
-    left, right, bottom, top = (edges[side] for side in SIDES)
-    out["measures"] = {"center_s": _value((left["pos"] + right["pos"]) / 2, np.hypot(left["sigma"], right["sigma"]) / 2),
-                       "width": _value(right["pos"] - left["pos"], np.hypot(left["sigma"], right["sigma"])),
-                       "sill": _value(bottom["pos"], bottom["sigma"]),
-                       "height": _value(top["pos"] - bottom["pos"], np.hypot(top["sigma"], bottom["sigma"]))}
+    edges, measures = found
     if kind == "window":  # curtains and frosted glass fool the mask: a window waits for an edge pick
-        measures = out.pop("measures")
         return {**out, "status": "candidates", "proposal": {"edges": edges, "measures": measures}}
-    return {**out, "status": "anchored", "edges": edges}
+    return {**out, "status": "anchored", "edges": edges, "measures": measures}
+
+
+def is_floor_based(kind: str, rect) -> bool:
+    return kind in FLOOR_KINDS or (kind == "niche" and rect[2] < SKIRTING_TOP)
+
+
+def edge_entry(fix: ortho.EdgeFix) -> dict:
+    return {"pos": fix.pos, "delta": fix.delta, "sigma": fix.sigma, "views": fix.views, "depths": list(fix.depths),
+            "rms": fix.rms}
+
+
+def measures_from(edges: dict, floor_based: bool, floor_sigma: float) -> tuple[dict, dict] | None:
+    """(edges with the floor rule applied, measures), or None when a needed edge is missing."""
+    needed = ("left", "right", "top") if floor_based else SIDES
+    if any(side not in edges for side in needed):
+        return None
+    edges = dict(edges)
+    if floor_based:
+        edges["bottom"] = {"pos": 0.0, "delta": edges["top"]["delta"], "sigma": floor_sigma, "views": 0, "rule": "floor"}
+    left, right, bottom, top = (edges[side] for side in SIDES)
+    return edges, {"center_s": _value((left["pos"] + right["pos"]) / 2, np.hypot(left["sigma"], right["sigma"]) / 2),
+                   "width": _value(right["pos"] - left["pos"], np.hypot(left["sigma"], right["sigma"])),
+                   "sill": _value(bottom["pos"], bottom["sigma"]),
+                   "height": _value(top["pos"] - bottom["pos"], np.hypot(top["sigma"], bottom["sigma"]))}
 
 
 # --- the stage -----------------------------------------------------------------------------------------------------
@@ -286,21 +335,30 @@ def _image(path: Path) -> np.ndarray:
 
 
 def _read(path: Path) -> dict | None:
+    """The JSON object at `path`; None when absent or unreadable (architecture reports an unreadable file itself)."""
     from room_model import architecture
 
-    return architecture._read(path, path.name) if path.exists() else None
+    try:
+        return architecture._read(path, path.name) if path.exists() else None
+    except StageInputMissing:
+        return None
+
+
+def capture_arch(ctx: StageContext) -> dict:
+    """The architecture before any photo anchoring: model, openings, LLM answers (declared niches) and overrides."""
+    from room_model import architecture, llm_merge
+
+    model_doc = json.loads(require(ctx, "model").read_text(encoding="utf-8"))
+    openings_doc = json.loads(require(ctx, "openings").read_text(encoding="utf-8"))
+    vision = _read(ctx.out / architecture.VISION_PATH)
+    return architecture.build(model_doc, openings_doc, vision if llm_merge.usable(vision) else None, None, ctx,
+                              _read(ctx.out / architecture.OVERRIDES_PATH))
 
 
 def build(ctx: StageContext, segment) -> dict:
     """The anchors document for the context's capture; `segment` as in `measure` (`segment.Segmenter` in the stage)."""
-    from room_model import architecture, llm_merge
-
     t0 = time.monotonic()
-    model_doc = json.loads(require(ctx, "model").read_text(encoding="utf-8"))
-    openings_doc = json.loads(require(ctx, "openings").read_text(encoding="utf-8"))
-    vision = _read(ctx.out / architecture.VISION_PATH)
-    arch = architecture.build(model_doc, openings_doc, vision if llm_merge.usable(vision) else None, None, ctx,
-                              _read(ctx.out / architecture.OVERRIDES_PATH))
+    arch = capture_arch(ctx)
     photos = load_posed_photos(ctx)
     if not photos:
         raise NoPhotos(f"no photos for room {ctx.room} in {ctx.capture}")
@@ -343,50 +401,91 @@ def run(ctx: StageContext, segment=None) -> Path:
     return path
 
 
-PARAMS = ("center_s", "width", "sill", "height")
+LEAF_KINDS = ("door", "window")  # the photo measures the leaf or sash, another quantity than the hole: own parameters
+PAIRS = {("left", "right"): ("center_s", "width"), ("bottom", "top"): ("sill", "height")}  # decided together
+MIN_EDGE_VIEWS = 2  # an edge seen in one view has no depth, only the whole depth bounds
+MAX_RMS = 2 * ortho.LOCALISATION  # m; views agreeing within two peak localisations: a 95 % bound for that noise
 # m; RoomPlan's own stated accuracy: a photo measure looser than the coarsest scan source is a depth ambiguity
-# (one view, an occluded edge), not a measurement. Below it, the photo outranks roomplan, lidar and llm values.
+# (two views without baseline), not a measurement.
 PLAUSIBLE_SIGMA = 0.03
+DISAGREE = 3.0  # combined sigmas beyond which photo and scan disagree: flagged to_verify, never settled silently
+MEASURED = ("roomplan", "lidar")  # sources that measured the hole; `assumed` and `llm` (clicks) did not
+
+
+def _edge_ok(edge: dict | None) -> bool:
+    if edge is None:
+        return False
+    return edge.get("rule") == "floor" or (edge["views"] >= MIN_EDGE_VIEWS and edge.get("rms", np.inf) <= MAX_RMS
+                                           and edge["sigma"] <= PLAUSIBLE_SIGMA)
+
+
+def _param_doc(m: dict) -> dict:
+    return {"value": float(m["value"]), "sigma": float(m["sigma"]), "unit": "m", "source": "photo"}
+
+
+def _set_leaf(arch: dict, el: dict, names, item: dict) -> bool:
+    """leaf_<name> parameters beside the hole's; True when the leaf is larger than its hole beyond DISAGREE sigmas."""
+    prefix = el["params"]["width"].rsplit(".", 1)[0]
+    wrong = False
+    for name in names:
+        m = item["measures"][name]
+        pid = el["params"][f"leaf_{name}"] = f"{prefix}.leaf_{name}"
+        arch["parameters"][pid] = _param_doc(m)
+        if name in ("width", "height"):
+            hole = arch["parameters"][el["params"][name]]
+            wrong |= m["value"] - hole["value"] > DISAGREE * np.hypot(m["sigma"], hole["sigma"])
+    return wrong
+
+
+def _replace(arch: dict, el: dict, names, item: dict) -> bool:
+    """Photo values in place of the hole's (scan value kept); True when they disagree with a measured scan source."""
+    wrong = False
+    for name in names:
+        pid = el["params"].get(name)
+        if pid is None or SOURCE_RANK[arch["parameters"][pid]["source"]] >= SOURCE_RANK["photo"]:
+            continue
+        old, m = arch["parameters"][pid], item["measures"][name]
+        if old["source"] in MEASURED:
+            wrong |= abs(m["value"] - old["value"]) > DISAGREE * np.hypot(m["sigma"], old["sigma"])
+        new = _param_doc(m)
+        if old["source"] != "llm" or "scan_value" in old:
+            new.update(scan_value=old.get("scan_value", old["value"]), scan_sigma=old.get("scan_sigma", old["sigma"]))
+        if old["source"] == "llm" or "llm_value" in old:
+            new["llm_value"] = old.get("llm_value", old["value"])
+        arch["parameters"][pid] = new
+    return wrong
 
 
 def apply(arch: dict, doc: dict) -> dict:
-    """Anchored elements take their photo measures (`source: photo`, scan value kept) and their edge depths.
+    """Anchored elements take their photo measures, side pair by side pair (PAIRS), when every edge of the pair passes
+    `_edge_ok` (MIN_EDGE_VIEWS, MAX_RMS, PLAUSIBLE_SIGMA; a floor-ruled bottom always does).
 
-    A measure replaces a parameter of lower source rank (`model.SOURCE_RANK`) when its sigma is at most
-    PLAUSIBLE_SIGMA; the sill goes with the height, as both rest on the bottom edge. A floor-based bottom is a
-    rule, not a measure: there the top edge's own sigma is what is checked.
+    Doors and windows get leaf_* parameters and `leaf_edges` depths, the hole's width and height stay; niches and
+    openings get their own parameters replaced (below tape) and `edges` depths. A disagreement beyond DISAGREE
+    sigmas with a measured source, or a leaf larger than its hole, flags the element `to_verify`.
     """
     elements = {e["id"]: e for e in arch["elements"]}
-    report = {"anchored": [], "candidates": [], "open": [], "no_view": [], "no_host": [], "unknown": [], "kept": []}
+    report = {"anchored": [], "candidates": [], "open": [], "no_view": [], "no_host": [], "unknown": [], "kept": [],
+              "to_verify": []}
     for ident, item in sorted(doc.get("elements", {}).items()):
         el = elements.get(ident)
-        if el is None:
+        if el is None or el["kind"] != item.get("kind"):
             report["unknown"].append(ident)
             continue
         report.setdefault(item.get("status"), []).append(ident)
         if item.get("status") != "anchored":
             continue
-        sigma = {name: m["sigma"] for name, m in item["measures"].items()}
-        if item["edges"]["bottom"].get("rule") == "floor":
-            sigma["height"] = item["edges"]["top"]["sigma"]
-        better = {name: name in el["params"] and sigma[name] <= PLAUSIBLE_SIGMA
-                  and SOURCE_RANK[arch["parameters"][el["params"][name]]["source"]] < SOURCE_RANK["photo"]
-                  for name in ("center_s", "width", "height")}
-        better["sill"] = better["height"] and "sill" in el["params"]
-        report["kept"] += [f"{ident}.{name}" for name, ok in better.items() if not ok and name in el["params"]]
-        for name in PARAMS:
-            if not better[name]:
+        leaf, applied, wrong = el["kind"] in LEAF_KINDS, set(), False
+        for sides, names in PAIRS.items():
+            if not all(_edge_ok(item["edges"].get(side)) for side in sides):
+                report["kept"] += [f"{ident}.{name}" for name in names if name in el["params"]]
                 continue
-            pid = el["params"][name]
-            old, m = arch["parameters"][pid], item["measures"][name]
-            new = {"value": m["value"], "sigma": m["sigma"], "unit": "m", "source": "photo",
-                   "scan_value": old.get("scan_value", old["value"]), "scan_sigma": old.get("scan_sigma", old["sigma"])}
-            if old["source"] == "llm" or "llm_value" in old:
-                new["llm_value"] = old.get("llm_value", old["value"])
-            arch["parameters"][pid] = new
-        applied = {"left", "right"} if better["width"] else set()
-        applied |= {"bottom", "top"} if better["height"] else set()
-        el["edges"] = {side: float(e["delta"]) for side, e in item["edges"].items() if side in applied}
-        if applied and "photo_anchored" not in el["flags"]:
-            el["flags"].append("photo_anchored")
+            wrong |= (_set_leaf if leaf else _replace)(arch, el, names, item)
+            applied |= set(sides)
+        el["leaf_edges" if leaf else "edges"] = {side: float(e["delta"]) for side, e in item["edges"].items() if side in applied}
+        new_flags = (["photo_anchored"] if applied else []) + (["edge_picked"] if applied and item.get("picked") else [])
+        new_flags += ["to_verify"] if wrong else []
+        el["flags"] += [f for f in new_flags if f not in el["flags"]]
+        if wrong:
+            report["to_verify"].append(ident)
     return report

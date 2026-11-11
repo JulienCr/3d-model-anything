@@ -12,6 +12,7 @@ RES = 0.002  # m per ortho pixel: a phone photo at 2-3 m resolves 1.5-2.5 mm, a 
 SMOOTH = 1.0  # ortho px of Gaussian blur before the gradient: removes the resampling grid, keeps a 2 mm edge
 LOCALISATION = 0.002  # m; a gradient peak is located to about one ortho pixel, the noise floor of an edge
 STRONG = 0.5  # a peak under half the strongest one nearby is texture or shading, not a material boundary
+OUTLIER = 0.01  # m; five peak localisations: a view this far from the others saw another line, not noise
 DELTA_STEP = 0.0005  # m between the depths tried along the face normal: 1 mm of depth moves an edge < 2 mm at 60 degrees
 
 
@@ -115,6 +116,7 @@ class EdgeFix:
     sigma: float  # of `pos`: the view spread and the depth ambiguity
     views: int
     depths: tuple[float, float]  # the depths the views cannot tell apart
+    rms: float = 0.0  # spread of the views at the depth kept, metres
 
 
 def camera_coords(frame: FaceFrame, photo: PosedPhoto) -> np.ndarray:
@@ -127,11 +129,22 @@ def triangulate(observations: list[tuple[float, float, float]], bounds: tuple[fl
     The ray of view i meets depth d at pos0 + (cam - pos0) * d / cam_delta. The depths within `bounds` where the
     views' spread stays within LOCALISATION of the best make the ambiguity: half the range of positions over them,
     with the spread, is the sigma; the depth kept is their centre. One view, or views without baseline across the
-    edge: the whole bounds are ambiguous.
+    edge: the whole bounds are ambiguous. With three views or more, a view off by more than OUTLIER from the others
+    (a mask cut by an occluder) is dropped once and the edge solved again.
     """
     obs = np.array([o for o in observations if o[2] > MIN_DEPTH], float).reshape(-1, 3)
     if not len(obs):
         return None
+    fix, pos0 = _solve(obs, bounds)
+    if len(obs) >= 3:
+        keep = np.abs(pos0 - np.median(pos0)) <= OUTLIER
+        if 2 <= keep.sum() < len(obs):
+            fix, _ = _solve(obs[keep], bounds)
+    return fix
+
+
+def _solve(obs: np.ndarray, bounds) -> tuple[EdgeFix, np.ndarray]:
+    """(the edge, each view's position at the depth kept)."""
     ds = np.arange(bounds[0], bounds[1] + DELTA_STEP / 2, DELTA_STEP)
     pos = obs[:, 0][None, :] + (obs[:, 1] - obs[:, 0])[None, :] * ds[:, None] / obs[:, 2][None, :]
     rms = pos.std(axis=1)
@@ -140,4 +153,5 @@ def triangulate(observations: list[tuple[float, float, float]], bounds: tuple[fl
     best = int(np.argmin(np.abs(ds - ds[near].mean())))
     ambiguity = (mean[near].max() - mean[near].min()) / 2
     sigma = float(np.hypot(max(rms[best], LOCALISATION) / np.sqrt(len(obs)), ambiguity))
-    return EdgeFix(float(mean[best]), float(ds[best]), sigma, len(obs), (float(ds[near].min()), float(ds[near].max())))
+    fix = EdgeFix(float(mean[best]), float(ds[best]), sigma, len(obs), (float(ds[near].min()), float(ds[near].max())), float(rms[best]))
+    return fix, pos[best]

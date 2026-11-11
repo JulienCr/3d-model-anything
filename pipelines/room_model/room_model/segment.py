@@ -43,7 +43,7 @@ class Segmenter:
     def diagnostics(self) -> dict:
         import torch
 
-        info = {"model": MODEL_ID, "device": self._device}
+        info = {"model": MODEL_ID, "revision": REVISION, "device": self._device}
         if self._device == "cuda":
             info["peak_vram_mb"] = round(torch.cuda.max_memory_allocated() / 2**20)
         return info

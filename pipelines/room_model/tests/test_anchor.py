@@ -2,12 +2,11 @@ import json
 
 import numpy as np
 import pytest
-from scipy import ndimage
 
 from room_model import anchor, model, openings, ortho, shell
 from room_model.ortho import FaceFrame
 from room_model.photo_geom import DepthMaps
-from helpers import make_case
+from helpers import colour_stub, make_case
 from synthetic import DOOR, FacePatch, render_face
 
 FRAME = FaceFrame(np.zeros(3), np.array([1.0, 0, 0]), np.array([0, 0, 1.0]))
@@ -48,17 +47,6 @@ def door_views():
 def _at_face(s_true, delta, camera):
     """Where an edge at (s_true, delta) appears on the delta = 0 ortho image of a camera at (s, y, delta)."""
     return s_true + (camera[0] - s_true) * (0.0 - delta) / (camera[2] - delta)
-
-
-def colour_stub(rgb, box, points=None):
-    """Stand-in for SAM: the region of uniform colour under the box centre, or nothing when it is a sliver."""
-    x0, y0, x1, y1 = (int(round(v)) for v in box)
-    cy, cx = (y0 + y1) // 2, (x0 + x1) // 2
-    ref = np.median(rgb[cy - 2:cy + 3, cx - 2:cx + 3].reshape(-1, 3), axis=0)
-    same = np.abs(rgb.astype(float) - ref).max(axis=2) < 20
-    labels, _ = ndimage.label(same)
-    mask = labels == labels[cy, cx]
-    return [(mask, 0.9)]
 
 
 def nothing_stub(rgb, box, points=None):
@@ -214,4 +202,30 @@ def test_a_window_mask_is_only_a_proposal_until_an_edge_pick_confirms_it():
     views = _views(_wall((0.60, 1.60), (0.9, 2.1), sash), angles=(-20, 0, 20), target_s=1.1)
     out = _measure("window", (0.58, 1.65, 0.88, 2.12), views)
     assert out["status"] == "candidates" and "measures" not in out
-    assert abs(out["proposal"]["measures"]["width"]["value"] - 1.0) < 0.004
+    proposal = out["proposal"]["measures"]
+    assert abs(proposal["width"]["value"] - 1.0) < 0.004 and abs(proposal["sill"]["value"] - 0.9) < 0.004  # measured bottom
+
+
+def test_candidates_keep_the_edges_of_a_sash_recessed_behind_its_opening():
+    sash = [FacePatch((0.62, 1.58), (0.9, 2.1), -0.08, 235), FacePatch((0.3, 1.9), (0.6, 2.4), -0.09, 90)]
+    views = _views(_wall((0.50, 1.70), (0.8, 2.2), sash), angles=(-30, 5, 25), target_s=1.1)
+    out = _measure("window", (0.48, 1.72, 0.78, 2.22), views, segment=nothing_stub)
+    for side, truth in (("left", 0.62), ("right", 1.58)):
+        best = min(out["candidates"][side], key=lambda c: abs(c["pos"] - truth))
+        assert abs(best["pos"] - truth) < 0.003 and abs(best["delta"] + 0.08) < 0.015, side
+
+
+def test_raised_niche_is_measured_from_its_own_sill():
+    back = [FacePatch((0.3, 1.4), (0.7, 2.0), -0.10, 200)]
+    views = _views(_wall((0.50, 1.20), (0.90, 1.80), back), angles=(-25, 0, 20), target_s=0.85)
+    out = _measure("niche", (0.47, 1.23, 0.87, 1.83), views)
+    m = out["measures"]
+    assert out["status"] == "anchored" and "rule" not in out["edges"]["bottom"]
+    assert abs(m["sill"]["value"] - 0.90) < 0.004 and abs(m["height"]["value"] - 0.90) < 0.005
+
+
+def test_a_view_off_by_more_than_the_outlier_bound_is_dropped(door_views):
+    obs, _ = _left_observations(door_views)
+    bad = (obs[1][0] + 0.05, obs[1][1], obs[1][2])  # the same camera reading another line 5 cm away
+    fix = ortho.triangulate(obs + [bad], BOUNDS)
+    assert fix.views == 3 and abs(fix.pos - LEAF_S[0]) < 0.002
