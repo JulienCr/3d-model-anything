@@ -365,15 +365,18 @@ SCRIPT = """
     keys.forEach(function (key) {
       var old = key === current ? null : localStorage.getItem(key);
       if (!old) return;
+      try {
       var doc = JSON.parse(old);
+      var plain = function (id) { return typeof doc[id] === 'string' || typeof doc[id] === 'number'; };
       var ids = doc && typeof doc === 'object' ? Object.keys(doc) : [];
-      if (!ids.length || !ids.every(function (id) { return typeof doc[id] === 'string' || typeof doc[id] === 'number'; })) return;
-      ids.forEach(function (id) {
+      if (!ids.some(plain)) return;
+      ids.filter(plain).forEach(function (id) {
         var v = parse(doc[id]), mine = state[id];
         if (v === null || (mine && mine.value_m !== null)) return;
         var frame = /^(Door|Window)_[0-9]+-[wh]$/.test(id);
         state[id] = { value_m: Math.round(v * 100) / 10000, date: '', note: mine ? mine.note : rows[id] ? '' : frame ? 'ancienne page — mesure bâti compris' : 'ancienne page' };
       });
+      } catch (e) {}
     });
   }
   try { migrate(); saveLocal(); } catch (e) {}

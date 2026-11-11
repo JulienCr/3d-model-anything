@@ -235,15 +235,23 @@ global.document = { querySelectorAll: s => (s === 'input[data-dim]' ? inputs : s
   getElementById: id => (byId[id] = byId[id] || el({})), createElement: () => el({}) };
 global.window = global; global.navigator = {};
 global.PREFILL = setup.prefill; global.CAPTURE = 'cap';
+const writes = [];
+if (setup.fs) {
+  const fake = { name: 'm.json', getFile: async () => ({ text: async () => '' }),
+    createWritable: async () => ({ write: async (d) => { writes.push(JSON.parse(d)); }, close: async () => {} }) };
+  global.showSaveFilePicker = async () => fake; global.showOpenFilePicker = async () => [fake];
+  global.indexedDB = { open() { const r = {}; setTimeout(() => r.onerror && r.onerror(), 0); return r; } };
+}
 eval(script);
 const type = (id, value, note) => { const i = inputs.find(x => x.attrs['data-dim'] === id), n = notes.find(x => x.attrs['data-note'] === id);
   if (value !== undefined) i.value = value; if (note !== undefined) n.value = note; i.listeners.input(); };
 const steps = setup.steps || [];
 const out = [];
-const snapshot = () => ({ inputs: Object.fromEntries(inputs.map(i => [i.attrs['data-dim'], i.value])),
+const snapshot = () => ({ writes, inputs: Object.fromEntries(inputs.map(i => [i.attrs['data-dim'], i.value])),
   stored: JSON.parse(store['room-model-tape:cap'] || '{}'), legacy: store, orphans: byId.legacylist.children.map(c => c.textContent), boxHidden: byId.legacy.hidden });
 setTimeout(() => {
   for (const s of steps) { type(...s); }
+  if (setup.fs) byId.link.listeners.click();
   setTimeout(() => console.log(JSON.stringify(snapshot())), 700);
 }, 10);
 """
@@ -303,3 +311,33 @@ def test_python_side_accepts_a_note_without_a_value():
     assert tape_merge.normalize(doc) == {"B-w": 0.5}
     assert tape_merge.read_store(doc)["A-w"] == {"value_m": None, "date": "d", "note": "x"}
     assert tape_merge.read_store({"version": 2, "values": {"A-w": {"value_m": None, "note": " "}}}) == {}
+
+
+LEGACY_KEY = "room-model-tape:Relevé au mètre ruban"
+
+
+@needs_node
+def test_each_legacy_key_migrates_on_its_own(full, tmp_path):  # noqa: F811
+    _, _, arch = full
+    setup = {"dims": ["Opening_1-w", "Window_1-sill"], "prefill": {},
+             "local": {"room-model-tape:broken": "{not json", LEGACY_KEY: json.dumps({"Opening_1-w": "81,5", "Door_1-w": "92"})}}
+    stored = _run_page(arch, tmp_path, setup)["stored"]
+    assert stored["Opening_1-w"]["value_m"] == 0.815 and stored["Door_1-w"]["value_m"] == 0.92
+
+
+@needs_node
+def test_legacy_map_with_an_odd_entry_keeps_the_others(full, tmp_path):  # noqa: F811
+    _, _, arch = full
+    legacy = {"Opening_1-w": "81,5", "Door_1-w": None, "Window_1-h": {"a": 1}, "Cornice-x": 3}
+    setup = {"dims": ["Opening_1-w"], "prefill": {}, "local": {LEGACY_KEY: json.dumps(legacy)}}
+    stored = _run_page(arch, tmp_path, setup)["stored"]
+    assert stored["Opening_1-w"]["value_m"] == 0.815 and stored["Cornice-x"]["value_m"] == 0.03
+    assert "Door_1-w" not in stored and "Window_1-h" not in stored
+
+
+@needs_node
+def test_migrated_entries_reach_the_linked_file(full, tmp_path):  # noqa: F811
+    _, _, arch = full
+    setup = {"dims": ["Opening_1-w"], "prefill": {}, "fs": True, "local": {LEGACY_KEY: json.dumps({"Opening_1-w": "81,5", "Door_1-w": "92"})}}
+    writes = _run_page(arch, tmp_path, setup)["writes"]
+    assert writes and writes[-1]["values"]["Opening_1-w"]["value_m"] == 0.815 and writes[-1]["values"]["Door_1-w"]["value_m"] == 0.92
