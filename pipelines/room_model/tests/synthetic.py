@@ -62,6 +62,7 @@ class SyntheticOptions:
     partition_faces: str = "ab"  # faces in the mesh: a = +x face, b = -x face
     outside_roomplan_wall: bool = False  # a RoomPlan wall standing outside the floor polygon
     window: bool = False  # a window with a hole in the south wall mesh
+    door_open: bool = False  # the door leaf is left out of the mesh: the doorway shows the space behind
     window_rp_error: float = 0.0  # m the RoomPlan window is shifted along the wall from the mesh hole
     partition_opening: bool = False  # a RoomPlan opening on the partition, no hole in the mesh
     partition_opening_width: float = 0.9
@@ -250,7 +251,8 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
     if drop != "east":
         m.rect(np.array([6.0, 0, 0]), Z, Y, -X, 1, (0, 2.5), (0, H_MAIN),
                lambda u, v: ~_in_rects(u, v, [(door_z, (0, DOOR["h"]))]))
-    m.rect(np.array([6.05, 0, 0]), Z, Y, -X, 7, door_z, (0, DOOR["h"]))
+    if not opt.door_open:
+        m.rect(np.array([6.05, 0, 0]), Z, Y, -X, 7, door_z, (0, DOOR["h"]))
     wall("step", np.array([0, 0, 2.5]), X, -Z, (2.5, 6), H_MAIN, [beam_xy])
     m.rect(np.array([0, 0, 2.5]), X, Y, -Z, 1, (0, 2.5), (H_WING, H_MAIN))
     wall("wing_east", np.array([2.5, 0, 0]), Z, -X, (2.5, 4.5), H_WING)
@@ -578,3 +580,44 @@ def make_capture(root: Path, options: SyntheticOptions | None = None) -> Synthet
         partition=None if partition is None else {"ident": partition, "thickness": PARTITION["thickness"],
                                                   "ends": [(PARTITION["x"] + PARTITION["thickness"] / 2, z) for z in PARTITION["z"]]},
     )
+
+
+# --- a single host face made of flat rectangles, for the photo anchoring tests ------------------------------------
+
+@dataclass
+class FacePatch:
+    s: tuple[float, float]
+    y: tuple[float, float]
+    delta: float  # m along the face normal (negative = behind the face)
+    grey: int
+
+
+def render_face(frame, patches: list[FacePatch], position, target, size=(1200, 1600), focal=1100.0,
+                background: int = 30, name: str = "face.jpg"):
+    """(image (h, w, 3) uint8, PosedPhoto) of rectangles parallel to a face (`room_model.ortho.FaceFrame`), nearest wins.
+
+    Each patch carries a faint 1 cm noise so that flat areas are not perfectly flat; the camera looks from `position`
+    to `target` (room frame), upright.
+    """
+    from room_model.photo_geom import PosedPhoto
+
+    w, h = size
+    K = np.array([[focal, 0, w / 2], [0, focal, h / 2], [0, 0, 1.0]])
+    c2w = _look_at(position, target, 0.0)
+    u, v = np.meshgrid(np.arange(w) + 0.5, np.arange(h) + 0.5)
+    rays = np.stack([u, v, np.ones_like(u)], -1).reshape(-1, 3) @ np.linalg.inv(K).T @ c2w[:3, :3].T
+    centre = np.asarray(position, float)
+    c = frame.coords(centre)
+    r_s, r_y, r_d = rays @ frame.s_axis, rays[:, 1], rays @ frame.normal
+    best, grey = np.full(len(rays), np.inf), np.full(len(rays), float(background))
+    rng = np.random.default_rng(7)
+    noise = rng.uniform(-3, 3, (400, 400))
+    for patch in patches:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = (patch.delta - c[2]) / r_d
+        s, y = c[0] + t * r_s, c[1] + t * r_y
+        hit = (t > 0) & (t < best) & (s >= patch.s[0]) & (s < patch.s[1]) & (y >= patch.y[0]) & (y < patch.y[1])
+        cells = noise[(np.floor(s[hit] * 100) % 400).astype(int), (np.floor(y[hit] * 100) % 400).astype(int)]
+        best[hit], grey[hit] = t[hit], patch.grey + cells
+    image = np.repeat(np.clip(grey, 0, 255).reshape(h, w, 1), 3, axis=2).astype(np.uint8)
+    return image, PosedPhoto(name, Path(name), K, c2w, (w, h), 0)

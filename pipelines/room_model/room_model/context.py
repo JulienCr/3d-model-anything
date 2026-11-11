@@ -11,6 +11,7 @@ STAGE_OUTPUTS = {
     "export": "model_measured.glb",
     "openings": "openings.json",
     "vision": "vision/answers.json",
+    "anchor": "anchors.json",
     "architecture": "architecture.json",
     "textures": "textures/textures.json",
     "blender": "architecture.blend",

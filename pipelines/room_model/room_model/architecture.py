@@ -18,6 +18,7 @@ STATION_HEIGHT = 1.2  # m above the floor at which a width or length is read
 VISION_PATH = "vision/answers.json"
 TAPE_PATH = "measurements.json"
 OVERRIDES_PATH = "overrides.json"
+ANCHORS_PATH = "anchors.json"
 OPENING_KINDS = ("door", "window", "opening", "niche")
 
 
@@ -77,13 +78,13 @@ def _wall_length_dimensions(model_doc: dict) -> list[dict]:
 
 
 def build(model_doc: dict, openings_doc: dict, vision: dict | None = None, tape: dict | None = None, ctx: StageContext | None = None,
-          overrides: dict | None = None) -> dict:
+          overrides: dict | None = None, anchors: dict | None = None) -> dict:
     """architecture.json: the model, the openings as elements, and their dimensions plus the wall lengths.
 
-    `vision` (the answers document), `tape` ({dimension id: metres}) and `overrides` ({element id: fields}) are merged
-    in that order when given: see `llm_merge`, `tape_merge` and `overrides`. `ctx` gives the LLM corners their photos and the niche check its LiDAR samples.
+    `vision` (the answers document), `anchors` (anchors.json), `tape` ({dimension id: metres}) and `overrides`
+    ({element id: fields}) are merged in that order when given: see `llm_merge`, `anchor`, `tape_merge`, `overrides`. `ctx` gives the LLM corners their photos and the niche check its LiDAR samples.
     """
-    from room_model import llm_merge, overrides as user_overrides, tape_merge
+    from room_model import anchor, llm_merge, overrides as user_overrides, tape_merge
 
     arch = {"schema": SCHEMA, "version": VERSION, "source": model_doc.get("source"), "frame": copy.deepcopy(model_doc["frame"]),
             "parameters": copy.deepcopy({**model_doc["parameters"], **openings_doc["parameters"]}),
@@ -91,6 +92,8 @@ def build(model_doc: dict, openings_doc: dict, vision: dict | None = None, tape:
             "diagnostics": copy.deepcopy({**model_doc["diagnostics"], "openings": openings_doc["diagnostics"]}), "dimensions": []}
     if llm_merge.usable(vision):
         arch["diagnostics"]["vision"] = llm_merge.apply(arch, vision, ctx)
+    if anchors:
+        arch["diagnostics"]["anchor"] = anchor.apply(arch, anchors)
     arch["dimensions"] = copy.deepcopy(model_doc["dimensions"])
     if tape:
         arch["diagnostics"]["tape"] = tape_merge.apply(arch, tape)
@@ -129,13 +132,21 @@ def _opening_endpoints(arch: dict, dim: dict, element: dict):
         return None
     floor = _value(arch, "floor.level")
     p = {name: _value(arch, pid) for name, pid in element["params"].items()}
+    az = _value(arch, host["params"]["azimuth"])
+    normal = np.array([np.cos(az), np.sin(az)]) * (-1.0 if element["face"] == "B" else 1.0)
+    edges = element.get("edges", {})  # depth of each anchored edge along the face normal
+
+    def at(s: float, side: str) -> np.ndarray:
+        return _face_point(arch, host, element["face"], s) + edges.get(side, 0.0) * normal
+
     if dim["kind"] == "opening_width":
         y = floor + p["sill"] + p["height"] / 2
-        (x0, z0), (x1, z1) = (_face_point(arch, host, element["face"], p["center_s"] + k * p["width"] / 2) for k in (-1, 1))
+        (x0, z0), (x1, z1) = at(p["center_s"] - p["width"] / 2, "left"), at(p["center_s"] + p["width"] / 2, "right")
         return [x0, y, z0], [x1, y, z1]
-    x, z = _face_point(arch, host, element["face"], p["center_s"])
-    low, high = {"opening_height": (p["sill"], p["sill"] + p["height"]), "opening_sill": (0.0, p["sill"])}[dim["kind"]]
-    return [x, floor + low, z], [x, floor + high, z]
+    low, high = {"opening_height": ((p["sill"], "bottom"), (p["sill"] + p["height"], "top")),
+                 "opening_sill": ((0.0, "bottom"), (p["sill"], "bottom"))}[dim["kind"]]
+    (xa, za), (xb, zb) = at(p["center_s"], low[1]), at(p["center_s"], high[1])
+    return [xa, floor + low[0], za], [xb, floor + high[0], zb]
 
 
 def dimension_endpoints(arch: dict, dim_id: str) -> tuple[list[float], list[float]] | None:
@@ -189,7 +200,8 @@ def run(ctx: StageContext) -> Path:
             unreadable = str(exc)
     tape = _read(tape_path, "mesures au mètre") if tape_path.exists() else None
     overrides = _read(ctx.out / OVERRIDES_PATH, "corrections manuelles") if (ctx.out / OVERRIDES_PATH).exists() else None
-    arch = build(model_doc, openings_doc, vision, tape, ctx, overrides)
+    anchors = _read(ctx.out / ANCHORS_PATH, "ancrages photo") if (ctx.out / ANCHORS_PATH).exists() else None
+    arch = build(model_doc, openings_doc, vision, tape, ctx, overrides, anchors)
     if unreadable:
         arch["diagnostics"]["vision_unreadable"] = unreadable
     path = output_path(ctx, "architecture")

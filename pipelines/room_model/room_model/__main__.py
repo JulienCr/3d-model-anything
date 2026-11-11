@@ -18,13 +18,15 @@ STAGE_MODULES = {
     "export": "room_model.export",
     "openings": "room_model.openings",
     "vision": "room_model.vision",
+    "anchor": "room_model.anchor",
     "architecture": "room_model.architecture",
     "textures": "room_model.textures",
     "blender": "room_model.blender_stage",
 }
 
 
-STALE_AFTER = {"architecture": ("vision/answers.json", "measurements.json", "overrides.json"), "textures": ("architecture.json",),
+STALE_AFTER = {"anchor": ("openings.json", "vision/answers.json", "overrides.json"),
+               "architecture": ("anchors.json", "vision/answers.json", "measurements.json", "overrides.json"), "textures": ("architecture.json",),
                "blender": ("architecture.json", "textures/textures.json")}  # the stage reruns when one of these is newer than its output
 TAPE_FILE, OVERRIDES_FILE = "measurements.json", "overrides.json"
 

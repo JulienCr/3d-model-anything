@@ -34,7 +34,7 @@ HORIZONTAL = {
     "suspended": "suspendu sous un plafond visible (luminaire, gaine, chemin de câbles)",
 }
 TO_VERIFY = "poutre probable, à confirmer (photos ou relevé)"
-SOURCES = {"lidar": "LiDAR", "roomplan": "RoomPlan", "assumed": "supposé"}
+SOURCES = {"lidar": "LiDAR", "roomplan": "RoomPlan", "assumed": "supposé", "llm": "LLM", "photo": "photos"}
 OBSTRUCTED = "obstacle_or_uneven_wall"
 UNOBSERVED_ALERT = 0.05  # share of the ceiling the LiDAR never saw above which an alert is raised
 STATION_FLAG = "section de mur encombrée ou irrégulière, mesure à prendre avec réserve"

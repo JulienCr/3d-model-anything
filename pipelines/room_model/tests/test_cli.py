@@ -62,7 +62,7 @@ def test_all_runs_stages_in_order(tmp_path, monkeypatch):
 
         _fake_stage(monkeypatch, stage, run)
     assert _run(tmp_path, "all") == 0
-    assert order == ["registration", "shell", "model", "export", "openings", "vision", "architecture", "textures", "blender"]
+    assert order == ["registration", "shell", "model", "export", "openings", "vision", "anchor", "architecture", "textures", "blender"]
 
 
 def test_vision_placeholder_and_stale_architecture_rerun(tmp_path, monkeypatch):

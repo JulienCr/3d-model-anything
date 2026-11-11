@@ -7,7 +7,7 @@ import shutil
 import numpy as np
 import pytest
 
-from room_model import architecture, model, openings, photo_geom, report, shell, survey_page, tape, vision
+from room_model import anchor, architecture, model, openings, photo_geom, report, shell, survey_page, tape, vision
 from helpers import make_case, plan_point, truth_to_room
 from synthetic import DOOR, WINDOW
 
@@ -207,8 +207,8 @@ class Env:
     crops: dict
     photos: dict
 
-    def merge(self, answers=None, tape_values=None, overrides=None):
-        return architecture.build(self.model_doc, self.openings_doc, answers, tape_values, self.ctx, overrides)
+    def merge(self, answers=None, tape_values=None, overrides=None, anchors=None):
+        return architecture.build(self.model_doc, self.openings_doc, answers, tape_values, self.ctx, overrides, anchors)
 
 
 @pytest.fixture(scope="module")
@@ -842,3 +842,76 @@ def test_override_report_section_and_run(env, tmp_path):
     text = (ctx.out / "report.md").read_text(encoding="utf-8")
     section = text.split("## Corrections manuelles")[1].split("\n## ")[0]
     assert "Door_1" in section and "out" in section and "Window_1" in section and "nope" in section
+
+
+# --- photo anchors -----------------------------------------------------------------------------------------------
+
+def _anchored_door(env, deltas=(-0.04, -0.03, -0.05)):
+    centre = _param(env.arch, "Door_1", "center_s")["value"] + 0.01
+    left, right, top = deltas
+    edges = {"left": {"pos": centre - 0.40, "delta": left, "sigma": 0.002, "views": 3},
+             "right": {"pos": centre + 0.40, "delta": right, "sigma": 0.002, "views": 3},
+             "bottom": {"pos": 0.0, "delta": top, "sigma": 0.01, "views": 0, "rule": "floor"},
+             "top": {"pos": 2.01, "delta": top, "sigma": 0.004, "views": 2}}
+    measures = {"center_s": {"value": centre, "sigma": 0.0015}, "width": {"value": 0.80, "sigma": 0.003},
+                "sill": {"value": 0.0, "sigma": 0.01}, "height": {"value": 2.01, "sigma": 0.011}}
+    return {"schema": anchor.SCHEMA, "elements": {"Door_1": {"kind": "door", "status": "anchored", "views": ["0000.jpg"],
+                                                             "edges": edges, "measures": measures}}}
+
+
+def test_anchored_door_takes_the_photo_values_and_keeps_the_scan_ones(env):
+    scan = _param(env.arch, "Door_1", "width")["value"]
+    arch = env.merge(anchors=_anchored_door(env))
+    width = _param(arch, "Door_1", "width")
+    assert width["source"] == "photo" and width["value"] == 0.80 and width["scan_value"] == scan
+    assert "photo_anchored" in _element(arch, "Door_1")["flags"] and arch["diagnostics"]["anchor"]["anchored"] == ["Door_1"]
+    assert _dim(arch, "Door_1-w")["value"] == 0.80 and _dim(arch, "Door_1-h")["value"] == 2.01
+
+
+def test_anchored_endpoints_lie_on_the_edges_at_their_own_depth(env):
+    arch = env.merge(anchors=_anchored_door(env))
+    door = _element(arch, "Door_1")
+    host = _element(arch, door["host"])
+    az = arch["parameters"][host["params"]["azimuth"]]["value"]
+    n = np.array([np.cos(az), np.sin(az)])
+    centre, floor = _param(arch, "Door_1", "center_s")["value"], arch["parameters"]["floor.level"]["value"]
+    (x0, _, z0), (x1, _, z1) = architecture.dimension_endpoints(arch, "Door_1-w")
+    for got, s, delta in (((x0, z0), centre - 0.40, -0.04), ((x1, z1), centre + 0.40, -0.03)):
+        assert np.allclose(got, architecture._face_point(arch, host, None, s) + delta * n, atol=1e-9)
+    low, high = architecture.dimension_endpoints(arch, "Door_1-h")
+    expected = architecture._face_point(arch, host, None, centre) - 0.05 * n
+    assert low[1] == pytest.approx(floor) and high[1] == pytest.approx(floor + 2.01)
+    assert np.allclose([low[0], low[2]], expected) and np.allclose([high[0], high[2]], expected)
+
+
+def test_elements_left_as_candidates_or_open_keep_their_scan_values(env):
+    doc = _anchored_door(env)
+    doc["elements"]["Door_1"]["status"] = "candidates"
+    doc["elements"]["Window_1"] = {"kind": "window", "status": "open", "views": []}
+    arch = env.merge(anchors=doc)
+    assert _param(arch, "Door_1", "width") == _param(env.arch, "Door_1", "width") and "edges" not in _element(arch, "Door_1")
+    assert arch["diagnostics"]["anchor"]["candidates"] == ["Door_1"]
+
+
+def test_run_reads_the_anchors(env, tmp_path):
+    ctx = dataclasses.replace(env.ctx, out=tmp_path / "out")
+    shutil.copytree(env.ctx.out, ctx.out, ignore=shutil.ignore_patterns("pending"))
+    (ctx.out / "anchors.json").write_text(json.dumps(_anchored_door(env)), encoding="utf-8")
+    arch = json.loads(architecture.run(ctx).read_text(encoding="utf-8"))
+    assert _param(arch, "Door_1", "width")["source"] == "photo"
+
+
+def test_a_photo_measure_less_precise_than_the_scan_keeps_the_scan_value(env):
+    doc = _anchored_door(env)
+    door = doc["elements"]["Door_1"]
+    door["measures"]["height"]["sigma"] = door["edges"]["top"]["sigma"] = 0.30  # a top seen in one view, depth unknown
+    arch = env.merge(anchors=doc)
+    assert _param(arch, "Door_1", "height") == _param(env.arch, "Door_1", "height")
+    assert _param(arch, "Door_1", "width")["source"] == "photo" and "Door_1.height" in arch["diagnostics"]["anchor"]["kept"]
+
+
+def test_a_floor_based_bottom_is_applied_by_rule_even_against_a_tighter_claimed_sigma(env):
+    doc = _anchored_door(env)
+    doc["elements"]["Door_1"]["measures"]["height"]["sigma"] = 0.5  # the floor's sigma dominates the combined one
+    arch = env.merge(anchors=doc)
+    assert _param(arch, "Door_1", "height")["source"] == "photo" and _param(arch, "Door_1", "height")["value"] == 2.01
