@@ -1,11 +1,13 @@
 import copy
+import dataclasses
 import json
 import re
+import shutil
 
 import numpy as np
 import pytest
 
-from room_model import architecture, model, openings, shell, survey_page, tape
+from room_model import architecture, model, openings, photo_geom, report, shell, survey_page, tape, vision
 from helpers import make_case, plan_point, truth_to_room
 from synthetic import DOOR, WINDOW
 
@@ -179,3 +181,441 @@ def test_survey_masked_note(full):
     html = survey_page.render(arch, rows, {1: ["AAAA", "BBBB"], 2: ["CCCC"]}, frozenset({1}))
     sections = {int(m.group(1)): m.group(0) for m in re.finditer(r'<article class="row[^"]*" id="row-(\d+)".*?</article>', html, re.S)}
     assert "vue partiellement masquée par un meuble" in sections[1] and "meuble" not in sections[2]
+
+
+# --- merging the LLM answers and the tape measurements ---------------------------------------------------------
+
+@dataclasses.dataclass
+class Env:
+    ctx: object
+    arch: dict
+    model_doc: dict
+    openings_doc: dict
+    crops: dict
+    photos: dict
+
+    def merge(self, answers=None, tape_values=None):
+        return architecture.build(self.model_doc, self.openings_doc, answers, tape_values, self.ctx)
+
+
+@pytest.fixture(scope="module")
+def env(full):
+    ctx, _, arch = full
+    pending = vision.prepare(ctx)
+    read = lambda name: json.loads((ctx.out / name).read_text(encoding="utf-8"))  # noqa: E731
+    return Env(ctx, arch, read("model.json"), read("openings.json"), json.loads((pending / "crops.json").read_text(encoding="utf-8")),
+               {p.name: p for p in photo_geom.load_posed_photos(ctx)})
+
+
+def _param(arch, element_id, name):
+    return arch["parameters"][_element(arch, element_id)["params"][name]]
+
+
+def _crop_uv(env, crop_id, pts):
+    """Crop pixels of room-frame points: the inverse of the mapping `architecture` applies to the LLM corners."""
+    info = env.crops[crop_id]
+    photo = env.photos[info["photo"]]
+    up = photo_geom.to_upright(photo, photo_geom.project(photo, np.asarray(pts, float))[0])
+    x0, y0, x1, y1 = info["box"]
+    w, h = info["size"]
+    return ((up - [x0, y0]) * [w / (x1 - x0), h / (y1 - y0)]).tolist()
+
+
+def _opening_rect(arch, element_id, widen=0.0, shift=0.0):
+    """Room-frame corners TL, TR, BR, BL of an opening's scan rectangle, `widen` m wider, `shift` m along the host."""
+    (x0, _, z0), (x1, _, z1) = architecture.dimension_endpoints(arch, f"{element_id}-w")
+    ends = architecture.dimension_endpoints(arch, f"{element_id}-h")
+    low, high = sorted((ends[0][1], ends[1][1]))
+    u = np.array([x1 - x0, z1 - z0]) / np.hypot(x1 - x0, z1 - z0)
+    a, b = np.array([x0, z0]) - u * (widen / 2 - shift), np.array([x1, z1]) + u * (widen / 2 + shift)
+    return [[a[0], high, a[1]], [b[0], high, b[1]], [b[0], low, b[1]], [a[0], low, a[1]]]
+
+
+def _face_rect(env, host_id, face, s, y):
+    """TL, TR, BR, BL of the rectangle s = (s0, s1) m along the host face, y = (low, high) m above the floor."""
+    host = _element(env.arch, host_id)
+    floor = env.arch["parameters"]["floor.level"]["value"]
+    (xa, za), (xb, zb) = (architecture._face_point(env.arch, host, face, v) for v in s)
+    return [[xa, floor + y[1], za], [xb, floor + y[1], zb], [xb, floor + y[0], zb], [xa, floor + y[0], za]]
+
+
+def _corners(env, crop_ids, rect):
+    return [{"crop": c, "uv": _crop_uv(env, c, rect)} for c in crop_ids]
+
+
+def _answers(env, **parts):
+    return {"elements": [], "new_elements": [], "cornice": None, "skirting": None, "panel_frames": [], "crops": env.crops, **parts}
+
+
+def _vision(arch):
+    return arch["diagnostics"]["vision"]
+
+
+def _number(cell):
+    return float(cell.replace(",", "."))
+
+
+def test_llm_correction_applied(env):
+    rect = _opening_rect(env.arch, "Door_1", widen=0.04)
+    arch = env.merge(_answers(env, elements=[{"id": "Door_1", "corners": _corners(env, ["Door_1-a", "Door_1-b"], rect)}]))
+    scan = _param(env.arch, "Door_1", "width")
+    width = _param(arch, "Door_1", "width")
+    assert width["source"] == "llm" and width["value"] == pytest.approx(scan["value"] + 0.04, abs=0.002)
+    assert width["scan_value"] == scan["value"] and width["scan_sigma"] == scan["sigma"]
+    assert width["sigma"] >= 0.01
+    assert _param(arch, "Door_1", "center_s")["value"] == pytest.approx(_param(env.arch, "Door_1", "center_s")["value"], abs=0.002)
+    assert _param(arch, "Door_1", "height")["value"] == pytest.approx(_param(env.arch, "Door_1", "height")["value"], abs=0.002)
+    assert _param(arch, "Door_1", "sill") == _param(env.arch, "Door_1", "sill")  # a door reaches the floor: its sill is not measured
+    assert "llm_corrected" in _element(arch, "Door_1")["flags"]
+    dim = _dim(arch, "Door_1-w")
+    assert dim["source"] == "llm" and dim["scan_value"] == scan["value"] and "llm_corrected" in dim["flags"]
+    assert _vision(arch)["corrected"] == ["Door_1"] and _vision(arch)["not_applied"] == []
+    assert env.openings_doc["parameters"][_element(env.arch, "Door_1")["params"]["width"]]["source"] == "lidar"  # inputs untouched
+
+
+def test_llm_correction_of_an_elevated_opening_moves_its_sill(env):
+    rect = [[x, y + 0.05, z] for x, y, z in _opening_rect(env.arch, "Window_1", widen=-0.04)]
+    arch = env.merge(_answers(env, elements=[{"id": "Window_1", "corners": _corners(env, ["Window_1-a", "Window_1-b"], rect)}]))
+    scan = {n: _param(env.arch, "Window_1", n)["value"] for n in ("width", "height", "sill")}
+    got = {n: _param(arch, "Window_1", n)["value"] for n in scan}
+    assert got["width"] == pytest.approx(scan["width"] - 0.04, abs=0.002)
+    assert got["sill"] == pytest.approx(scan["sill"] + 0.05, abs=0.002) and got["height"] == pytest.approx(scan["height"], abs=0.002)
+    assert "llm_corrected" in _element(arch, "Window_1")["flags"]
+
+
+def test_llm_correction_uses_the_plane_of_the_partition_face(env):
+    rect = _opening_rect(env.arch, "Opening_1", widen=0.04)
+    arch = env.merge(_answers(env, elements=[{"id": "Opening_1", "corners": _corners(env, ["Opening_1-a", "Opening_1-b"], rect)}]))
+    assert _param(arch, "Opening_1", "width")["value"] == pytest.approx(_param(env.arch, "Opening_1", "width")["value"] + 0.04, abs=0.002)
+    assert _param(arch, "Opening_1", "center_s")["value"] == pytest.approx(_param(env.arch, "Opening_1", "center_s")["value"], abs=0.002)
+
+
+def test_llm_disagreeing_crops(env):
+    wide, narrow = (_opening_rect(env.arch, "Door_1", widen=w) for w in (0.04, -0.04))
+    corners = [*_corners(env, ["Door_1-a"], wide), *_corners(env, ["Door_1-b"], narrow)]
+    arch = env.merge(_answers(env, elements=[{"id": "Door_1", "corners": corners}]))
+    assert _param(arch, "Door_1", "width") == _param(env.arch, "Door_1", "width")
+    flags = _element(arch, "Door_1")["flags"]
+    assert "llm_inconsistent" in flags and "llm_corrected" not in flags
+    assert _vision(arch)["inconsistent"] == ["Door_1"] and _vision(arch)["corrected"] == []
+
+
+def test_llm_two_crops_out_of_three_agree(env):
+    wide, narrow = (_opening_rect(env.arch, "Door_1", widen=w) for w in (0.04, -0.08))
+    corners = [*_corners(env, ["Door_1-a", "Door_1-c"], wide), *_corners(env, ["Door_1-b"], narrow)]
+    arch = env.merge(_answers(env, elements=[{"id": "Door_1", "corners": corners}]))
+    assert _param(arch, "Door_1", "width")["value"] == pytest.approx(_param(env.arch, "Door_1", "width")["value"] + 0.04, abs=0.002)
+    assert "llm_corrected" in _element(arch, "Door_1")["flags"]
+
+
+def test_llm_single_view_is_applied_and_flagged(env):
+    rect = _opening_rect(env.arch, "Door_1", widen=0.04)
+    arch = env.merge(_answers(env, elements=[{"id": "Door_1", "corners": _corners(env, ["Door_1-a"], rect)}]))
+    width = _param(arch, "Door_1", "width")
+    assert width["source"] == "llm" and width["sigma"] == pytest.approx(0.01)
+    flags = _element(arch, "Door_1")["flags"]
+    assert "llm_single_view" in flags and "llm_corrected" not in flags
+    assert _vision(arch)["single_view"] == ["Door_1"]
+
+
+def test_llm_wild_correction_is_refused(env):
+    rect = _opening_rect(env.arch, "Door_1", widen=0.6)
+    arch = env.merge(_answers(env, elements=[{"id": "Door_1", "corners": _corners(env, ["Door_1-a", "Door_1-b"], rect)}]))
+    assert _param(arch, "Door_1", "width") == _param(env.arch, "Door_1", "width")
+    assert [n["id"] for n in _vision(arch)["not_applied"]] == ["Door_1"] and "30" in _vision(arch)["not_applied"][0]["reason"]
+
+
+def test_llm_typing_fields_are_copied_not_parameters(env):
+    item = {"id": "Door_1", "type": "hinged_double", "hinge": "right", "swing": "out", "panels": 4, "handle": True,
+            "frame": {"profile": "moulded", "width_cm": 9}, "confidence": 0.7}
+    arch = env.merge(_answers(env, elements=[item, {"id": "Window_1", "type": None, "frame": None}]))
+    door = _element(arch, "Door_1")
+    assert (door["type"], door["hinge"], door["swing"], door["panels"], door["handle"]) == ("hinged_double", "right", "out", 4, True)
+    assert door["frame"] == {"profile": "moulded", "width": pytest.approx(0.09)}
+    assert _element(arch, "Window_1")["type"] is None and _element(arch, "Window_1")["frame"] is None
+    assert arch["parameters"] == env.arch["parameters"] and "llm_corrected" not in door["flags"]
+    fields = {(t["element"], t["field"]): t["value"] for t in _vision(arch)["typing"]}
+    assert fields[("Door_1", "type")] == "hinged_double" and fields[("Door_1", "hinge")] == "right"
+
+
+def test_new_niche_hosted(env):
+    rect = _face_rect(env, "Partition_P1", "A", (0.1, 0.45), (0.8, 1.6))
+    item = {"kind": "niche", "host_hint": "Partition_P1", "through": True, "dividers": 2, "shelves_count": 3,
+            "frame": {"profile": "flat", "width_cm": 6}, "corners": _corners(env, ["Partition_P1-A-ov"], rect)}
+    arch = env.merge(_answers(env, new_elements=[item]))
+    niche = _element(arch, "Niche_1")
+    assert (niche["kind"], niche["host"], niche["face"], niche["through"], niche["dividers"]) == ("niche", "Partition_P1", "A", True, 2)
+    assert niche["frame"] == {"profile": "flat", "width": pytest.approx(0.06)}
+    values = {n: arch["parameters"][pid] for n, pid in niche["params"].items()}
+    assert set(values) == {"center_s", "sill", "width", "height", "depth"}
+    assert values["width"]["value"] == pytest.approx(0.35, abs=0.005) and values["sill"]["value"] == pytest.approx(0.8, abs=0.005)
+    assert values["height"]["value"] == pytest.approx(0.8, abs=0.005) and values["center_s"]["value"] == pytest.approx(0.275, abs=0.005)
+    assert all(values[n]["source"] == "llm" and "scan_value" not in values[n] for n in ("center_s", "sill", "width", "height"))
+    assert values["depth"]["value"] == pytest.approx(_param(arch, "Partition_P1", "thickness")["value"])  # through: the whole thickness
+    assert niche["shelves"] == pytest.approx([0.2, 0.4, 0.6], abs=0.005)  # evenly spaced above the sill, inside the height
+    assert "llm_single_view" in niche["flags"]
+    assert {"Niche_1-w", "Niche_1-h", "Niche_1-sill"} <= {d["id"] for d in arch["dimensions"]}
+    assert architecture.dimension_endpoints(arch, "Niche_1-w") is not None
+    assert _vision(arch)["declared"] == ["Niche_1"]
+
+
+def test_new_niche_checks_through_against_the_lidar(env):
+    rect = _face_rect(env, "Partition_P1", "A", (0.1, 0.45), (0.8, 1.6))
+    corners = _corners(env, ["Partition_P1-A-ov"], rect)
+    through = env.merge(_answers(env, new_elements=[{"kind": "niche", "host_hint": "Partition_P1", "through": True, "corners": corners}]))
+    closed = env.merge(_answers(env, new_elements=[{"kind": "niche", "host_hint": "Partition_P1", "through": False, "corners": corners}]))
+    assert "through_disputed" in _element(through, "Niche_1")["flags"]  # the mesh has a face B behind the rectangle
+    assert "through_disputed" not in _element(closed, "Niche_1")["flags"] and _element(closed, "Niche_1")["through"] is False
+    depth = closed["parameters"][_element(closed, "Niche_1")["params"]["depth"]]
+    assert depth["source"] == "assumed" and 0 < depth["value"] < _param(closed, "Partition_P1", "thickness")["value"]
+
+
+def test_new_niche_in_a_wall_has_no_lidar_check(env):
+    rect = _face_rect(env, "Wall_M2", None, (0.1, 0.6), (0.9, 1.5))
+    item = {"kind": "niche", "host_hint": "Wall_M2", "through": False, "shelves_count": 0, "corners": _corners(env, ["Wall_M2-ov"], rect)}
+    arch = env.merge(_answers(env, new_elements=[item]))
+    niche = _element(arch, "Niche_1")
+    assert niche["host"] == "Wall_M2" and niche["face"] is None and niche["shelves"] == [] and niche["frame"] is None
+    assert "through_disputed" not in niche["flags"]
+
+
+def test_new_niche_overlapping_an_opening_is_refused(env):
+    rect = _face_rect(env, "Wall_M2", None, (0.9, 1.6), (0.2, 1.2))  # inside the door
+    item = {"kind": "niche", "host_hint": "Wall_M2", "corners": _corners(env, ["Wall_M2-ov"], rect)}
+    arch = env.merge(_answers(env, new_elements=[item]))
+    assert not any(e["kind"] == "niche" for e in arch["elements"]) and "Door_1" in _vision(arch)["not_applied"][0]["reason"]
+
+
+def test_mouldings_and_panel_frames_are_copied_as_assumed(env):
+    rect = _face_rect(env, "Wall_M2", None, (0.1, 0.7), (0.9, 1.9))
+    answers = _answers(env, cornice={"profile": "cove", "height_cm": 12, "projection_cm": 8}, skirting={"profile": "bevel", "height_cm": 10},
+                       panel_frames=[{"host_hint": "Wall_M2", "profile": "quarter_round", "corners": _corners(env, ["Wall_M2-ov"], rect)}])
+    arch = env.merge(answers)
+    cornice, skirting, frame = (_element(arch, i) for i in ("Cornice", "Skirting", "PanelFrame_1"))
+    assert cornice["profile"] == "cove" and skirting["profile"] == "bevel"
+    for el, name, value in ((cornice, "height", 0.12), (cornice, "projection", 0.08), (skirting, "height", 0.10)):
+        p = arch["parameters"][el["params"][name]]
+        assert p["value"] == pytest.approx(value) and p["source"] == "assumed" and p["unit"] == "m"
+    assert (frame["kind"], frame["host"], frame["face"], frame["profile"]) == ("panel_frame", "Wall_M2", None, "quarter_round")
+    s0, y0, s1, y1 = frame["rect"]
+    assert (s1 - s0, y1 - y0) == pytest.approx((0.6, 1.0), abs=0.01) and y0 == pytest.approx(0.9, abs=0.01)
+    assert "to_verify" in frame["flags"]
+    assert env.merge(_answers(env))["elements"] == env.arch["elements"]  # nothing declared, nothing added
+
+
+@pytest.mark.parametrize("answers", [{"skipped": True}, {"error": "claude timed out", "model": "opus", "duration_s": 1.0}])
+def test_placeholders_mean_no_answers(env, answers):
+    assert env.merge(answers) == env.arch
+
+
+def test_unusable_answers_are_listed_never_raised(env):
+    crops = env.crops
+    garbage = _answers(
+        env,
+        elements=[{"id": "Nope_9", "type": "fixed"},
+                  {"type": "fixed"}, "not an object",
+                  {"id": "Door_1", "corners": [{"crop": "nowhere", "uv": [[0, 0], [1, 0], [1, 1], [0, 1]]}]},
+                  {"id": "Window_1", "corners": [{"crop": "Door_1-a", "uv": "garbage"}]},
+                  {"id": "Opening_1", "corners": [{"crop": "Opening_1-a", "uv": [[0, 0], [crops["Opening_1-a"]["size"][0], 0], [0, 1], [1, 1]]}]}],
+        new_elements=[{"kind": "niche", "host_hint": "Nowhere", "corners": _corners(env, ["Wall_M2-ov"], _face_rect(env, "Wall_M2", None, (0.2, 0.5), (1, 1.5)))},
+                      {"kind": "niche", "host_hint": "Wall_M2", "corners": []}],
+        panel_frames=[{"host_hint": "Nowhere", "profile": "ogee", "corners": []}])
+    arch = env.merge(garbage)
+    assert arch["parameters"] == env.arch["parameters"]
+    assert arch["elements"] == env.arch["elements"]
+    reasons = {n["id"]: n["reason"] for n in _vision(arch)["not_applied"]}
+    assert {"Nope_9", "Door_1", "Window_1"} <= set(reasons) and all(reasons.values())
+    assert len(_vision(arch)["not_applied"]) >= 8 and {"elements[1]", "elements[2]"} <= set(reasons)
+
+
+def test_orphan_opening_cannot_be_corrected(env):
+    openings_doc = copy.deepcopy(env.openings_doc)
+    door = next(o for o in openings_doc["openings"] if o["id"] == "Door_1")
+    door["host"], door["flags"] = None, ["orphan"]
+    arch = architecture.build(env.model_doc, openings_doc, _answers(env, elements=[
+        {"id": "Door_1", "corners": _corners(env, ["Door_1-a"], _opening_rect(env.arch, "Door_1", widen=0.04))}]), None, env.ctx)
+    assert "hôte" in next(n["reason"] for n in _vision(arch)["not_applied"] if n["id"] == "Door_1")
+
+
+def _run_in_copy(env, tmp_path, answers=None, tape_values=None):
+    ctx = dataclasses.replace(env.ctx, out=tmp_path / "out")
+    shutil.copytree(env.ctx.out, ctx.out, ignore=shutil.ignore_patterns("pending"))
+    (ctx.out / "vision").mkdir(exist_ok=True)
+    if answers is not None:
+        (ctx.out / "vision" / "answers.json").write_text(json.dumps(answers), encoding="utf-8")
+    if tape_values is not None:
+        (ctx.out / "measurements.json").write_text(json.dumps(tape_values), encoding="utf-8")
+    return ctx, json.loads(architecture.run(ctx).read_text(encoding="utf-8"))
+
+
+def test_run_reads_answers_and_measurements(env, tmp_path):
+    rect = _opening_rect(env.arch, "Door_1", widen=0.04)
+    answers = _answers(env, elements=[{"id": "Door_1", "corners": _corners(env, ["Door_1-a", "Door_1-b"], rect)}])
+    ctx, arch = _run_in_copy(env, tmp_path, answers, {"Window_1-h": 1.03})
+    assert _param(arch, "Door_1", "width")["source"] == "llm" and _param(arch, "Window_1", "height")["source"] == "tape"
+    assert (ctx.out / "measurements" / "index.html").exists()
+
+
+def test_report_corrections_table(env, tmp_path):
+    rect = _opening_rect(env.arch, "Door_1", widen=0.04)
+    answers = _answers(env, elements=[{"id": "Door_1", "type": "hinged_double", "corners": _corners(env, ["Door_1-a", "Door_1-b"], rect)},
+                                      {"id": "Nope_9"}])
+    ctx, arch = _run_in_copy(env, tmp_path, answers, {"Door_1-w": 0.95, "Nope-w": 1.0})
+    text = (ctx.out / "report.md").read_text(encoding="utf-8")
+    section = text.split("## Corrections LLM")[1].split("\n## ")[0]
+    header = next(l for l in section.splitlines() if l.startswith("|"))
+    assert [c.strip() for c in header.strip("|").split("|")] == ["Élément", "Paramètre", "Scan (cm)", "LLM (cm)", "Écart (cm)"]
+    width = next(l for l in section.splitlines() if l.startswith("| Door_1 | largeur"))
+    scan = _param(env.arch, "Door_1", "width")["value"] * 100
+    cells = [c.strip() for c in width.strip("|").split("|")]
+    assert _number(cells[2]) == pytest.approx(scan, abs=0.05) and _number(cells[3]) == pytest.approx(scan + 4, abs=0.1) and cells[4] == "+4,0"
+    assert any("type" in l and "hinged_double" in l for l in section.splitlines())
+    assert "Nope_9" in section and "inconnu" in section  # listed as not applied
+    tape_section = text.split("## Mesures au mètre")[1].split("\n## ")[0]
+    line = next(l for l in tape_section.splitlines() if l.startswith("| Door_1-w"))
+    cells = [c.strip() for c in line.strip("|").split("|")]
+    assert [_number(c) for c in cells[1:5]] == pytest.approx([scan, scan + 4, 95.0, 95.0], abs=0.1)
+    assert "Nope-w" in tape_section
+    assert report.render_corrections(arch)[0][0] == "Corrections LLM"
+
+
+def test_report_sections_replace_previous_ones_and_keep_the_rest(env, tmp_path):
+    ctx, _ = _run_in_copy(env, tmp_path)
+    path = ctx.out / "report.md"
+    path.write_text("# Rapport\n\n## Murs\n\nUn mur.\n", encoding="utf-8")
+    for _ in range(2):
+        architecture.run(ctx)
+    text = path.read_text(encoding="utf-8")
+    assert text.count("## Corrections LLM") == 1 and text.count("## Mesures au mètre") == 1 and "## Murs\n\nUn mur." in text
+
+
+def test_tape_replaces_an_opening_parameter(env):
+    arch = env.merge(None, {"Window_1-sill": 0.93, "Door_1-h": 2.07})
+    sill = _param(arch, "Window_1", "sill")
+    assert sill["value"] == 0.93 and sill["sigma"] == 0.005 and sill["source"] == "tape"
+    assert sill["scan_value"] == _param(env.arch, "Window_1", "sill")["value"]
+    assert "tape_corrected" in _element(arch, "Window_1")["flags"]
+    assert _dim(arch, "Window_1-sill")["value"] == 0.93 and _dim(arch, "Window_1-sill")["source"] == "tape"
+    assert _dim(arch, "Door_1-h")["value"] == 2.07
+    assert [a["id"] for a in arch["diagnostics"]["tape"]["applied"]] == ["Window_1-sill", "Door_1-h"]
+
+
+def test_tape_overrides_llm(env):
+    rect = _opening_rect(env.arch, "Door_1", widen=0.04)
+    answers = _answers(env, elements=[{"id": "Door_1", "corners": _corners(env, ["Door_1-a", "Door_1-b"], rect)}])
+    scan = _param(env.arch, "Door_1", "width")["value"]
+    arch = env.merge(answers, {"Door_1-w": 0.93})
+    width = _param(arch, "Door_1", "width")
+    assert width["source"] == "tape" and width["value"] == 0.93 and width["sigma"] == 0.005
+    assert width["scan_value"] == scan and width["llm_value"] == pytest.approx(scan + 0.04, abs=0.002)
+    flags = _element(arch, "Door_1")["flags"]
+    assert "tape_corrected" in flags and "llm_corrected" in flags
+    assert _param(arch, "Door_1", "height")["source"] == "llm"  # the tape measured the width only
+    line = next(l for l in tape.compare(arch, {"Door_1-w": 0.93}).splitlines() if "Door_1-w" in l)
+    cells = [c.strip() for c in line.strip("|").split("|")]
+    assert [_number(c) for c in cells[2:4]] == pytest.approx([scan * 100, scan * 100 + 4], abs=0.1)
+    row = next(m.group(0) for m in re.finditer(r'<article class="row.*?</article>', survey_page.render(arch, survey_page.numbered_rows(arch), {}), re.S)
+               if 'data-dim="Door_1-w"' in m.group(0))
+    assert "Mètre : 93,0 cm" in row and "à reprendre en priorité" not in row
+
+
+def _offset(arch, wall):
+    return arch["parameters"][_element(arch, wall)["params"]["offset"]]
+
+
+def test_tape_moves_wall(env):
+    station = _dim(env.arch, "S01")
+    walls = station["elements"]
+    sigmas = [_offset(env.arch, w)["sigma"] for w in walls]
+    assert sigmas[0] != sigmas[1]
+    mover, still = (walls[0], walls[1]) if sigmas[0] > sigmas[1] else (walls[1], walls[0])
+    arch = env.merge(None, {"S01": station["value"] + 0.03})
+    assert _dim(arch, "S01")["value"] == pytest.approx(station["value"] + 0.03, abs=1e-6)
+    assert _dim(arch, "S01")["source"] == "tape" and _dim(arch, "S01")["sigma"] == 0.005
+    assert _dim(arch, "S01")["scan_value"] == pytest.approx(station["value"])
+    moved, kept = _offset(arch, mover), _offset(arch, still)
+    assert abs(moved["value"] - _offset(env.arch, mover)["value"]) == pytest.approx(0.03, abs=1e-6)
+    assert kept == _offset(env.arch, still)
+    assert moved["source"] == "tape" and moved["scan_value"] == _offset(env.arch, mover)["value"]
+    assert "tape_corrected" in _element(arch, mover)["flags"] and "tape_corrected" not in _element(arch, still)["flags"]
+    assert arch["diagnostics"]["tape"]["moved"][0]["wall"] == mover
+
+
+def test_tape_moves_the_second_wall_when_sigmas_are_equal(env):
+    model_doc = copy.deepcopy(env.model_doc)
+    first, second = _dim(env.arch, "S01")["elements"]
+    sigmas = [model_doc["parameters"][_element(env.arch, w)["params"]["offset"]] for w in (first, second)]
+    sigmas[1]["sigma"] = sigmas[0]["sigma"]
+    arch = architecture.build(model_doc, env.openings_doc, None, {"S01": _dim(env.arch, "S01")["value"] - 0.02}, env.ctx)
+    assert _offset(arch, second)["value"] != _offset(env.arch, second)["value"] and _offset(arch, first)["value"] == _offset(env.arch, first)["value"]
+
+
+def test_moving_a_wall_keeps_the_geometry_closed(env):
+    station = _dim(env.arch, "S01")
+    model_doc = copy.deepcopy(env.model_doc)
+    model_doc["parameters"][_element(env.arch, "Wall_M1")["params"]["offset"]]["sigma"] = 0.1  # M1 is the wall that moves; M2 starts on it
+    arch = architecture.build(model_doc, env.openings_doc, None, {"S01": station["value"] - 0.04}, env.ctx)
+    assert arch["diagnostics"]["tape"]["moved"][0]["wall"] == "Wall_M1"
+    walls = [e for e in arch["elements"] if e["kind"] == "wall"]
+    for w in walls:
+        n = np.array([np.cos(arch["parameters"][w["params"]["azimuth"]]["value"]), np.sin(arch["parameters"][w["params"]["azimuth"]]["value"])])
+        off = arch["parameters"][w["params"]["offset"]]["value"]
+        for end in ("start", "end"):
+            assert n @ w[end] == pytest.approx(off, abs=1e-6)  # still on its own line
+    floor = _element(arch, "Floor")["polygon"]
+    assert np.allclose([w["start"] for w in walls], floor, atol=1e-9)
+    for old, new in zip(_element(env.arch, "Ceiling_1")["region"][0]["exterior"], _element(arch, "Ceiling_1")["region"][0]["exterior"]):
+        assert np.linalg.norm(np.subtract(old, new)) < 0.05
+    assert _param(arch, "Window_1", "center_s")["value"] == pytest.approx(_param(env.arch, "Window_1", "center_s")["value"], abs=1e-4)  # moves with M1
+    for el in arch["elements"]:
+        if el["kind"] in ("door", "window") and el["host"] != "Wall_M1":  # the other openings stay where they are in the room
+            host_old, host_new = _element(env.arch, el["host"]), _element(arch, el["host"])
+            u = np.subtract(host_old["end"], host_old["start"]) / np.linalg.norm(np.subtract(host_old["end"], host_old["start"]))
+            before = np.array(host_old["start"]) + u * _param(env.arch, el["id"], "center_s")["value"]
+            after = np.array(host_new["start"]) + u * _param(arch, el["id"], "center_s")["value"]
+            assert np.linalg.norm(before - after) < 0.002
+    assert _dim(arch, "S02")["value"] == pytest.approx(station["value"] - 0.04, abs=0.001)  # the other station across the same walls follows
+    assert _dim(arch, "S02")["scan_value"] == pytest.approx(station["value"]) and "S02" in {d["id"] for d in arch["diagnostics"]["tape"]["derived"]}
+    assert _dim(arch, "L-M2")["value"] == pytest.approx(_dim(env.arch, "L-M2")["value"] - 0.04, abs=0.001)
+
+
+def test_tape_moves_the_ceiling(env):
+    height = _dim(env.arch, "H1")
+    arch = env.merge(None, {"H1": height["value"] + 0.02})
+    floor = arch["parameters"]["floor.level"]["value"]
+    level = arch["parameters"][_element(arch, "Ceiling_1")["params"]["level"]]
+    assert level["value"] == pytest.approx(floor + height["value"] + 0.02) and level["source"] == "tape"
+    assert _dim(arch, "H1")["value"] == pytest.approx(height["value"] + 0.02) and _dim(arch, "H1")["source"] == "tape"
+    tops = [(w["id"], arch["parameters"][w["params"]["top"]]["value"]) for w in arch["elements"] if w["kind"] == "wall"]
+    old_level = env.arch["parameters"][_element(env.arch, "Ceiling_1")["params"]["level"]]["value"]
+    followed = [i for i, t in tops if abs(t - level["value"]) < 1e-9]
+    assert followed and all(abs(env.arch["parameters"][_element(env.arch, i)["params"]["top"]]["value"] - old_level) < 1e-9 for i in followed)
+
+
+def test_tape_unknown_id(env):
+    arch = env.merge(None, {"Nope-w": 1.0, "Door_1-w": "abc", "Door_1-h": -2.0, "L-M1": 6.0, "Window_1-w": 1.25})
+    listed = {n["id"]: n["reason"] for n in arch["diagnostics"]["tape"]["not_applied"]}
+    assert set(listed) == {"Nope-w", "Door_1-w", "Door_1-h", "L-M1"} and all(listed.values())
+    assert "inconnue" in listed["Nope-w"]
+    assert _param(arch, "Door_1", "width") == _param(env.arch, "Door_1", "width")
+    assert [a["id"] for a in arch["diagnostics"]["tape"]["applied"]] == ["Window_1-w"]
+
+
+def test_tape_wall_move_is_bounded(env):
+    arch = env.merge(None, {"S01": _dim(env.arch, "S01")["value"] + 2.0})
+    assert arch["diagnostics"]["tape"]["applied"] == [] and "S01" in {n["id"] for n in arch["diagnostics"]["tape"]["not_applied"]}
+    assert _dim(arch, "S01")["value"] == _dim(env.arch, "S01")["value"]
+
+
+def test_corners_without_photos_are_listed(env):
+    rect = _opening_rect(env.arch, "Door_1", widen=0.04)
+    arch = architecture.build(env.model_doc, env.openings_doc, _answers(env, elements=[{"id": "Door_1", "corners": _corners(env, ["Door_1-a"], rect)}]))
+    assert _param(arch, "Door_1", "width") == _param(env.arch, "Door_1", "width")
+    assert "indisponible" in _vision(arch)["not_applied"][0]["reason"]
+
+
+def test_placeholder_answers_leave_a_plain_report(env, tmp_path):
+    ctx, arch = _run_in_copy(env, tmp_path, {"skipped": True})
+    assert "vision" not in arch["diagnostics"] and "tape" not in arch["diagnostics"]
+    text = (ctx.out / "report.md").read_text(encoding="utf-8")
+    assert "Aucune réponse du LLM appliquée" in text and "Aucune mesure au mètre fournie" in text

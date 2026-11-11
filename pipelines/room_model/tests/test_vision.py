@@ -201,6 +201,21 @@ def test_prepare_without_architecture_json_builds_the_same_list(case, pending, t
     assert _load(other, "elements.json") == _load(pending, "elements.json")
 
 
+def test_prepare_does_not_show_merged_values_back_as_the_scan(case, pending, tmp_path):
+    ctx = _stage(case, out=tmp_path / "out")
+    ctx.out.mkdir()
+    for name in ("model.json", "openings.json"):
+        (ctx.out / name).write_text((case.out / name).read_text(encoding="utf-8"), encoding="utf-8")
+    arch = json.loads((case.out / "architecture.json").read_text(encoding="utf-8"))
+    door = next(e for e in arch["elements"] if e["id"] == "Door_1")
+    arch["parameters"][door["params"]["width"]]["value"] += 0.1
+    arch["diagnostics"]["vision"] = {"corrected": ["Door_1"]}
+    (ctx.out / "architecture.json").write_text(json.dumps(arch), encoding="utf-8")
+    shown = next(e for e in _load(vision.prepare(ctx), "elements.json")["elements"] if e["id"] == "Door_1")
+    expected = next(e for e in _load(pending, "elements.json")["elements"] if e["id"] == "Door_1")
+    assert shown["scan_cm"] == expected["scan_cm"] and shown["sources"] == expected["sources"]
+
+
 def test_sheet_count_stays_within_twelve(case, tmp_path):
     arch = json.loads((case.out / "architecture.json").read_text(encoding="utf-8"))
     door = next(e for e in arch["elements"] if e["id"] == "Door_1")

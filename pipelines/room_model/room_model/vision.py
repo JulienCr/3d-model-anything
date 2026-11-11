@@ -252,10 +252,15 @@ def _plan_overview(n_elements: int, n_faces: int) -> tuple[int, int]:
 # --- prepare ---------------------------------------------------------------------------------------------------------
 
 def _architecture(ctx: StageContext) -> dict:
-    """architecture.json when it exists, else the same document built from model.json and openings.json."""
+    """architecture.json when it exists and holds scan values only, else built from model.json and openings.json.
+
+    A document that merged LLM answers or tape measurements is not shown back to the model as the scan.
+    """
     path = output_path(ctx, "architecture")
     if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        if not {"vision", "tape"} & set(doc.get("diagnostics", {})):
+            return doc
     model_doc = json.loads(require(ctx, "model").read_text(encoding="utf-8"))
     return architecture.build(model_doc, json.loads(require(ctx, "openings").read_text(encoding="utf-8")))
 

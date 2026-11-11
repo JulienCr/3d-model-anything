@@ -1,12 +1,13 @@
 """Architecture stage: model.json plus the openings as architecture.json, and the tape measurement sheet."""
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
 import numpy as np
 
-from room_model.context import StageContext, output_path, require
+from room_model.context import StageContext, StageInputMissing, output_path, require
 from room_model.model import _Doc
 
 SCHEMA = "room-model/arch-1"
@@ -15,6 +16,8 @@ KIND_WORDS = {"door": "la porte", "window": "la fenêtre", "opening": "l'ouvertu
 SILL_KINDS = ("window", "niche")
 STATION_HEIGHT = 1.2  # m above the floor at which a width or length is read
 VISION_PATH = "vision/answers.json"
+TAPE_PATH = "measurements.json"
+OPENING_KINDS = ("door", "window", "opening", "niche")
 
 
 def _opening_element(o: dict) -> dict:
@@ -23,22 +26,24 @@ def _opening_element(o: dict) -> dict:
 
 
 def _dimension(id_, kind, label, param, elements, at, flags=()) -> dict:
-    """Dimension whose value is one parameter; an LLM-corrected parameter also carries its scan value."""
+    """Dimension whose value is one parameter; a corrected parameter also carries its scan and LLM values."""
     out = {"id": id_, "kind": kind, "label": label, "value": param["value"], "sigma": param["sigma"],
            "elements": elements, "at": None if at is None else [float(at[0]), float(at[1])],
            "source": param["source"], "flags": list(flags)}
     if "scan_value" in param:
         out.update(scan_value=param["scan_value"], scan_sigma=param["scan_sigma"])
+    if "llm_value" in param:
+        out["llm_value"] = param["llm_value"]
     return out
 
 
-def _opening_dimensions(o: dict, params: dict) -> list[dict]:
+def _opening_dimensions(o: dict, params: dict, center) -> list[dict]:
     word = KIND_WORDS.get(o["kind"], o["kind"])
     elements = [o["id"]] + ([o["host"]] if o["host"] else [])
 
     def make(suffix, kind, label, name):
         return _dimension(f"{o['id']}-{suffix}", kind, f"{label} {word} {o['id']}", params[o["params"][name]],
-                          elements, o.get("center"), o["flags"])
+                          elements, center, o["flags"])
 
     out = [make("w", "opening_width", "Largeur de", "width"), make("h", "opening_height", "Hauteur de", "height")]
     if o["kind"] in SILL_KINDS:
@@ -70,19 +75,29 @@ def _wall_length_dimensions(model_doc: dict) -> list[dict]:
     return out
 
 
-def build(model_doc: dict, openings_doc: dict, vision: dict | None = None) -> dict:
+def build(model_doc: dict, openings_doc: dict, vision: dict | None = None, tape: dict | None = None, ctx: StageContext | None = None) -> dict:
     """architecture.json: the model, the openings as elements, and their dimensions plus the wall lengths.
 
-    `vision` (the LLM answers) is accepted for the vision stage to merge; absent answers leave the scan values.
+    `vision` (the answers document) and `tape` ({dimension id: metres}) are merged when given: see `llm_merge` and
+    `tape_merge`. `ctx` gives the LLM corners their photos and the niche check its LiDAR samples.
     """
-    parameters = {**model_doc["parameters"], **openings_doc["parameters"]}
-    dimensions = [*model_doc["dimensions"], *_wall_length_dimensions(model_doc)]
-    for o in openings_doc["openings"]:
-        dimensions += _opening_dimensions(o, parameters)
-    arch = {"schema": SCHEMA, "version": VERSION, "source": model_doc.get("source"), "frame": model_doc["frame"],
-            "parameters": parameters, "elements": [*model_doc["elements"], *map(_opening_element, openings_doc["openings"])],
-            "diagnostics": {**model_doc["diagnostics"], "openings": openings_doc["diagnostics"]}, "dimensions": dimensions}
-    for dim in dimensions:
+    from room_model import llm_merge, tape_merge
+
+    arch = {"schema": SCHEMA, "version": VERSION, "source": model_doc.get("source"), "frame": copy.deepcopy(model_doc["frame"]),
+            "parameters": copy.deepcopy({**model_doc["parameters"], **openings_doc["parameters"]}),
+            "elements": copy.deepcopy([*model_doc["elements"], *map(_opening_element, openings_doc["openings"])]),
+            "diagnostics": copy.deepcopy({**model_doc["diagnostics"], "openings": openings_doc["diagnostics"]}), "dimensions": []}
+    if llm_merge.usable(vision):
+        arch["diagnostics"]["vision"] = llm_merge.apply(arch, vision, ctx)
+    arch["dimensions"] = copy.deepcopy(model_doc["dimensions"])
+    if tape:
+        arch["diagnostics"]["tape"] = tape_merge.apply(arch, tape)
+    centres = {o["id"]: o["center"] for o in openings_doc["openings"]}
+    arch["dimensions"] += _wall_length_dimensions(arch)
+    for el in arch["elements"]:
+        if el["kind"] in OPENING_KINDS:
+            arch["dimensions"] += _opening_dimensions(el, arch["parameters"], centres.get(el["id"], el.get("center")))
+    for dim in arch["dimensions"]:
         ends = dimension_endpoints(arch, dim["id"])
         dim["endpoints"] = None if ends is None else [[float(c) for c in ends[0]], [float(c) for c in ends[1]]]
     return arch
@@ -144,16 +159,28 @@ def dimension_endpoints(arch: dict, dim_id: str) -> tuple[list[float], list[floa
     return None
 
 
+def _read(path: Path, label: str) -> dict:
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise StageInputMissing(f"{label} illisible ({path}) : {exc}") from None
+    if not isinstance(doc, dict):
+        raise StageInputMissing(f"{label} illisible ({path}) : un objet JSON est attendu")
+    return doc
+
+
 def run(ctx: StageContext) -> Path:
-    from room_model import survey_page
+    from room_model import report, survey_page
 
     model_doc = json.loads(require(ctx, "model").read_text(encoding="utf-8"))
     openings_doc = json.loads(require(ctx, "openings").read_text(encoding="utf-8"))
-    vision_path = ctx.out / VISION_PATH
-    vision = json.loads(vision_path.read_text(encoding="utf-8")) if vision_path.exists() else None
-    arch = build(model_doc, openings_doc, vision)
+    vision_path, tape_path = ctx.out / VISION_PATH, ctx.out / TAPE_PATH
+    vision = _read(vision_path, "réponses du LLM") if vision_path.exists() else None
+    tape = _read(tape_path, "mesures au mètre") if tape_path.exists() else None
+    arch = build(model_doc, openings_doc, vision, tape, ctx)
     path = output_path(ctx, "architecture")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(arch, indent=2), encoding="utf-8")
     survey_page.write(ctx, arch)
+    report.write_sections(ctx.out / "report.md", arch)
     return path

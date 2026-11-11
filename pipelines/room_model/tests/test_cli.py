@@ -146,3 +146,37 @@ def test_compare_tape_writes_a_markdown_report(build, tmp_path, capsys):
     assert "+2,0" in report.read_text(encoding="utf-8")
     assert cli.main(["compare-tape", "--arch", str(arch_path), "--tape", str(tmp_path / "nowhere.json")]) == 1
     assert len(capsys.readouterr().err.strip().splitlines()) == 1
+
+
+def test_tape_flag_installs_the_file_and_reruns_the_architecture(build, tmp_path, capsys):
+    args = _synthetic(build, tmp_path)
+    out = tmp_path / "out"
+    assert cli.main(["all", *args]) == 0
+    first = json.loads((out / STAGE_OUTPUTS["architecture"]).read_text(encoding="utf-8"))
+    door = next(d for d in first["dimensions"] if d["id"] == "Door_1-w")
+    mine = tmp_path / "mine.json"
+    mine.write_text(json.dumps({"Door_1-w": door["value"] + 0.03}), encoding="utf-8")
+    capsys.readouterr()
+    assert cli.main(["architecture", *args, "--tape", str(mine)]) == 0  # no --force: the new file makes the output stale
+    assert "skipped" not in capsys.readouterr().out
+    assert json.loads((out / "measurements.json").read_text(encoding="utf-8")) == json.loads(mine.read_text(encoding="utf-8"))
+    arch = json.loads((out / STAGE_OUTPUTS["architecture"]).read_text(encoding="utf-8"))
+    applied = next(d for d in arch["dimensions"] if d["id"] == "Door_1-w")
+    assert applied["source"] == "tape" and applied["value"] == pytest.approx(door["value"] + 0.03)
+    assert "| Door_1-w" in (out / "report.md").read_text(encoding="utf-8").split("## Mesures au mètre")[1]
+    assert "Mètre : " in (out / "measurements" / "index.html").read_text(encoding="utf-8")
+    assert cli.main(["architecture", *args]) == 0 and "skipped" in capsys.readouterr().out  # nothing new: left alone
+    assert cli.main(["all", *args, "--tape", str(out / "measurements.json")]) == 0  # the installed file may be given back
+
+
+def test_tape_flag_rejects_an_unusable_file(build, tmp_path, capsys):
+    args = _synthetic(build, tmp_path)
+    for text in ("not json", "[1, 2]"):
+        bad = tmp_path / "bad.json"
+        bad.write_text(text, encoding="utf-8")
+        assert cli.main(["all", *args, "--tape", str(bad)]) == 1
+        assert len(capsys.readouterr().err.strip().splitlines()) == 1
+    assert cli.main(["all", *args, "--tape", str(tmp_path / "nowhere.json")]) == 1
+    assert not (tmp_path / "out" / "measurements.json").exists()
+    with pytest.raises(SystemExit):
+        cli.main(["shell", *args, "--tape", str(bad)])  # only `architecture` and `all` take it

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -22,7 +23,8 @@ STAGE_MODULES = {
 }
 
 
-STALE_AFTER = {"architecture": "vision"}  # the stage reruns when the named stage's output is newer than its own
+STALE_AFTER = {"architecture": ("vision/answers.json", "measurements.json")}  # the stage reruns when one of these is newer than its output
+TAPE_FILE = "measurements.json"
 
 
 def _placeholder(path: Path) -> str | None:
@@ -43,10 +45,8 @@ def _current(ctx: StageContext, name: str) -> bool:
         return False
     if name == "vision" and (kind := _placeholder(out)) and (kind == "error" or not ctx.no_llm):
         return False
-    if name in STALE_AFTER:
-        newer = ctx.out / STAGE_OUTPUTS[STALE_AFTER[name]]
-        return not (newer.is_file() and newer.stat().st_mtime_ns > out.stat().st_mtime_ns)
-    return True
+    newer = [ctx.out / rel for rel in STALE_AFTER.get(name, ())]
+    return not any(p.is_file() and p.stat().st_mtime_ns > out.stat().st_mtime_ns for p in newer)
 
 
 def _stage_parent() -> argparse.ArgumentParser:
@@ -67,7 +67,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     parent = _stage_parent()
     for name in (*STAGE_MODULES, "all"):
-        sub.add_parser(name, parents=[parent], help=f"run {name}")
+        stage = sub.add_parser(name, parents=[parent], help=f"run {name}")
+        if name in ("architecture", "all"):
+            stage.add_argument("--tape", type=Path, help='tape measurements {"<dimension id>": <metres>}, copied to <out>/measurements.json')
     cmp = sub.add_parser("compare", help="compare a model.json against a reference")
     cmp.add_argument("--model", type=Path, required=True)
     cmp.add_argument("--reference", type=Path, required=True)
@@ -147,6 +149,21 @@ def _compare_tape(args: argparse.Namespace) -> int:
     return 0
 
 
+def _install_tape(source: Path, out: Path) -> str | None:
+    """Copies the tape measurements to <out>/measurements.json; an error message when they cannot be used."""
+    try:
+        doc = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return f"mesures illisibles ({source}) : {exc}"
+    if not isinstance(doc, dict):
+        return f"mesures illisibles ({source}) : un objet JSON {{\"<cote>\": <mètres>}} est attendu"
+    target = out / TAPE_FILE
+    out.mkdir(parents=True, exist_ok=True)
+    if not (target.exists() and target.samefile(source)):
+        shutil.copyfile(source, target)
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "compare":
@@ -159,6 +176,10 @@ def main(argv: list[str] | None = None) -> int:
     except InvalidCapture as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    if getattr(args, "tape", None):
+        if (problem := _install_tape(args.tape, ctx.out)):
+            print(problem, file=sys.stderr)
+            return 1
     for name in STAGE_MODULES if args.command == "all" else [args.command]:
         code = _run_stage(name, ctx, in_all=args.command == "all")
         if code:
