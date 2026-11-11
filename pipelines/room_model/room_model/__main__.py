@@ -15,6 +15,7 @@ STAGE_MODULES = {
     "shell": "room_model.shell",
     "model": "room_model.model",
     "export": "room_model.export",
+    "openings": "room_model.openings",
 }
 
 

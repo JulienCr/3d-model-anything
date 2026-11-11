@@ -58,7 +58,7 @@ def test_all_runs_stages_in_order(tmp_path, monkeypatch):
 
         _fake_stage(monkeypatch, stage, run)
     assert _run(tmp_path, "all") == 0
-    assert order == ["registration", "shell", "model", "export"]
+    assert order == ["registration", "shell", "model", "export", "openings"]
 
 
 def _synthetic(build, tmp_path):
@@ -69,7 +69,7 @@ def _synthetic(build, tmp_path):
 def test_all_skips_registration_of_a_capture_without_photos(build, tmp_path, capsys):
     assert cli.main(["all", *_synthetic(build, tmp_path)]) == 0
     assert "registration skipped: no photos for room 0" in capsys.readouterr().out
-    for stage in ("shell", "model", "export"):
+    for stage in ("shell", "model", "export", "openings"):
         assert (tmp_path / "out" / STAGE_OUTPUTS[stage]).exists()
     assert not (tmp_path / "out" / STAGE_OUTPUTS["registration"]).exists()
 

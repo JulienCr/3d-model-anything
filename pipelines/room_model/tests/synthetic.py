@@ -58,6 +58,11 @@ class SyntheticOptions:
     partition: bool = False  # a full-height partition inside the floor, with its RoomPlan wall
     partition_faces: str = "ab"  # faces in the mesh: a = +x face, b = -x face
     outside_roomplan_wall: bool = False  # a RoomPlan wall standing outside the floor polygon
+    window: bool = False  # a window with a hole in the south wall mesh
+    window_rp_error: float = 0.0  # m the RoomPlan window is shifted along the wall from the mesh hole
+    partition_opening: bool = False  # a RoomPlan opening on the partition, no hole in the mesh
+    partition_opening_width: float = 0.9
+    orphan_opening: bool = False  # a RoomPlan opening standing in free space
 
 
 @dataclass
@@ -73,6 +78,7 @@ class SyntheticTruth:
     extra_ident: str | None = None
     partition: dict | None = None
     outside_ident: str | None = None
+    opening_idents: dict[str, str] = field(default_factory=dict)  # option name -> RoomPlan identifier
 
 
 BEAM = {"x": (3.85, 4.15), "z": (0.0, 2.5), "underside": 2.20, "top": 2.50, "width": 0.30}
@@ -94,6 +100,9 @@ TABLE = {"x": (0.0, 0.6), "z": (0.5, 1.7), "h": 0.75}
 CABINET = {"x": (0.0, 0.6), "z": (3.0, 4.0), "h": 1.90}
 DOOR = {"z": 1.25, "w": 0.90, "h": 2.05}
 PARTITION = {"x": 1.0, "z": (0.3, 2.3), "thickness": 0.10, "roomplan_offset": 0.015}  # runs along z; face A is the +x one
+WINDOW = {"x": 3.0, "w": 1.2, "sill": 0.9, "h": 1.0}  # in the south wall
+PARTITION_OPENING = {"z": 1.3, "h": 2.05}  # centre along the partition
+ORPHAN_OPENING = {"centre": (1.5, 3.4), "w": 0.8, "h": 1.2, "sill": 0.5}
 OUTSIDE_WALL = {"centre": (-1.5, 2.0), "length": 1.0}  # beyond the west wall
 
 
@@ -208,7 +217,9 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
             return
         m.rect(origin, U, Y, normal, 1, u_range, (0, v_top), lambda u, v: ~_in_rects(u, v, excl))
 
-    wall("south", o, X, Z, (0, 6), H_MAIN, [(c["x"], (0, 9)) for c in columns if c["engaged"] == "south"] + [beam_xy])
+    hole = ((WINDOW["x"] - WINDOW["w"] / 2, WINDOW["x"] + WINDOW["w"] / 2), (WINDOW["sill"], WINDOW["sill"] + WINDOW["h"]))
+    wall("south", o, X, Z, (0, 6), H_MAIN,
+         [(c["x"], (0, 9)) for c in columns if c["engaged"] == "south"] + [beam_xy] + ([hole] if opt.window else []))
     door_z = (DOOR["z"] - DOOR["w"] / 2, DOOR["z"] + DOOR["w"] / 2)
     if drop != "east":
         m.rect(np.array([6.0, 0, 0]), Z, Y, -X, 1, (0, 2.5), (0, H_MAIN),
@@ -423,6 +434,30 @@ def _roomplan(opt: SyntheticOptions, world: np.ndarray) -> tuple[dict, dict[str,
         partition = _ident("partition")
         walls.append(wall_json(partition, centre, np.array([0.0, 1.0]), np.array([-1.0, 0.0]), z1 - z0))
 
+    def opening_json(ident, parent, dims, tf):
+        return {"category": {"opening": {}}, "completedEdges": [], "confidence": {"high": {}}, "curve": None,
+                "dimensions": [*dims, 0], "identifier": ident, "parentIdentifier": parent, "polygonCorners": [],
+                "story": 0, "transform": _flat(tf)}
+
+    windows, openings = [], []
+    if opt.window:
+        south = info[WALL_NAMES.index("south")]
+        c = south[1] + (WINDOW["x"] - 3.0 + opt.window_rp_error) * south[2]
+        win = opening_json(_ident("window"), idents["south"][0], (WINDOW["w"], WINDOW["h"]),
+                           frame_of(c, south[2], south[3], WINDOW["sill"] + WINDOW["h"] / 2))
+        win["category"] = {"window": {}}
+        windows.append(win)
+    if opt.partition_opening:
+        assert partition, "partition_opening needs partition=True"
+        c = np.array([PARTITION["x"] + PARTITION["roomplan_offset"], PARTITION_OPENING["z"]])
+        openings.append(opening_json(_ident("partition-opening"), partition, (opt.partition_opening_width, PARTITION_OPENING["h"]),
+                                     frame_of(c, np.array([0.0, 1.0]), np.array([-1.0, 0.0]), PARTITION_OPENING["h"] / 2)))
+    if opt.orphan_opening:
+        o_ = ORPHAN_OPENING
+        openings.append(opening_json(_ident("orphan-opening"), None, (o_["w"], o_["h"]),
+                                     frame_of(np.array(o_["centre"]), np.array([0.0, 1.0]), np.array([-1.0, 0.0]),
+                                              o_["sill"] + o_["h"] / 2)))
+
     east = info[WALL_NAMES.index("east")]
     door_c = east[1] + (DOOR["z"] - 1.25) * east[2]
     door = {
@@ -439,10 +474,10 @@ def _roomplan(opt: SyntheticOptions, world: np.ndarray) -> tuple[dict, dict[str,
         "story": 0, "transform": _flat(world @ floor_local),
     }
     data = {
-        "coreModel": "", "doors": [door], "floors": [floor], "objects": [], "openings": [],
+        "coreModel": "", "doors": [door], "floors": [floor], "objects": [], "openings": openings,
         "referenceOriginTransform": _flat(np.eye(4)),
         "sections": [{"center": [0.0, 0.0, 0.0], "label": "unidentified", "story": 0}],
-        "story": 0, "version": 2, "walls": walls, "windows": [],
+        "story": 0, "version": 2, "walls": walls, "windows": windows,
     }
     return data, idents, extra, partition, outside
 
@@ -471,6 +506,7 @@ def make_capture(root: Path, options: SyntheticOptions | None = None) -> Synthet
         columns=[{**c, "center": [sum(c["x"]) / 2, sum(c["z"]) / 2], "size": [c["x"][1] - c["x"][0], c["z"][1] - c["z"][0]]}
                  for c in _columns(opt)],
         extra_ident=extra, outside_ident=outside,
+        opening_idents={n: _ident(n) for n in ('window', 'partition-opening', 'orphan-opening')},
         partition=None if partition is None else {"ident": partition, "thickness": PARTITION["thickness"],
                                                   "ends": [(PARTITION["x"] + PARTITION["thickness"] / 2, z) for z in PARTITION["z"]]},
     )

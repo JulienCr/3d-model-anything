@@ -9,6 +9,7 @@ STAGE_OUTPUTS = {
     "shell": "shell.json",
     "model": "model.json",
     "export": "model_measured.glb",
+    "openings": "openings.json",
 }
 
 
