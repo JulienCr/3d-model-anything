@@ -1,3 +1,4 @@
+import json
 import sys
 import types
 
@@ -58,7 +59,7 @@ def test_all_runs_stages_in_order(tmp_path, monkeypatch):
 
         _fake_stage(monkeypatch, stage, run)
     assert _run(tmp_path, "all") == 0
-    assert order == ["registration", "shell", "model", "export", "openings"]
+    assert order == ["registration", "shell", "model", "export", "openings", "architecture"]
 
 
 def _synthetic(build, tmp_path):
@@ -69,8 +70,9 @@ def _synthetic(build, tmp_path):
 def test_all_skips_registration_of_a_capture_without_photos(build, tmp_path, capsys):
     assert cli.main(["all", *_synthetic(build, tmp_path)]) == 0
     assert "registration skipped: no photos for room 0" in capsys.readouterr().out
-    for stage in ("shell", "model", "export", "openings"):
+    for stage in ("shell", "model", "export", "openings", "architecture"):
         assert (tmp_path / "out" / STAGE_OUTPUTS[stage]).exists()
+    assert (tmp_path / "out" / "measurements" / "index.html").exists()
     assert not (tmp_path / "out" / STAGE_OUTPUTS["registration"]).exists()
 
 
@@ -93,3 +95,20 @@ def test_missing_capture_or_room_exits_with_one_line(build, tmp_path, capsys, st
 def test_unknown_subcommand_is_rejected(tmp_path):
     with pytest.raises(SystemExit):
         _run(tmp_path, "nope")
+
+
+def test_compare_tape_writes_a_markdown_report(build, tmp_path, capsys):
+    args = _synthetic(build, tmp_path)
+    assert cli.main(["architecture", *args]) == 1  # needs the model first
+    assert "run model first" in capsys.readouterr().err
+    assert cli.main(["all", *args]) == 0
+    arch_path = tmp_path / "out" / STAGE_OUTPUTS["architecture"]
+    arch = json.loads(arch_path.read_text(encoding="utf-8"))
+    dim = next(d for d in arch["dimensions"] if d["id"] == "Door_1-w")
+    tape_path = tmp_path / "measurements.json"
+    tape_path.write_text(json.dumps({"Door_1-w": dim["value"] + 0.02}), encoding="utf-8")
+    report = tmp_path / "tape.md"
+    assert cli.main(["compare-tape", "--arch", str(arch_path), "--tape", str(tape_path), "-o", str(report)]) == 0
+    assert "+2,0" in report.read_text(encoding="utf-8")
+    assert cli.main(["compare-tape", "--arch", str(arch_path), "--tape", str(tmp_path / "nowhere.json")]) == 1
+    assert len(capsys.readouterr().err.strip().splitlines()) == 1

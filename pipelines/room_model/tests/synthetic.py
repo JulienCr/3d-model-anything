@@ -7,7 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 from plyfile import PlyData, PlyElement
+
+from room_model import raster
 
 UP = np.array([0.0, 1.0, 0.0])
 OUTLINE = [(0.0, 0.0), (6.0, 0.0), (6.0, 2.5), (2.5, 2.5), (2.5, 4.5), (0.0, 4.5)]
@@ -65,6 +68,7 @@ class SyntheticOptions:
     partition_opening_z: float = 1.3  # centre along the partition
     partition_opening_face: str = "B"  # side the RoomPlan opening +z axis points to; A is the +x face
     orphan_opening: bool = False  # a RoomPlan opening standing in free space
+    photos: int = 0  # posed photos (first N of PHOTO_POSES) rendered from the mesh, stored in sensor orientation
 
 
 @dataclass
@@ -107,6 +111,20 @@ WINDOW = {"x": 3.0, "w": 1.2, "sill": 0.9, "h": 1.0}  # in the south wall
 PARTITION_OPENING = {"z": 1.3, "h": 2.05}  # default centre along the partition
 ORPHAN_OPENING = {"centre": (1.5, 3.4), "w": 0.8, "h": 1.2, "sill": 0.5}
 OUTSIDE_WALL = {"centre": (-1.5, 2.0), "length": 1.0}  # beyond the west wall
+PHOTO_SIZE = (320, 240)  # sensor image (landscape), width x height
+PHOTO_FOCAL = 277.0
+SKY = (135, 206, 235)
+# (camera position, target, roll in degrees about the optical axis) in the truth-local frame; +-90 = phone held upright
+PHOTO_POSES = [
+    ((2.4, 1.4, 1.9), (6.0, 1.2, 1.25), -90.0),  # east wall and its door
+    ((3.0, 1.4, 2.2), (3.0, 1.4, 0.0), 90.0),  # south wall and its window
+    ((4.5, 1.4, 1.2), (0.0, 1.4, 1.2), -90.0),  # west wall, a column in the way
+    ((1.6, 1.4, 2.1), (6.0, 1.4, 0.5), 90.0),
+    ((5.5, 1.4, 2.0), (1.0, 1.2, 0.0), -90.0),
+    ((3.0, 1.4, 0.8), (6.0, 1.0, 2.5), 90.0),
+    ((2.5, 1.4, 1.3), (1.0, 1.2, 1.3), -90.0),  # the partition
+    ((2.0, 1.4, 0.9), (1.5, 1.2, 4.5), 90.0),  # down the wing
+]
 
 
 def _short_beam_z(opt: SyntheticOptions) -> tuple[float, float]:
@@ -162,7 +180,7 @@ def _in_rects(u, v, rects):
 class _Mesh:
     def __init__(self, cell: float, noise: float, rng):
         self.cell, self.noise, self.rng = cell, noise, rng
-        self.verts, self.normals, self.inroom, self.faces, self.cls = [], [], [], [], []
+        self.verts, self.normals, self.inroom, self.faces, self.cls, self.surface = [], [], [], [], [], []
         self.n_verts = 0
 
     def rect(self, origin, U, V, normal, cls, u_range, v_range, keep=None, inroom=1):
@@ -197,6 +215,7 @@ class _Mesh:
         self.inroom.append(np.full(len(pts), inroom, np.uint8))
         self.faces.append(tri)
         self.cls.append(np.full(len(tri), cls, np.uint8))
+        self.surface.append(np.full(len(tri), len(self.surface), np.int64))
         self.n_verts += len(pts)
 
 
@@ -486,19 +505,59 @@ def _roomplan(opt: SyntheticOptions, world: np.ndarray) -> tuple[dict, dict[str,
     return data, idents, extra, partition, outside
 
 
+def _look_at(pos, target, roll_deg: float) -> np.ndarray:
+    """OpenCV camera-to-world (x right, y down, z forward) looking from pos to target, rolled about its axis."""
+    pos = np.asarray(pos, float)
+    f = np.asarray(target, float) - pos
+    f /= np.linalg.norm(f)
+    right = np.cross(f, UP)
+    right /= np.linalg.norm(right)
+    up = np.cross(right, f)
+    rho = np.radians(roll_deg)
+    right, up = np.cos(rho) * right + np.sin(rho) * up, -np.sin(rho) * right + np.cos(rho) * up
+    m = np.eye(4)
+    m[:3, 0], m[:3, 1], m[:3, 2], m[:3, 3] = right, -up, f, pos
+    return m
+
+
+def _render_photos(mesh: _Mesh, world: np.ndarray, count: int, folder: Path) -> list[dict]:
+    """Photos of the mesh with a flat colour per surface; entries of photos.json with ARKit poses in the world frame."""
+    assert count <= len(PHOTO_POSES), f"photos: at most {len(PHOTO_POSES)}"
+    verts, faces = np.concatenate(mesh.verts), np.concatenate(mesh.faces)
+    surface, face_cls = np.concatenate(mesh.surface), np.concatenate(mesh.cls)
+    w, h = PHOTO_SIZE
+    K = np.array([[PHOTO_FOCAL, 0, w / 2], [0, PHOTO_FOCAL, h / 2], [0, 0, 1.0]])
+    base = np.array([CLASS_COLORS[int(c)] for c in face_cls], float)
+    tint = ((surface * 37) % 41 - 20)[:, None].astype(float)
+    colours = np.clip(base + tint, 0, 255).astype(np.uint8)
+    entries = []
+    for i, (pos, target, roll) in enumerate(PHOTO_POSES[:count]):
+        c2w_local = _look_at(pos, target, roll)
+        _, ids = raster.rasterize(verts, faces, K, np.linalg.inv(c2w_local), PHOTO_SIZE)
+        image = np.where((ids >= 0)[..., None], colours[np.maximum(ids, 0)], np.array(SKY, np.uint8))
+        name = f"{i:04d}.jpg"
+        Image.fromarray(image.astype(np.uint8)).save(folder / name, quality=92)
+        c2w_arkit = world @ c2w_local @ np.diag([1.0, -1.0, -1.0, 1.0])
+        entries.append({"file": f"photos/{name}", "width": w, "height": h, "intrinsics": [float(v) for v in K.T.ravel()],
+                        "transform": _flat(c2w_arkit), "timestamp": float(i), "room": 0})
+    return entries
+
+
 def make_capture(root: Path, options: SyntheticOptions | None = None) -> SyntheticTruth:
     opt = options or SyntheticOptions()
     root = Path(root)
     for sub in ("rooms", "mesh", "photos"):
         (root / sub).mkdir(parents=True, exist_ok=True)
     world = _world_from_local()
-    n_verts, n_faces = _write_ply(_build_mesh(opt), world, root / "mesh" / "room-0.ply")
+    mesh = _build_mesh(opt)
+    n_verts, n_faces = _write_ply(mesh, world, root / "mesh" / "room-0.ply")
+    photo_entries = _render_photos(mesh, world, opt.photos, root / "photos") if opt.photos else []
     data, idents, extra, partition, outside = _roomplan(opt, world)
     (root / "rooms" / "room-0.json").write_text(json.dumps(data), encoding="utf-8")
-    (root / "photos" / "photos.json").write_text("[]", encoding="utf-8")
+    (root / "photos" / "photos.json").write_text(json.dumps(photo_entries), encoding="utf-8")
     mesh_entry = {"anchors": 0, "faces": int(n_faces), "file": "mesh/room-0.ply", "vertices": int(n_verts)}
     manifest = {
-        "format": "house-capture/5", "mesh": mesh_entry, "photos": "photos/photos.json", "photoCount": 0,
+        "format": "house-capture/5", "mesh": mesh_entry, "photos": "photos/photos.json", "photoCount": len(photo_entries),
         "rooms": [{"index": 0, "name": "Synthetic", "file": "rooms/room-0.json", "mesh": mesh_entry,
                    "walls": len(data["walls"]), "doors": 1}],
     }

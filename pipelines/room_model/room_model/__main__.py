@@ -16,6 +16,7 @@ STAGE_MODULES = {
     "model": "room_model.model",
     "export": "room_model.export",
     "openings": "room_model.openings",
+    "architecture": "room_model.architecture",
 }
 
 
@@ -40,6 +41,10 @@ def build_parser() -> argparse.ArgumentParser:
     cmp.add_argument("--model", type=Path, required=True)
     cmp.add_argument("--reference", type=Path, required=True)
     cmp.add_argument("-o", "--output", type=Path, help="write Markdown here instead of stdout")
+    tp = sub.add_parser("compare-tape", help="compare tape measurements against an architecture.json")
+    tp.add_argument("--arch", type=Path, required=True)
+    tp.add_argument("--tape", type=Path, required=True, help='JSON {"<dimension id>": <metres>}')
+    tp.add_argument("-o", "--output", type=Path, help="write Markdown here instead of stdout")
     return parser
 
 
@@ -87,10 +92,31 @@ def _compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _compare_tape(args: argparse.Namespace) -> int:
+    from room_model.tape import compare
+
+    docs = []
+    for label, path in (("architecture", args.arch), ("mesures", args.tape)):
+        try:
+            docs.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError) as exc:
+            print(f"{label} illisible ({path}) : {exc}", file=sys.stderr)
+            return 1
+    report = compare(*docs)
+    if args.output:
+        args.output.write_text(report, encoding="utf-8")
+        print(f"compare-tape: wrote {args.output}")
+    else:
+        print(report)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "compare":
         return _compare(args)
+    if args.command == "compare-tape":
+        return _compare_tape(args)
     ctx = StageContext(args.capture, args.out, args.room, args.turn, args.force, args.keep_work)
     try:
         room_entry(ctx.capture, ctx.room)

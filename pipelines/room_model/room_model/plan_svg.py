@@ -63,7 +63,7 @@ class _Plan:
         self.boxes.append(shapely.box(x0, y + dy - 11, x0 + w, y + dy + 3))
         self.out.append(f'<text class="{cls}" x="{x:.1f}" y="{y + dy:.1f}" text-anchor="{anchor}">{escape(content)}</text>')
 
-    def draw(self) -> str:
+    def draw_elements(self) -> None:
         els = self.doc["elements"]
         floor = next(e for e in els if e["kind"] == "floor")
         self.out.append(f'<polygon id="Floor" class="floor" points="{self.points(floor["polygon"])}"/>')
@@ -78,15 +78,24 @@ class _Plan:
                 self._beam(el)
             elif el["kind"] == "column":
                 self._column(el)
+
+    def draw(self) -> str:
+        self.draw_elements()
         stations = [d for d in self.doc["dimensions"] if d["kind"] in STATION_KINDS and d["at"] is not None]
         ends = {d["id"]: self._ends(d) for d in stations}
         self.segments = [shapely.LineString(e) for e in ends.values()]
         for dim in stations:
             self._station(dim, *ends[dim["id"]])
         self._scale_bar()
-        return (f'<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="{self.w:.0f}" '
-                f'height="{self.h:.0f}" viewBox="0 0 {self.w:.0f} {self.h:.0f}">\n<style>{STYLE}</style>\n'
-                f'<rect width="100%" height="100%" fill="#fff"/>\n' + "\n".join(self.out) + "\n</svg>\n")
+        return self.document()
+
+    def document(self, standalone: bool = True, extra_style: str = "") -> str:
+        """The drawing as SVG; `standalone=False` gives an element that can sit inline in an HTML page."""
+        head = '<?xml version="1.0" encoding="UTF-8"?>\n' if standalone else ""
+        xmlns = ' xmlns="http://www.w3.org/2000/svg"' if standalone else ""
+        return (f'{head}<svg{xmlns} width="{self.w:.0f}" height="{self.h:.0f}" viewBox="0 0 {self.w:.0f} {self.h:.0f}">\n'
+                f'<style>{STYLE}{extra_style}</style>\n<rect width="100%" height="100%" fill="#fff"/>\n'
+                + "\n".join(self.out) + "\n</svg>\n")
 
     def _ceiling(self, el: dict) -> None:
         k = el["id"].split("_")[1]

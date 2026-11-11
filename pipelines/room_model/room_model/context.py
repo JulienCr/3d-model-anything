@@ -10,6 +10,7 @@ STAGE_OUTPUTS = {
     "model": "model.json",
     "export": "model_measured.glb",
     "openings": "openings.json",
+    "architecture": "architecture.json",
 }
 
 
