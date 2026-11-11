@@ -10,6 +10,7 @@ STAGE_OUTPUTS = {
     "model": "model.json",
     "export": "model_measured.glb",
     "openings": "openings.json",
+    "vision": "vision/answers.json",
     "architecture": "architecture.json",
     "blender": "architecture.blend",
 }
@@ -24,7 +25,11 @@ class BlenderMissing(StageInputMissing):
 
 
 class NoPhotos(StageInputMissing, ValueError):
-    """The room has no photos, so registration has nothing to refine."""
+    """The room has no photos, so a photo stage (registration, vision) has nothing to work on."""
+
+
+class ClaudeMissing(StageInputMissing):
+    """The `claude` executable (or $ROOM_MODEL_CLAUDE) does not exist."""
 
 
 class InvalidCapture(StageInputMissing):
@@ -39,6 +44,8 @@ class StageContext:
     turn: int = 0
     force: bool = False
     keep_work: bool = False
+    no_llm: bool = False
+    llm_model: str = "opus"
 
 
 def output_path(ctx: StageContext, stage: str) -> Path:

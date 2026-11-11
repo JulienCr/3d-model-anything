@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from room_model.capture import room_entry
-from room_model.context import STAGE_OUTPUTS, BlenderMissing, InvalidCapture, NoPhotos, StageContext, StageInputMissing
+from room_model.context import STAGE_OUTPUTS, BlenderMissing, ClaudeMissing, InvalidCapture, NoPhotos, StageContext, StageInputMissing
 
 STAGE_MODULES = {
     "registration": "room_model.registration",
@@ -16,9 +16,31 @@ STAGE_MODULES = {
     "model": "room_model.model",
     "export": "room_model.export",
     "openings": "room_model.openings",
+    "vision": "room_model.vision",
     "architecture": "room_model.architecture",
     "blender": "room_model.blender_stage",
 }
+
+
+STALE_AFTER = {"architecture": "vision"}  # the stage reruns when the named stage's output is newer than its own
+
+
+def _skipped(path: Path) -> bool:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("skipped") is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def _current(ctx: StageContext, name: str) -> bool:
+    """The stage output exists, is not a `--no-llm` placeholder and is not older than the output it merges."""
+    out = ctx.out / STAGE_OUTPUTS[name]
+    if not out.exists() or (name == "vision" and not ctx.no_llm and _skipped(out)):
+        return False
+    if name in STALE_AFTER:
+        newer = ctx.out / STAGE_OUTPUTS[STALE_AFTER[name]]
+        return not (newer.is_file() and newer.stat().st_mtime_ns > out.stat().st_mtime_ns)
+    return True
 
 
 def _stage_parent() -> argparse.ArgumentParser:
@@ -29,6 +51,8 @@ def _stage_parent() -> argparse.ArgumentParser:
     p.add_argument("--turn", type=int, default=0, help="extra quarter turns of the room frame")
     p.add_argument("--force", action="store_true", help="rerun stages whose output exists")
     p.add_argument("--keep-work", action="store_true", help="keep intermediate work files")
+    p.add_argument("--no-llm", action="store_true", help="skip the vision stage (no claude call)")
+    p.add_argument("--llm-model", default="opus", help="model given to claude -p by the vision stage")
     return p
 
 
@@ -50,22 +74,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _run_stage(name: str, ctx: StageContext, in_all: bool = False) -> int:
-    out = ctx.out / STAGE_OUTPUTS[name]
-    if out.exists() and not ctx.force:
-        print(f"stage {name}: {out} exists, skipped (use --force)")
+    if _current(ctx, name) and not ctx.force:
+        print(f"stage {name}: {ctx.out / STAGE_OUTPUTS[name]} exists, skipped (use --force)")
         return 0
     module = importlib.import_module(STAGE_MODULES[name])
     try:
         result = module.run(ctx)
     except NoPhotos as exc:
         if in_all:
-            print(f"registration skipped: no photos for room {ctx.room}")
+            print(f"{name} skipped: no photos for room {ctx.room}")
             return 0
         print(str(exc), file=sys.stderr)
         return 1
-    except BlenderMissing as exc:
+    except (BlenderMissing, ClaudeMissing) as exc:
         if in_all:
-            print(f"blender skipped: {exc}")
+            print(f"{name} skipped: {exc}")
             return 0
         print(str(exc), file=sys.stderr)
         return 1
@@ -124,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         return _compare(args)
     if args.command == "compare-tape":
         return _compare_tape(args)
-    ctx = StageContext(args.capture, args.out, args.room, args.turn, args.force, args.keep_work)
+    ctx = StageContext(args.capture, args.out, args.room, args.turn, args.force, args.keep_work, args.no_llm, args.llm_model)
     try:
         room_entry(ctx.capture, ctx.room)
     except InvalidCapture as exc:
