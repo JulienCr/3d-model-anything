@@ -17,6 +17,8 @@ DEPTH_SIDE = 320  # px on the long side of the depth maps
 DEPTH_TOLERANCE = 0.03  # m; a point this much nearer than the nearest surface is still visible
 EDGE_MARGIN = 0.02  # fraction of the image kept clear of a point that must be visible
 MIN_DEPTH = 0.3
+BOX_MARGIN = 0.03  # m; furniture boxes are grown by this much before the sight test
+SIGHT_SAMPLES = 9
 ROTATE = {1: Image.Transpose.ROTATE_90, 2: Image.Transpose.ROTATE_180, 3: Image.Transpose.ROTATE_270}
 
 
@@ -132,6 +134,45 @@ def backproject(photo: PosedPhoto, uv_sensor: np.ndarray, plane: tuple[np.ndarra
     return photo.centre + t[:, None] * rays
 
 
+@dataclass
+class RoomBox:
+    centre: np.ndarray  # (3,), room frame
+    axes: np.ndarray  # 3x3, columns are the unit box axes
+    half: np.ndarray  # (3,), half sizes along the axes
+
+
+def room_boxes(roomplan: dict, w2r: np.ndarray) -> list[RoomBox]:
+    """Oriented boxes of the RoomPlan objects (furniture), in the room frame."""
+    out = []
+    for obj in roomplan.get("objects", []):
+        T = w2r @ colmajor(obj["transform"], 4)
+        out.append(RoomBox(T[:3, 3].copy(), T[:3, :3] / np.linalg.norm(T[:3, :3], axis=0), np.asarray(obj["dimensions"], float) / 2))
+    return out
+
+
+def sight_blocked(centre: np.ndarray, span: np.ndarray, boxes: list[RoomBox], margin: float = BOX_MARGIN) -> bool:
+    """True when a sight line from `centre` to a sample of the span (ends included) crosses a box grown by `margin`.
+
+    A box that contains the sample itself is ignored: the measured element may sit inside its slack.
+    """
+    span = np.asarray(span, float)
+    t = np.linspace(0.0, 1.0, SIGHT_SAMPLES)[:, None]
+    samples = span[0] + t * (span[-1] - span[0])
+    for box in boxes:
+        half = box.half + margin
+        a, d = (np.asarray(centre, float) - box.centre) @ box.axes, (samples - box.centre) @ box.axes
+        a, d = np.broadcast_to(a, d.shape), d - a
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t0, t1 = (-half - a) / d, (half - a) / d
+        parallel = np.abs(d) < 1e-12
+        lo = np.where(parallel, np.where(np.abs(a) <= half, -np.inf, np.inf), np.minimum(t0, t1)).max(1)
+        hi = np.where(parallel, np.inf, np.maximum(t0, t1)).min(1)
+        inside = (np.abs(d + a) <= half).all(1)
+        if (~inside & (np.maximum(lo, 0.0) <= np.minimum(hi, 1.0))).any():
+            return True
+    return False
+
+
 class DepthMaps:
     """Z-buffers of a room-frame mesh seen by photos, at most DEPTH_SIDE px on the long side, computed on demand."""
 
@@ -186,11 +227,12 @@ class DepthMaps:
 
 
 def best_views(photos: list[PosedPhoto], pts_room: np.ndarray, mesh: DepthMaps | tuple[np.ndarray, np.ndarray],
-               k: int = 3, normal: np.ndarray | None = None, tolerance: float = DEPTH_TOLERANCE) -> list[PosedPhoto]:
+               k: int = 3, normal: np.ndarray | None = None, tolerance: float = DEPTH_TOLERANCE, boxes: list[RoomBox] | None = None) -> list[PosedPhoto]:
     """Up to k photos that see every point (depth test, 3 cm by default), best first.
 
     Score: squared pixel diagonal of the projected points, times the cosine between the optical axis and the
     direction to the points' centroid, times |cos| between `normal` and the direction to the camera when given.
+    With `boxes`, a photo whose sight lines to the span cross a box is rejected as well.
     """
     maps = mesh if isinstance(mesh, DepthMaps) else DepthMaps(*mesh)
     pts = np.atleast_2d(np.asarray(pts_room, float))
@@ -199,6 +241,8 @@ def best_views(photos: list[PosedPhoto], pts_room: np.ndarray, mesh: DepthMaps |
     for photo in photos:
         uv, depth = project(photo, pts)
         if not (depth > MIN_DEPTH).all() or not maps.visible(photo, pts, tolerance).all():
+            continue
+        if boxes and sight_blocked(photo.centre, pts, boxes):
             continue
         diag2 = float(((uv.max(0) - uv.min(0)) ** 2).sum()) + 1.0
         to_point = centroid - photo.centre

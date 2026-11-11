@@ -153,3 +153,13 @@ def test_build_ignores_absent_vision(full):
     model_doc = json.loads((ctx.out / "model.json").read_text(encoding="utf-8"))
     openings_doc = json.loads((ctx.out / "openings.json").read_text(encoding="utf-8"))
     assert architecture.build(model_doc, openings_doc, None) == arch
+
+
+def test_survey_alternatives(full):
+    ctx, _, _ = full
+    html = (ctx.out / "measurements" / "index.html").read_text(encoding="utf-8")
+    _, rows = _sections(html)
+    alts = {n: len(re.findall(r'class="alt"', r)) for n, r in rows.items()}
+    assert max(alts.values()) in (1, 2, 3) and all(a <= 3 for a in alts.values())
+    assert all(r.count('class="main"') == 1 for r in rows.values() if "data:image/jpeg" in r)
+    assert "swap" in html and "http" not in html and "<script src" not in html

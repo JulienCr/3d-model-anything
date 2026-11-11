@@ -111,3 +111,17 @@ def test_best_views_prefer_the_closer_photo_and_skip_those_that_cannot_see(tmp_p
     thin = np.array([[0.0, 0, 3.05], [0.1, 0, 3.05]])  # 5 cm behind the box: a frame or skirting in front of an end
     assert photo_geom.best_views([near], thin, (verts, faces)) == []
     assert [p.name for p in photo_geom.best_views([near], thin, (verts, faces), tolerance=0.10)] == ["near"]
+
+
+def test_best_views_rejects_box_occlusion(tmp_path):
+    wall = _plane(5.0, 4.0, 3.0)[0:2]  # the mesh has no trace of the furniture
+    near, far = _pinhole("near", 1.0, tmp_path), _pinhole("far", -2.0, tmp_path)
+    span = np.array([[1.5, 0, 5.0], [2.5, 0, 5.0]])
+    chair = photo_geom.RoomBox(np.array([0.7, 0, 3.0]), np.eye(3), np.array([0.2, 0.2, 0.2]))
+    assert [p.name for p in photo_geom.best_views([near, far], span, wall)] == ["near", "far"]
+    assert [p.name for p in photo_geom.best_views([near, far], span, wall, boxes=[chair])] == ["far"]
+    around_span = photo_geom.RoomBox(np.array([2.0, 0, 5.0]), np.eye(3), np.array([1.0, 1.0, 0.1]))
+    assert len(photo_geom.best_views([near, far], span, wall, boxes=[around_span])) == 2  # a box holding the span is no obstacle
+    turned = photo_geom.room_boxes({"objects": [{"transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.7, 0, 3.0, 1],
+                                                  "dimensions": [0.4, 0.4, 0.4]}]}, np.eye(4))
+    assert [p.name for p in photo_geom.best_views([near, far], span, wall, boxes=turned)] == ["far"]
