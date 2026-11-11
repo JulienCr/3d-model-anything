@@ -53,42 +53,32 @@ def recess_depth(arch: dict, geom: dict, el: dict) -> float | None:
     return depth if depth < geom["thickness"] - COPLANAR_TOL else None
 
 
-def _slack(geom: dict, body: list, side: int) -> tuple[float, float]:
-    """(near, far) m by which the built `body` polygon sticks out of the nominal faces, on the face a cut opens on and on the other."""
-    x, z = geom["point"](0.0)
-    face = geom["n"][0] * x + geom["n"][1] * z
-    levels = [geom["n"][0] * px + geom["n"][1] * pz for px, pz in body]
-    front, back = max(0.0, max(levels) - face), max(0.0, face - geom["thickness"] - min(levels))
-    return (front, back) if side > 0 else (back, front)
+def cut_quad(arch: dict, geom: dict, opening: dict, host: dict, lo: float, hi: float) -> tuple[list, list]:
+    """(quad, reach): the plan quad cutting the host between `lo` and `hi` m along it, and the same without the overshoots.
 
-
-def cut_quad(arch: dict, geom: dict, opening: dict, host: dict, body: list, half: float) -> tuple[list, list]:
-    """(quad, reach): the plan quad cutting `half` m either side of the opening's centre, and the same without the overshoots.
-
-    The quad starts CUT_OVERSHOOT in front of the face the opening is on and ends CUT_OVERSHOOT behind the far one (or
-    after the recess depth). It also covers where the built `body` leaves the nominal faces, as a snapped partition does.
+    The quad starts CUT_OVERSHOOT in front of the built face the opening is on and ends CUT_OVERSHOOT behind the
+    built far one (or after the recess depth), so it pierces a partition snapped off its nominal lines.
     """
-    centre = frame.value(arch, opening["params"]["center_s"])
     side = frame.side(host, opening.get("face"))
-    a, b = (frame.face_point(geom, centre + d, side) for d in (-half, half))
+    near = [frame.face_point(geom, s, side) for s in (lo, hi)]
     inward = (-geom["n"][0] * side, -geom["n"][1] * side)  # from the cut face into the wall
     recess = recess_depth(arch, geom, opening)
-    near, far = _slack(geom, body, side)
-    front, back = CUT_OVERSHOOT + near, (geom["thickness"] + CUT_OVERSHOOT + far if recess is None else recess)
-    quad = [(a[0] - inward[0] * front, a[1] - inward[1] * front), (b[0] - inward[0] * front, b[1] - inward[1] * front),
-            (b[0] + inward[0] * back, b[1] + inward[1] * back), (a[0] + inward[0] * back, a[1] + inward[1] * back)]
-    depth = geom["thickness"] if recess is None else recess
-    reach = [(a[0], a[1]), (b[0], b[1]), (b[0] + inward[0] * depth, b[1] + inward[1] * depth), (a[0] + inward[0] * depth, a[1] + inward[1] * depth)]
-    return quad, reach
+    if recess is None:
+        far = [frame.face_point(geom, s, -side) for s in (lo, hi)]
+        back = [(x + inward[0] * CUT_OVERSHOOT, z + inward[1] * CUT_OVERSHOOT) for x, z in far]
+    else:
+        far = back = [(x + inward[0] * recess, z + inward[1] * recess) for x, z in near]
+    front = [(x - inward[0] * CUT_OVERSHOOT, z - inward[1] * CUT_OVERSHOOT) for x, z in near]
+    return [front[0], front[1], back[1], back[0]], [near[0], near[1], far[1], far[0]]
 
 
-def _cutter(arch: dict, geom: dict, opening: dict, y_floor: float, host: dict, body: list) -> tuple[bpy.types.Object, list] | None:
+def _cutter(arch: dict, geom: dict, opening: dict, y_floor: float, host: dict) -> tuple[bpy.types.Object, list] | None:
     """The cutting box of an opening and the plan quad it cuts through the host (without the overshoots); None for no size."""
     lay = openings.resolve(arch, opening)
     w, h, sill = lay.cut_w, lay.cut_h, lay.bottom
     if w <= 0 or h <= 0:
         return None
-    quad, reach = cut_quad(arch, geom, opening, host, body, w / 2)
+    quad, reach = cut_quad(arch, geom, opening, host, *lay.span)
     y0, y1 = y_floor + sill, y_floor + sill + h
     if sill <= COPLANAR_TOL:
         y0 = y_floor - 2 * CUT_OVERSHOOT
@@ -133,7 +123,7 @@ def _cutters(arch: dict, y_floor: float, hosts: dict, bodies: dict, scene_collec
         host = hosts.get(o.get("host"))
         if o["kind"] not in CUT_KINDS or host is None:
             continue
-        cutter = _cutter(arch, frame.wall_geometry(arch, host), o, y_floor, host, bodies[host["id"]])
+        cutter = _cutter(arch, plan.host_geometry(arch, host, bodies), o, y_floor, host)
         if cutter is not None:
             scene_collection.objects.link(cutter[0])
             out.append((*cutter, host["id"]))

@@ -8,7 +8,7 @@ import math
 import bmesh
 import bpy
 
-from . import catalogue, frame, openings
+from . import catalogue, frame, openings, plan
 from .catalogue import FIXED, HINGED, POCKET, SLIDING
 
 FRAME_DEPTH = 0.10  # m, frame depth when the wall is thicker than this
@@ -145,14 +145,14 @@ def _rig(obj: bpy.types.Object, leaf: dict, root: bpy.types.Object) -> None:
         _driver(obj, "scale", 0, flip, root)
 
 
-def _root(arch: dict, el: dict, j: catalogue.Joinery, lay: openings.Layout, host: dict, collection) -> bpy.types.Object:
-    geom = frame.wall_geometry(arch, host)
-    s, sill = frame.value(arch, el["params"]["center_s"]), lay.bottom
-    (x, z), (nx, nz), t = geom["point"](s), geom["n"], geom["thickness"]
+def _root(arch: dict, el: dict, j: catalogue.Joinery, lay: openings.Layout, host: dict, geom: dict, collection) -> bpy.types.Object:
+    sill, (nx, nz) = lay.bottom, geom["n"]
+    (xa, za), (xb, zb) = (frame.face_point(geom, lay.centre, side) for side in (1, -1))
+    x, z = (xa + xb) / 2, (za + zb) / 2  # the middle of the built thickness
     away = (-1 if j.swing == "out" else 1) * (-1 if host["kind"] == "partition" and el.get("face") == "B" else 1)
     root = bpy.data.objects.new(el["id"], None)
     root.empty_display_type, root.empty_display_size = "PLAIN_AXES", 0.15
-    root.location = frame.to_blender(x - nx * t / 2, frame.value(arch, "floor.level") + sill, z - nz * t / 2)
+    root.location = frame.to_blender(x, frame.value(arch, "floor.level") + sill, z)
     root.rotation_euler = (0.0, 0.0, math.atan2(-away * nx, -away * nz))  # local +Y = swing direction
     for name, (default, text, span) in RIG_PROPS.items():
         root[name] = default
@@ -167,12 +167,12 @@ def _root(arch: dict, el: dict, j: catalogue.Joinery, lay: openings.Layout, host
     return root
 
 
-def _build(arch: dict, el: dict, host: dict, j: catalogue.Joinery, collection) -> list[bpy.types.Object]:
+def _build(arch: dict, el: dict, host: dict, geom: dict, j: catalogue.Joinery, collection) -> list[bpy.types.Object]:
     lay = openings.resolve(arch, el)
     t = frame.value(arch, host["params"]["thickness"])
     depth = FRAME_DEPTH if t >= FRAME_DEPTH + 0.02 else t + 0.01
     bottom = 0.0 if j.kind == "door" else lay.jamb
-    root = _root(arch, el, j, lay, host, collection)
+    root = _root(arch, el, j, lay, host, geom, collection)
     out = [root, _object(f"{el['id']}_Frame", _frame_boxes(j.kind, lay, depth), "Menuiserie", root, collection)]
     height = lay.leaf_h
     for k, leaf in enumerate(_leaves(j, lay.leaf_w, t), start=1):
@@ -193,6 +193,7 @@ def _build(arch: dict, el: dict, host: dict, j: catalogue.Joinery, collection) -
 def add(arch: dict, collections: dict, ctx: dict) -> list[bpy.types.Object]:
     """Frame, leaves and glass of every hosted door and window, in `Menuiseries`."""
     hosts = {e["id"]: e for e in arch["elements"]}
+    bodies = plan.built_bodies(arch)
     out = []
     for el in arch["elements"]:
         j = catalogue.resolve(el)
@@ -201,5 +202,5 @@ def add(arch: dict, collections: dict, ctx: dict) -> list[bpy.types.Object]:
             continue
         if min(frame.value(arch, el["params"]["width"]), frame.value(arch, el["params"]["height"])) < MIN_SIZE:
             continue
-        out += _build(arch, el, host, j, collections["Menuiseries"])
+        out += _build(arch, el, host, plan.host_geometry(arch, host, bodies), j, collections["Menuiseries"])
     return out

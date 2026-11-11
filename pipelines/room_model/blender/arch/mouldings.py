@@ -37,6 +37,27 @@ def _mitre(normals: list, closed: bool) -> list[tuple[float, float]]:
     return out
 
 
+def _mitre_widths(normals: list, widths: list, closed: bool) -> list[tuple[float, float]]:
+    """Per-vertex 2D offset that lands on the offset line of each adjacent segment, at that segment's own width."""
+    n = len(normals)
+    out = []
+    for i in range(n if closed else n + 1):
+        before = (i - 1) % n if (closed or i > 0) else None
+        after = i % n if (closed or i < n) else None
+        if before is None or after is None:
+            k = after if before is None else before
+            out.append((normals[k][0] * widths[k], normals[k][1] * widths[k]))
+            continue
+        (bx, by), (ax, ay), db, da = normals[before], normals[after], widths[before], widths[after]
+        det = bx * ay - by * ax
+        if abs(det) < 0.25:  # nearly straight: the equal-width mitre at the mean width
+            k = max(1.0 + bx * ax + by * ay, 1.0 / MAX_MITRE)
+            out.append(((bx + ax) / k * (db + da) / 2, (by + ay) / k * (db + da) / 2))
+        else:
+            out.append(((db * ay - da * by) / det, (bx * da - ax * db) / det))
+    return out
+
+
 def _sweep(bm: bmesh.types.BMesh, points: list, across: list, fixed: tuple, profile: list, scale: tuple, origin: tuple,
            closed: bool) -> None:
     """Adds the solid of `profile` swept along room-frame `points`: a runs along the per-vertex `across`, b along `fixed`."""
@@ -216,7 +237,7 @@ def _faces(arch: dict, el: dict, host: dict, geom: dict) -> tuple[int, ...]:
 
 
 def _floor_cuts(arch: dict, hosts: dict, bodies: dict, height: float) -> list[list]:
-    """Plan quads of the cuts that reach into the skirting band, as wide as the casing around them.
+    """Plan quads of the cuts that reach into the skirting band, as wide as the casings around them.
 
     The skirting stops wherever one crosses a face at floor level, whatever wall hosts it: a cut is geometry,
     not a host's property, and a niche recessed from one face leaves the other face alone.
@@ -226,10 +247,10 @@ def _floor_cuts(arch: dict, hosts: dict, bodies: dict, height: float) -> list[li
         host = hosts.get(el.get("host"))
         if el["kind"] not in shell.CUT_KINDS or host is None or host["kind"] not in HOST_KINDS:
             continue
-        if frame.value(arch, el["params"]["sill"]) >= height:
+        lay = openings.resolve(arch, el)
+        if lay.lowest >= height:
             continue
-        half = openings.resolve(arch, el).half_outer
-        out.append(shell.cut_quad(arch, frame.wall_geometry(arch, host), el, host, bodies[host["id"]], half)[0])
+        out.append(shell.cut_quad(arch, plan.host_geometry(arch, host, bodies), el, host, *lay.outer_span)[0])
     return out
 
 
@@ -245,11 +266,10 @@ def _cornice(arch: dict, el: dict, collection) -> bpy.types.Object | None:
     return _finish(el["id"], bm, collection, _flags(el, known))
 
 
-def _skirting(arch: dict, el: dict, hosts: dict, collection) -> bpy.types.Object | None:
+def _skirting(arch: dict, el: dict, hosts: dict, bodies: dict, collection) -> bpy.types.Object | None:
     height, projection = _spec(arch, el)
     profile, known = profiles.resolve("skirting", el.get("profile"))
-    walls = plan.wall_footprints(arch)
-    cuts = _floor_cuts(arch, hosts, {**walls, **plan.partition_footprints(arch, walls)}, height)
+    cuts = _floor_cuts(arch, hosts, bodies, height)
     bm = bmesh.new()
     for chain in _face_chains(arch, None):
         _horizontal(bm, _cut(chain, cuts), frame.value(arch, "floor.level"), profile, projection, height)
@@ -259,81 +279,87 @@ def _skirting(arch: dict, el: dict, hosts: dict, collection) -> bpy.types.Object
     return _finish(el["id"], bm, collection, _flags(el, known))
 
 
-def _on_face(geom: dict, side: int, path: list, normals: list, closed: bool) -> tuple[list, list, tuple]:
-    """Lifts a path in the (s, y) plane of a host face to the room frame: points, mitre vectors, face normal."""
+def _on_face(geom: dict, side: int, path: list, normals: list, widths: list, closed: bool) -> tuple[list, list, tuple]:
+    """Lifts a path in the (s, y) plane of a host face to the room frame: points, mitre vectors, face normal.
+
+    The mitre vectors carry the width of each segment, so the profile is swept with a unit width.
+    """
     ends = [frame.face_point(geom, s, side) for s in (0.0, 1.0)]
     u = (ends[1][0] - ends[0][0], ends[1][1] - ends[0][1])
     points = []
     for s, y in path:
         x, z = frame.face_point(geom, s, side)
         points.append((x, y, z))
-    across = [(u[0] * ds, dy, u[1] * ds) for ds, dy in _mitre(normals, closed)]
+    across = [(u[0] * ds, dy, u[1] * ds) for ds, dy in _mitre_widths(normals, widths, closed)]
     return points, across, (geom["n"][0] * side, 0.0, geom["n"][1] * side)
 
 
-def _band(arch: dict, name: str, host: dict, side: int, path: list, normals: list, closed: bool, spec: tuple,
+def _band(geom: dict, name: str, side: int, path: list, normals: list, widths: list, closed: bool, spec: tuple,
           collection) -> bpy.types.Object:
-    """One profile swept along a rectangle (or three sides of one) drawn on a face of `host`.
+    """One profile swept along a rectangle (or three sides of one) drawn on a face of a host, `widths[k]` wide along segment k.
 
-    `spec` is (kind, profile name, width, projection, element flags).
+    `spec` is (kind, profile name, projection, element flags).
     """
-    kind, profile_name, width, projection, flags = spec
+    kind, profile_name, projection, flags = spec
     profile, known = profiles.resolve(kind, profile_name)
-    points, across, fixed = _on_face(frame.wall_geometry(arch, host), side, path, normals, closed)
+    points, across, fixed = _on_face(geom, side, path, normals, widths, closed)
     bm = bmesh.new()
-    _sweep(bm, points, across, fixed, profile, (width, projection), (0.0, -BITE), closed)
+    _sweep(bm, points, across, fixed, profile, (1.0, projection), (0.0, -BITE), closed)
     return _finish(name, bm, collection, [*flags, *([] if known else ["unknown_profile"])])
 
 
-def _architraves(arch: dict, el: dict, hosts: dict, y_floor: float, collection, verify) -> list[bpy.types.Object]:
+def _architraves(arch: dict, el: dict, hosts: dict, bodies: dict, y_floor: float, collection, verify) -> list[bpy.types.Object]:
     host = hosts.get(el.get("host"))
     spec = el.get("frame")
     if not spec or host is None or host["kind"] not in HOST_KINDS:
         return []
     if "width" not in spec:
         raise ValueError(f"{el['id']}: frame.width is missing")
-    geom = frame.wall_geometry(arch, host)
+    geom = plan.host_geometry(arch, host, bodies)
     lay = openings.resolve(arch, el)
-    centre = frame.value(arch, el["params"]["center_s"])
-    s0, s1, y0 = centre - lay.cut_w / 2, centre + lay.cut_w / 2, y_floor + lay.bottom
-    closed = lay.bottom_casing
+    (s0, s1), y0 = lay.span, y_floor + lay.bottom
+    left, top, right, bottom = lay.casings
+    closed = bottom > 0
     path = [(s0, y0), (s0, y0 + lay.cut_h), (s1, y0 + lay.cut_h), (s1, y0)]
     normals = [(-1.0, 0.0), (0.0, 1.0), (1.0, 0.0)] + ([(0.0, -1.0)] if closed else [])
+    widths = [left, top, right] + ([bottom] if closed else [])
     sides = _faces(arch, el, host, geom)
     flags = [*el.get("flags", []), *(f for f in lay.flags if f == "to_verify")]
     target = verify if "to_verify" in flags else collection
     out = []
     for side in sides:
         suffix = "" if len(sides) == 1 else ("_A" if side == 1 else "_B")
-        band = ("architrave", spec.get("profile"), lay.casing, ARCHITRAVE_PROJECTION, flags)
-        out.append(_band(arch, f"{el['id']}_Architrave{suffix}", host, side, path, normals, closed, band, target))
+        band = ("architrave", spec.get("profile"), ARCHITRAVE_PROJECTION, flags)
+        out.append(_band(geom, f"{el['id']}_Architrave{suffix}", side, path, normals, widths, closed, band, target))
     return out
 
 
-def _panel_frame(arch: dict, el: dict, hosts: dict, y_floor: float, collection) -> bpy.types.Object | None:
+def _panel_frame(arch: dict, el: dict, hosts: dict, bodies: dict, y_floor: float, collection) -> bpy.types.Object | None:
     host = hosts.get(el.get("host"))
     if host is None or host["kind"] not in HOST_KINDS:
         return None
     s0, y0, s1, y1 = el["rect"]
     path = [(s0, y_floor + y0), (s0, y_floor + y1), (s1, y_floor + y1), (s1, y_floor + y0)]
     normals = [(1.0, 0.0), (0.0, -1.0), (-1.0, 0.0), (0.0, 1.0)]
-    band = ("panel_frame", el.get("profile"), PANEL_WIDTH, PANEL_PROJECTION, el.get("flags", []))
-    return _band(arch, el["id"], host, frame.side(host, el.get("face")), path, normals, True, band, collection)
+    band = ("panel_frame", el.get("profile"), PANEL_PROJECTION, el.get("flags", []))
+    geom = plan.host_geometry(arch, host, bodies)
+    return _band(geom, el["id"], frame.side(host, el.get("face")), path, normals, [PANEL_WIDTH] * 4, True, band, collection)
 
 
 def add(arch: dict, collections: dict, ctx: dict) -> list[bpy.types.Object]:
     """Cornice, skirting and architraves in `Moulures`, panel frames in `À vérifier`."""
     hosts = {e["id"]: e for e in arch["elements"]}
     y_floor = frame.value(arch, "floor.level")
+    bodies = plan.built_bodies(arch)
     moulures, out = collections["Moulures"], []
     for el in arch["elements"]:
         kind = el["kind"]
         if kind == "cornice":
             out.append(_cornice(arch, el, moulures))
         elif kind == "skirting":
-            out.append(_skirting(arch, el, hosts, moulures))
+            out.append(_skirting(arch, el, hosts, bodies, moulures))
         elif kind == "panel_frame":
-            out.append(_panel_frame(arch, el, hosts, y_floor, collections["À vérifier"]))
+            out.append(_panel_frame(arch, el, hosts, bodies, y_floor, collections["À vérifier"]))
         elif kind in shell.CUT_KINDS:
-            out += _architraves(arch, el, hosts, y_floor, moulures, collections["À vérifier"])
+            out += _architraves(arch, el, hosts, bodies, y_floor, moulures, collections["À vérifier"])
     return [o for o in out if o is not None]

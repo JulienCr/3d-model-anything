@@ -19,24 +19,35 @@ JOINERY_KINDS = ("door", "window")
 
 @dataclass(frozen=True)
 class Layout:
-    """Sizes in metres; `bottom` is the height of the cut above the floor, `casing` the drawn casing width (0: none).
+    """Sizes in metres. `centre` is the cut's position along the host (`leaf_center_s` when measured, else `center_s`),
+    `bottom` the height of the cut above the floor, `casings` the drawn casing widths (left, top, right, bottom; 0: none).
 
     `leaf_w` and `leaf_h` are None for an opening or a niche. `flags` holds `leaf_estimated` and `to_verify`.
     """
     cut_w: float
     cut_h: float
     bottom: float
-    casing: float
-    bottom_casing: bool
+    centre: float
+    casings: tuple[float, float, float, float]
     jamb: float = JAMB_VISIBLE
     leaf_w: float | None = None
     leaf_h: float | None = None
     flags: tuple[str, ...] = ()
 
     @property
-    def half_outer(self) -> float:
-        """Half the width the casings reach to, from the centre of the cut."""
-        return self.cut_w / 2 + self.casing
+    def span(self) -> tuple[float, float]:
+        """(low, high) position of the cut along the host."""
+        return self.centre - self.cut_w / 2, self.centre + self.cut_w / 2
+
+    @property
+    def outer_span(self) -> tuple[float, float]:
+        """The same out to the outer edge of the casings."""
+        return self.span[0] - self.casings[0], self.span[1] + self.casings[2]
+
+    @property
+    def lowest(self) -> float:
+        """Height of the lowest thing the opening puts on the wall: the casing's bottom bar when it has one."""
+        return self.bottom - self.casings[3]
 
 
 def _param(arch: dict, el: dict, name: str) -> float | None:
@@ -44,13 +55,22 @@ def _param(arch: dict, el: dict, name: str) -> float | None:
     return None if pid is None else frame.value(arch, pid)
 
 
+def _clamp(raw: float, flags: list) -> float:
+    if not CASING_MIN <= raw <= CASING_MAX:
+        flags.append("to_verify")
+    return min(max(raw, CASING_MIN), CASING_MAX)
+
+
 def resolve(arch: dict, el: dict) -> Layout:
     """The layout of a door, window, opening or niche."""
-    w, h, sill = (_param(arch, el, k) for k in ("width", "height", "sill"))
+    w, h, sill, outer_centre = (_param(arch, el, k) for k in ("width", "height", "sill", "center_s"))
+    centre = _param(arch, el, "leaf_center_s")
+    centre = outer_centre if centre is None else centre
     spec = el.get("frame") or {}
     casing = spec.get("width")
     if el["kind"] not in JOINERY_KINDS:
-        return Layout(w, h, sill, casing or 0.0, sill > SILL_TOL)
+        c = casing or 0.0
+        return Layout(w, h, sill, centre, (c, c, c, c if sill > SILL_TOL else 0.0))
     door = el["kind"] == "door"
     jamb = _param(arch, el, "jamb_width") or JAMB_VISIBLE
     flags = []
@@ -70,10 +90,8 @@ def resolve(arch: dict, el: dict) -> Layout:
             flags.append("to_verify")
     cut_w, cut_h = leaf_w + 2 * jamb, leaf_h + ends * jamb
     bottom = sill if door else sill + max(0.0, (h - cut_h) / 2)
-    drawn = 0.0
-    if casing is not None:
-        drawn = (w - cut_w) / 2
-        if not CASING_MIN <= drawn <= CASING_MAX:
-            drawn = min(max(drawn, CASING_MIN), CASING_MAX)
-            flags.append("to_verify")
-    return Layout(cut_w, cut_h, bottom, drawn, not door, jamb, leaf_w, leaf_h, tuple(dict.fromkeys(flags)))
+    casings = (0.0,) * 4
+    if casing is not None:  # what is left between each edge of the cut and the outer extent
+        casings = (_clamp((centre - cut_w / 2) - (outer_centre - w / 2), flags), _clamp(sill + h - (bottom + cut_h), flags),
+                   _clamp((outer_centre + w / 2) - (centre + cut_w / 2), flags), 0.0 if door else _clamp(bottom - sill, flags))
+    return Layout(cut_w, cut_h, bottom, centre, casings, jamb, leaf_w, leaf_h, tuple(dict.fromkeys(flags)))

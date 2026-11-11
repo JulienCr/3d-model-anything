@@ -433,6 +433,8 @@ LEAF_ELEMENTS = [
     ("Door_1", "Door_L3", "Wall_M1", 0.9, {"width": 1.7, "height": 2.15, "leaf_width": 1.4, "leaf_height": 2.0},
      {"frame": {"profile": "flat", "width": 0.1}, "type": "hinged_double"}),
     ("Door_1", "Door_L4", "Wall_M5", 1.25, {"width": 1.5, "height": 2.12, "leaf_width": 0.8, "leaf_height": 2.0}, {"frame": LEAF_FRAME}),
+    ("Door_1", "Door_L5", "Wall_M3", 3.0, {"width": 1.04, "height": 2.12, "leaf_width": 0.8, "leaf_height": 2.0, "leaf_center_s": 3.04},
+     {"frame": LEAF_FRAME}),  # the leaf sits 4 cm off the middle of the outer extent: casings of 11 and 3 cm
     ("Window_1", "Window_L1", "Wall_M1", 4.6, {"width": 1.0, "height": 1.2, "sill": 0.9, "leaf_width": 0.8, "leaf_height": 1.0},
      {"frame": {"profile": "flat", "width": 0.05}, "type": "casement_single"}),
 ]
@@ -454,21 +456,22 @@ def _add_leaf_elements(arch):
 def _cut_rays(arch, oid, cut_w, bottom, top):
     """Rays across the wall just inside and just outside the cut, along it and up its height."""
     host = _element(arch, oid)["host"]
-    mid = (bottom + top) / 2
+    mid, c = (bottom + top) / 2, CUT_SHIFT.get(oid, 0.0)
     rays = []
-    for name, along, height in (("in-left", -cut_w / 2 + 0.01, mid), ("in-right", cut_w / 2 - 0.01, mid), ("out-left", -cut_w / 2 - 0.01, mid),
-                                ("out-right", cut_w / 2 + 0.01, mid), ("in-low", 0.0, bottom + 0.01), ("in-high", 0.0, top - 0.01),
-                                ("out-high", 0.0, top + 0.01)):
+    for name, along, height in (("in-left", c - cut_w / 2 + 0.01, mid), ("in-right", c + cut_w / 2 - 0.01, mid), ("out-left", c - cut_w / 2 - 0.01, mid),
+                                ("out-right", c + cut_w / 2 + 0.01, mid), ("in-low", c, bottom + 0.01), ("in-high", c, top - 0.01),
+                                ("out-high", c, top + 0.01)):
         rays.append(_ray(arch, oid, f"{oid}-{name}", along, height, target=host))
     if bottom > 0.05:
-        rays.append(_ray(arch, oid, f"{oid}-out-low", 0.0, bottom - 0.01, target=host))
+        rays.append(_ray(arch, oid, f"{oid}-out-low", c, bottom - 0.01, target=host))
     return rays
 
 
 CUTS = {  # id: (cut width, bottom, top) in metres above the floor
     "Door_L1": (0.9, 0.0, 2.05), "Door_L2": (0.9, 0.0, 2.05), "Door_L3": (1.5, 0.0, 2.05), "Door_L4": (0.9, 0.0, 2.05),
-    "Window_L1": (0.9, 0.95, 2.05),
+    "Window_L1": (0.9, 0.95, 2.05), "Door_L5": (0.9, 0.0, 2.05),
 }
+CUT_SHIFT = {"Door_L5": 0.04}  # centre of the cut relative to `center_s`
 
 
 @pytest.fixture(scope="module")
@@ -539,13 +542,27 @@ def test_frame_surrounds_the_leaf_with_a_jamb_each_side(leafed):
 def test_architraves_run_from_the_cut_to_the_outer_extent(leafed):
     _, arch, facts = leafed
     floor = _value(arch, "floor.level")
-    for oid, outer_w, outer_top in (("Door_L1", 1.04, 2.12), ("Door_L2", 1.04, 2.12), ("Door_L3", 1.7, 2.15), ("Window_L1", 1.0, 2.1)):
+    for oid, outer_w, outer_top in (("Door_L5", 1.04, 2.12), ("Door_L1", 1.04, 2.12), ("Door_L2", 1.04, 2.12), ("Door_L3", 1.7, 2.15), ("Window_L1", 1.0, 2.1)):
         obj = facts["objects"][f"{oid}_Architrave"]
         lo, hi = np.array(obj["bbox"])
         n_b = _plan_dir(_on_face(arch, _element(arch, oid))[2])
         assert (hi - lo)[:2] @ np.abs(np.array([-n_b[1], n_b[0]])) == pytest.approx(outer_w, abs=0.012), oid
         assert hi[2] - floor == pytest.approx(outer_top, abs=0.004), oid
         assert obj["collections"] == ["Moulures"] and obj["flags"] is None, oid
+
+
+@needs_blender
+def test_an_off_centre_leaf_gets_unequal_casings_on_the_same_outer_extent(leafed):
+    _, arch, facts = leafed
+    _, p, n = _on_face(arch, _element(arch, "Door_L5"))
+    along = np.array([-_plan_dir(n)[1], _plan_dir(n)[0]])
+    outer = facts["objects"]["Door_L5_Architrave"]
+    lo, hi = np.array(outer["bbox"])
+    assert (hi - lo)[:2] @ np.abs(along) == pytest.approx(1.04, abs=0.012), "outer edges stay on the outer extent"
+    centre_outer = (lo + hi)[:2] / 2 @ along
+    centre_leaf = (np.array(facts["rigs"]["closed-Door_L5"]["Door_L5_Leaf_1"]["world_centre"]))[:2] @ along
+    assert centre_leaf - centre_outer == pytest.approx(0.04, abs=0.004), "the leaf is 4 cm off the middle"
+    assert outer["flags"] is None
 
 
 @needs_blender
@@ -558,12 +575,14 @@ def test_derived_leaf_is_flagged_and_a_measured_one_is_not(leafed):
 
 @needs_blender
 def test_an_implausible_casing_is_clamped_and_sent_to_verification(leafed):
-    _, _, facts = leafed
+    _, arch, facts = leafed
     root, band = facts["objects"]["Door_L4"], facts["objects"]["Door_L4_Architrave"]
     assert "to_verify" in root["flags"] and "to_verify" in band["flags"]
     assert band["collections"] == ["\u00c0 v\u00e9rifier"]
     lo, hi = np.array(band["bbox"])
-    assert (hi - lo)[2] > 0 and hi[2] - lo[2] == pytest.approx(2.05 + 0.2, abs=0.01), "casing of 20 cm, not the 30 cm left over"
+    n_b = _plan_dir(_on_face(arch, _element(arch, "Door_L4"))[2])
+    assert (hi - lo)[:2] @ np.abs(np.array([-n_b[1], n_b[0]])) == pytest.approx(0.9 + 2 * 0.2, abs=0.012), "20 cm a side, not the 30 cm left over"
+    assert hi[2] - lo[2] == pytest.approx(2.12, abs=0.004), "the head keeps its own 7 cm"
 
 
 def _plan_dir(vec):
@@ -1107,6 +1126,24 @@ def _skirting_samples(arch):
     return out
 
 
+def _casing_rays(arch, oid, host_id, on_casing, beside):
+    """Per face of a partition, a ray straight onto its architrave (`on_casing`, m along the host) and one onto the bare wall beside it."""
+    host = _element(arch, host_id)
+    az = _value(arch, host["params"]["azimuth"])
+    n = np.array([math.cos(az), math.sin(az)])
+    start, end = np.array(host["start"]), np.array(host["end"])
+    u = (end - start) / np.linalg.norm(end - start)
+    rays = []
+    for side, face in ((1, "A"), (-1, "B")):
+        for label, s, target in (("casing", on_casing, f"{oid}_Architrave_{face}"), ("wall", beside, host_id)):
+            p = start + u * s
+            p = p + n * (_value(arch, host["params"]["offset"]) - n @ p) - (n * _value(arch, host["params"]["thickness"]) if side < 0 else 0)
+            origin = p + side * n * 0.6
+            rays.append({"name": f"{oid}-{face}-{label}", "object": target, "origin": _blender_point(origin[0], _value(arch, "floor.level") + 1.0, origin[1]),
+                         "direction": _blender_point(-side * n[0], 0.0, -side * n[1])})
+    return rays
+
+
 @pytest.fixture(scope="module")
 def skirted(tmp_path_factory):
     ctx, _ = make_case(tmp_path_factory.mktemp("skirted"), "skirted", window=True, partition=True)
@@ -1128,6 +1165,7 @@ def skirted(tmp_path_factory):
     partition = _element(arch, "Partition_P1")
     rays.append(_ray(arch, "Opening_3", "opening-through", 0.0, 1.0, target="Partition_P1"))
     rays.append(_ray(arch, "Opening_3", "opening-through-near-end", -0.3, 1.0, target="Partition_P1"))
+    rays += _casing_rays(arch, "Opening_3", "Partition_P1", 0.525, 0.485)
     return ctx, arch, _probe(ctx, arch_path, rays), samples, partition
 
 
@@ -1142,6 +1180,18 @@ def test_skirting_stops_only_at_floor_cuts_on_its_own_face(skirted):
                 continue
             inside = any(lo < s < hi for lo, hi in gaps)
             assert facts["rays"][ray["name"]]["hit"] == (not inside), f"{host} side {side} at s={s:.2f}: {'gap missing' if inside else 'skirting missing'}"
+
+
+@needs_blender
+@pytest.mark.parametrize("face", ["A", "B"])
+def test_casings_sit_on_the_built_faces_of_a_snapped_partition(skirted, face):
+    _, arch, facts, _, _ = skirted
+    spec = {r["name"]: r for r in _casing_rays(arch, "Opening_3", "Partition_P1", 0.525, 0.485)}
+    casing, wall = (facts["rays"][f"Opening_3-{face}-{k}"] for k in ("casing", "wall"))
+    assert casing["hit"] and wall["hit"]
+    direction = np.array(spec[f"Opening_3-{face}-casing"]["direction"])
+    standing_out = (np.array(wall["location"]) - np.array(casing["location"])) @ direction
+    assert standing_out == pytest.approx(0.015 - 0.001, abs=0.0007), "the casing's back is flush (1 mm bite) with the built face: it stands out by its projection only"
 
 
 @needs_blender

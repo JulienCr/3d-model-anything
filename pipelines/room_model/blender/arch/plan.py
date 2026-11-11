@@ -314,6 +314,21 @@ def partition_footprints(arch: dict, walls: dict[str, list]) -> dict[str, list]:
     return {pid: plan["face"] for pid, plan in partition_plans(arch, walls).items()}
 
 
+def built_bodies(arch: dict) -> dict[str, list]:
+    """{wall or partition id: quad [face start, face end, back end, back start]} as built (mitred walls, trimmed partitions)."""
+    walls = wall_footprints(arch)
+    return {**walls, **partition_footprints(arch, walls)}
+
+
+def host_geometry(arch: dict, host: dict, bodies: dict) -> dict:
+    """`frame.wall_geometry` of a wall or partition, its faces moved onto the built ones when it is a partition.
+
+    A wall is built on its nominal lines (a mitre point lies on them), a partition may be snapped off them.
+    """
+    geom = frame.wall_geometry(arch, host)
+    return frame.fit_faces(geom, bodies[host["id"]]) if host["kind"] == "partition" else geom
+
+
 def overlap(a: list, b: list, tol: float = TOUCH_TOL) -> bool:
     """Whether two convex polygons overlap by more than `tol` m (separating-axis test)."""
     for poly in (a, b):

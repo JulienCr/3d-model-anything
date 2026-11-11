@@ -40,9 +40,28 @@ def side(host: dict, face: str | None) -> int:
     return -1 if host["kind"] == "partition" and face == "B" else 1
 
 
+def fit_faces(geom: dict, quad: list) -> dict:
+    """`geom` with its face lines moved onto the built faces of `quad` [face start, face end, back end, back start].
+
+    A snapped partition is built off its nominal lines (`offset`, `thickness`); everything that sits on its faces
+    (cuts, casings, boards, rigs) must follow the built ones.
+    """
+    p0, u, n = geom["point"](0.0), geom["u"], geom["n"]
+    face = n[0] * p0[0] + n[1] * p0[1]
+    lines = []
+    for (i, j), nominal in (((0, 1), face), ((3, 2), face - geom["thickness"])):
+        lines.append([(u[0] * (quad[k][0] - p0[0]) + u[1] * (quad[k][1] - p0[1]), n[0] * quad[k][0] + n[1] * quad[k][1] - nominal)
+                      for k in (i, j)])
+    return {**geom, "faces": tuple(lines)}
+
+
 def face_point(geom: dict, s: float, side_: int) -> tuple[float, float]:
-    """Plan point `s` m along the host on the face line of `side_` (+1: the front face, -1: the back one)."""
+    """Plan point `s` m along the host on the face line of `side_` (+1: the front face, -1: the back one), as built."""
     x, z = geom["point"](s)
+    shift = 0.0
     if side_ < 0:
-        x, z = x - geom["n"][0] * geom["thickness"], z - geom["n"][1] * geom["thickness"]
-    return x, z
+        shift = -geom["thickness"]
+    if "faces" in geom:
+        (s0, d0), (s1, d1) = geom["faces"][0 if side_ > 0 else 1]
+        shift += d0 if abs(s1 - s0) < 1e-9 else d0 + (d1 - d0) * (s - s0) / (s1 - s0)
+    return x + geom["n"][0] * shift, z + geom["n"][1] * shift
