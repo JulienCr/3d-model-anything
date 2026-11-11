@@ -42,6 +42,7 @@ CLOSED_SHARE = 0.5  # share of the doorway where the mesh lies within the wall s
 MAX_VIEWS = 6  # SAM and the profiles cost per view; 6 leave baseline after `ortho.triangulate` drops an outlier
 CANDIDATES = 4  # candidate lines kept per side for a later pick
 CANDIDATE_STEP = 0.005  # m between depth hypotheses: half a step of depth error shifts a line < 5 mm at 60 degrees
+MASK_SEARCH = 0.05  # m around the mask edge also searched: a mask off by a casing still has the true edge nearby
 SAME_LINE = 0.005  # m; two candidate lines closer than this are one line (2.5 ortho pixels)
 STRENGTH_TIE = 0.05  # gradient strengths within 5 % are the same line seen at depths the views cannot separate
 
@@ -135,8 +136,9 @@ def _axis(side: str) -> str:
     return "s" if side in ("left", "right") else "y"
 
 
-def candidates(orthos: list[ortho.Ortho], cams: list[np.ndarray], rect, bounds) -> dict[str, list[dict]]:
-    """Per side, the strongest lines within MARGIN of the scan edge, each with the depth where the views agree.
+def candidates(orthos: list[ortho.Ortho], cams: list[np.ndarray], rect, bounds, around: dict | None = None) -> dict[str, list[dict]]:
+    """Per side, the strongest lines within MARGIN of the scan edge or MASK_SEARCH of the mask edge (`around`, side
+    to position), each with the depth where the views agree.
 
     Each view's gradient profile is read once at delta 0, then sheared to every depth hypothesis in `bounds` (a line
     at depth d shows at x + (cam - x) * -d / (cam_delta - d)) and fused by median: a recessed sash or leaf edge
@@ -152,14 +154,20 @@ def candidates(orthos: list[ortho.Ortho], cams: list[np.ndarray], rect, bounds) 
             scale = np.nanpercentile(p, 95) if np.isfinite(p).any() else np.nan
             if scale > 0:
                 profs.append((p / scale, cam[0] if axis == "s" else cam[1], cam[2]))
-        found = []
+        found, fused = [], []
         for d in depths if profs else ():
             order = np.argsort(x)  # y profiles run top-down
             sheared = [np.interp(x + (c - x) * -d / (cd - d), x[order], p[order], left=np.nan, right=np.nan) for p, c, cd in profs]
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", "All-NaN slice", RuntimeWarning)
-                fused = np.nanmedian(np.array(sheared), axis=0)
-            found += [(pos, float(d), strength) for pos, strength in ortho.peaks(x, fused, edge[side] - MARGIN, edge[side] + MARGIN, CANDIDATES)]
+                fused.append(np.nanmedian(np.array(sheared), axis=0))
+        windows = [(edge[side], MARGIN)] + ([((around or {})[side], MASK_SEARCH)] if side in (around or {}) else [])
+        for k, row in enumerate(fused):
+            for pos, strength in (pk for c, w in windows for pk in ortho.peaks(x, row, c - w, c + w, CANDIDATES)):
+                i = int(np.argmin(np.abs(x - pos)))
+                near = [fused[j][max(i - 2, 0):i + 3] for j in (k - 1, k + 1) if 0 <= j < len(fused)]
+                if all(not np.isfinite(n).any() or strength >= np.nanmax(n) for n in near):  # a maximum over depth too
+                    found.append((pos, float(depths[k]), strength))
         out[side] = [{"pos": round(p, 4), "delta": round(d, 4), "strength": round(st, 3)}
                      for p, d, st in sorted(_distinct_lines(found, [(c, cd) for _, c, cd in profs]))]
     return out
@@ -213,14 +221,14 @@ def measure(kind: str, frame: FaceFrame, rect, views: list[tuple[PosedPhoto, np.
             axis = _axis(side)
             snapped = ortho.snap(o, axis, bands[axis], pos, SNAP)
             obs[side].append((pos if snapped is None else snapped, cam[0] if axis == "s" else cam[1], cam[2]))
-    out = {"kind": kind, "views": used, "photos": [p.name for p, _ in views], "floor_based": floor_based,
-           "candidates": candidates(orthos, cams, rect, bounds)}
     fix = {side: ortho.triangulate(obs[side], bounds) for side in ("left", "right")}
     # A leaf, a sash or a niche head is one plane parallel to the face: its horizontal edges take the depths its
     # vertical edges allow, as photos taken at one height give no baseline across a horizontal edge.
     plane = [f.depths for f in fix.values() if f] or [bounds]
     fix.update({side: ortho.triangulate(obs[side], (min(d[0] for d in plane), max(d[1] for d in plane))) for side in ("bottom", "top")})
-    edges = {side: edge_entry(f) for side, f in fix.items() if f}
+    edges = {side: edge_entry(f, float(np.mean([o[2] for o in obs[side]])) - f.delta) for side, f in fix.items() if f}
+    out = {"kind": kind, "views": used, "photos": [p.name for p, _ in views], "floor_based": floor_based,
+           "candidates": candidates(orthos, cams, rect, bounds, {side: e["pos"] for side, e in edges.items()})}
     found = measures_from(edges, floor_based, floor_sigma)
     if found is None:
         return {**out, "status": "candidates"}
@@ -234,9 +242,10 @@ def is_floor_based(kind: str, rect) -> bool:
     return kind in FLOOR_KINDS or (kind == "niche" and rect[2] < SKIRTING_TOP)
 
 
-def edge_entry(fix: ortho.EdgeFix) -> dict:
+def edge_entry(fix: ortho.EdgeFix, distance: float) -> dict:
+    """An edge as stored; `distance` = mean camera distance to it along the face normal, metres."""
     return {"pos": fix.pos, "delta": fix.delta, "sigma": fix.sigma, "views": fix.views, "depths": list(fix.depths),
-            "rms": fix.rms}
+            "rms": fix.rms, "distance": distance}
 
 
 def measures_from(edges: dict, floor_based: bool, floor_sigma: float) -> tuple[dict, dict] | None:
@@ -344,6 +353,18 @@ def _read(path: Path) -> dict | None:
         return None
 
 
+def _pose_angle(ctx: StageContext, photos) -> float:
+    """Angular error of a pose, radians: the registration's reprojection error over the median focal length; 0 without
+    a registration (the view spread is then bounded by LOCALISATION alone)."""
+    path = output_path(ctx, "registration")
+    try:
+        summary = json.loads(path.read_text(encoding="utf-8"))["summary"]
+        px = summary.get("reprojection_px_refined") or summary["reprojection_px_arkit"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0.0
+    return float(px) / float(np.median([p.K[0, 0] for p in photos]))
+
+
 def capture_arch(ctx: StageContext) -> dict:
     """The architecture before any photo anchoring: model, openings, LLM answers (declared niches) and overrides."""
     from room_model import architecture, llm_merge
@@ -383,7 +404,7 @@ def build(ctx: StageContext, segment) -> dict:
         else:
             elements[el["id"]] = measure(el["kind"], frame, rect, [(p, _image(p.path)) for p in views], segment,
                                          (-thickness, LOOSE_TOLERANCE), floor_sigma)
-    diagnostics = {"seconds": round(time.monotonic() - t0, 1)}
+    diagnostics = {"seconds": round(time.monotonic() - t0, 1), "pose_angle": _pose_angle(ctx, photos)}
     if hasattr(segment, "diagnostics"):
         diagnostics.update(segment.diagnostics())
     return {"schema": SCHEMA, "elements": elements, "diagnostics": diagnostics}
@@ -404,7 +425,7 @@ def run(ctx: StageContext, segment=None) -> Path:
 LEAF_KINDS = ("door", "window")  # the photo measures the leaf or sash, another quantity than the hole: own parameters
 PAIRS = {("left", "right"): ("center_s", "width"), ("bottom", "top"): ("sill", "height")}  # decided together
 MIN_EDGE_VIEWS = 2  # an edge seen in one view has no depth, only the whole depth bounds
-MAX_RMS = 2 * ortho.LOCALISATION  # m; views agreeing within two peak localisations: a 95 % bound for that noise
+RMS_VIEWS = 2  # the view spread allowed is two single-view errors (two views each within it)
 # m; RoomPlan's own stated accuracy: a photo measure looser than the coarsest scan source is a depth ambiguity
 # (two views without baseline), not a measurement.
 PLAUSIBLE_SIGMA = 0.03
@@ -412,10 +433,17 @@ DISAGREE = 3.0  # combined sigmas beyond which photo and scan disagree: flagged 
 MEASURED = ("roomplan", "lidar")  # sources that measured the hole; `assumed` and `llm` (clicks) did not
 
 
-def _edge_ok(edge: dict | None) -> bool:
+def max_rms(distance: float, pose_angle: float) -> float:
+    """View spread allowed on an edge `distance` m away: RMS_VIEWS single-view errors, each the pose's angular error
+    (registration reprojection / focal, radians) times the distance, never below a peak's LOCALISATION."""
+    return RMS_VIEWS * max(ortho.LOCALISATION, pose_angle * distance)
+
+
+def _edge_ok(edge: dict | None, pose_angle: float) -> bool:
     if edge is None:
         return False
-    return edge.get("rule") == "floor" or (edge["views"] >= MIN_EDGE_VIEWS and edge.get("rms", np.inf) <= MAX_RMS
+    return edge.get("rule") == "floor" or (edge["views"] >= MIN_EDGE_VIEWS
+                                           and edge.get("rms", np.inf) <= max_rms(edge.get("distance", 0.0), pose_angle)
                                            and edge["sigma"] <= PLAUSIBLE_SIGMA)
 
 
@@ -456,15 +484,24 @@ def _replace(arch: dict, el: dict, names, item: dict) -> bool:
     return wrong
 
 
+def pose_angle_of(doc: dict) -> float:
+    return float((doc.get("diagnostics") or {}).get("pose_angle", 0.0))
+
+
+def fully_applied(item: dict, pose_angle: float) -> bool:
+    """Every edge pair of an anchored element passes its gates: the photo then measures the whole element."""
+    return item.get("status") == "anchored" and all(_edge_ok(item["edges"].get(side), pose_angle) for sides in PAIRS for side in sides)
+
+
 def apply(arch: dict, doc: dict) -> dict:
     """Anchored elements take their photo measures, side pair by side pair (PAIRS), when every edge of the pair passes
-    `_edge_ok` (MIN_EDGE_VIEWS, MAX_RMS, PLAUSIBLE_SIGMA; a floor-ruled bottom always does).
+    `_edge_ok` (MIN_EDGE_VIEWS, `max_rms`, PLAUSIBLE_SIGMA; a floor-ruled bottom always does).
 
     Doors and windows get leaf_* parameters and `leaf_edges` depths, the hole's width and height stay; niches and
     openings get their own parameters replaced (below tape) and `edges` depths. A disagreement beyond DISAGREE
     sigmas with a measured source, or a leaf larger than its hole, flags the element `to_verify`.
     """
-    elements = {e["id"]: e for e in arch["elements"]}
+    elements, pose_angle = {e["id"]: e for e in arch["elements"]}, pose_angle_of(doc)
     report = {"anchored": [], "candidates": [], "open": [], "no_view": [], "no_host": [], "unknown": [], "kept": [],
               "to_verify": []}
     for ident, item in sorted(doc.get("elements", {}).items()):
@@ -477,7 +514,7 @@ def apply(arch: dict, doc: dict) -> dict:
             continue
         leaf, applied, wrong = el["kind"] in LEAF_KINDS, set(), False
         for sides, names in PAIRS.items():
-            if not all(_edge_ok(item["edges"].get(side)) for side in sides):
+            if not all(_edge_ok(item["edges"].get(side), pose_angle) for side in sides):
                 report["kept"] += [f"{ident}.{name}" for name in names if name in el["params"]]
                 continue
             wrong |= (_set_leaf if leaf else _replace)(arch, el, names, item)

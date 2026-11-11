@@ -24,7 +24,7 @@ from room_model.photo_geom import LOOSE_TOLERANCE, load_posed_photos
 
 SCHEMA = "room-model/edge-pick-1"
 PICK_STATUSES = ("anchored", "candidates")
-MAX_LETTERS = 5  # per edge: more lines crowd a strip and a model tells them apart less reliably
+MAX_LETTERS = 5  # per edge: more lines crowd a strip and a model tells them apart less reliably (4 edges <= 26 letters)
 PICK_RESOLUTION = 0.01  # m; lines closer than this are one choice: below what a pick on a zoomed photo can separate
 SAME_LINE = anchor.SAME_LINE
 UNSEEN_SIGMA = 0.10  # m; a line no view could snap to keeps its position unconfirmed, far above the apply gates
@@ -32,7 +32,9 @@ SHEET_SIDE = vision.SHEET_SIDE
 PANEL_ACROSS, PANEL_ALONG = 560, 420  # px of one view's panel across and along the edge
 PAD = 0.03  # m shown beyond the outermost lines: the context a model needs to tell a leaf from its frame
 LABEL_BAND = 70  # px outside the photo where the letters sit, joined to their line by a leader
+LETTER_PX = 28  # px; letters a model reads without zooming (>= 24 px on the final image)
 VIEWS_PER_IMAGE = 2
+COVERED = 0.98  # share of the strip a view must show to be the main, most frontal one
 COLOURS = {"left": (230, 40, 40), "right": (30, 120, 255), "bottom": (240, 190, 0), "top": (20, 190, 70)}
 QUESTIONS = {
     "door": {"left": "the outer edge of the left leaf (vantail): the moving panel itself, not the frame (huisserie) nor the casing (chambranle)",
@@ -60,23 +62,23 @@ def _footprint(pos: float, delta: float, cams) -> np.ndarray:
 
 
 def _distinct(lines: list[dict], cams) -> list[dict]:
-    """One entry per line (footprints within SAME_LINE in every view, then positions within PICK_RESOLUTION; origins
-    merged), at most MAX_LETTERS, mask and scan lines kept first."""
+    """One entry per physical line, origins merged: two lines are one when their footprints agree within SAME_LINE in
+    every view, or when they lie within PICK_RESOLUTION with overlapping depth ranges (one line found at several
+    depth hypotheses). At most MAX_LETTERS, mask and scan lines kept first."""
+    def same(a, b):
+        if np.abs(a["at"] - b["at"]).max() <= SAME_LINE:
+            return True
+        (a0, a1), (b0, b1) = a["depths"], b["depths"]
+        return abs(a["pos"] - b["pos"]) < PICK_RESOLUTION and a0 <= b1 + SAME_LINE and b0 <= a1 + SAME_LINE
+
     out = []
     for line in lines:
-        at = _footprint(line["pos"], line["delta"], cams)
-        same = next((o for o in out if np.abs(o["at"] - at).max() <= SAME_LINE), None)
-        if same is None:
-            out.append({**line, "at": at})
+        line = {**line, "at": _footprint(line["pos"], line["delta"], cams)}
+        twin = next((o for o in out if same(o, line)), None)
+        if twin is None:
+            out.append(line)
         else:
-            same["origin"] += [o for o in line["origin"] if o not in same["origin"]]
-    merged = []
-    for line in sorted(out, key=lambda ln: ln["pos"]):
-        if merged and line["pos"] - merged[-1]["pos"] < PICK_RESOLUTION:
-            merged[-1]["origin"] += [o for o in line["origin"] if o not in merged[-1]["origin"]]
-        else:
-            merged.append(line)
-    out = merged
+            twin["origin"] += [o for o in line["origin"] if o not in twin["origin"]]
     keep = [ln for ln in out if {"mask", "model"} & set(ln["origin"])]
     keep += [ln for ln in out if ln not in keep][:MAX_LETTERS - len(keep)]
     return sorted(keep, key=lambda ln: ln["pos"])
@@ -91,6 +93,10 @@ def _lines(side: str, item: dict, rect, cams) -> list[dict]:
     return [{"pos": pos, "delta": delta, "origin": [origin]} for pos, delta, origin in raw]
 
 
+def _distance(obs, fix: ortho.EdgeFix) -> float:
+    return float(np.mean([o[2] for o in obs])) - fix.delta
+
+
 def _confirm(line: dict, side: str, faces, cams, bands, bounds) -> dict:
     """The line triangulated from its snapped position in each view; UNSEEN_SIGMA when no view shows it."""
     axis = anchor._axis(side)
@@ -102,8 +108,8 @@ def _confirm(line: dict, side: str, faces, cams, bands, bounds) -> dict:
     fix = ortho.triangulate(obs, bounds)
     if fix is None:
         return {"pos": line["pos"], "delta": line["delta"], "sigma": UNSEEN_SIGMA, "views": 0, "rms": 0.0,
-                "depths": [line["delta"], line["delta"]], "obs": []}
-    return {**anchor.edge_entry(fix), "obs": [list(o) for o in obs]}
+                "depths": [line["delta"], line["delta"]], "distance": 0.0, "obs": []}
+    return {**anchor.edge_entry(fix, _distance(obs, fix)), "obs": [list(o) for o in obs]}
 
 
 def _element(arch: dict, el: dict, item: dict, photos: list) -> dict | None:
@@ -139,49 +145,72 @@ def _element(arch: dict, el: dict, item: dict, photos: list) -> dict | None:
 
 # --- sheets --------------------------------------------------------------------------------------------------------
 
-def _panel(photo, image, frame, side: str, entries: list[dict], model: float, rect, reference: float):
-    """(panel image, valid share): the edge zoomed so that its candidate band fills PANEL_ACROSS px, lines drawn,
-    the scan edge dashed, letters in a LABEL_BAND outside the photo with leader lines."""
-    vertical = anchor._axis(side) == "s"
-    shown = [c["shown"] for c in entries]
-    lo, hi = min(shown + [model]) - PAD, max(shown + [model]) + PAD
+def drawn_at(c: dict, cam: np.ndarray, axis: str, reference: float) -> float:
+    """Where the line (pos, delta) shows on a photo rectified at depth `reference`, for a camera at `cam` (s, y, delta)."""
+    a = cam[0] if axis == "s" else cam[1]
+    return c["pos"] + (a - c["pos"]) * (reference - c["delta"]) / (cam[2] - c["delta"])
+
+
+def _strip_box(views, frame, side: str, entries: list[dict], model: float, rect, reference: float):
+    """(box, res) of the strip: from the first to the last line drawn in any view, plus PAD, PANEL_ACROSS px across."""
+    axis = anchor._axis(side)
+    lines = entries + [{"pos": model, "delta": 0.0}]
+    drawn = [drawn_at(c, ortho.camera_coords(frame, p), axis, reference) for p, _ in views for c in lines]
+    lo, hi = min(drawn) - PAD, max(drawn) + PAD
     res = (hi - lo) / PANEL_ACROSS
-    along = (anchor._bands(rect)["s" if vertical else "y"])
+    along = anchor._bands(rect)["s" if axis == "s" else "y"]
     mid, half = (along[0] + along[1]) / 2, PANEL_ALONG * res / 2
-    box = (lo, hi, mid - half, mid + half) if vertical else (mid - half, mid + half, lo, hi)
+    return ((lo, hi, mid - half, mid + half) if axis == "s" else (mid - half, mid + half, lo, hi)), res
+
+
+def panel(photo, image, frame, side: str, entries: list[dict], model: float, box, res: float, reference: float):
+    """(panel image, ortho, {letter: drawn position}): the strip rendered from the photo at `res` (no upscaling),
+    each line drawn at its own footprint in this view, the scan edge dashed, letters in a band outside the photo."""
+    vertical = anchor._axis(side) == "s"
     o = ortho.ortho(photo, image, frame, box, reference, res)
+    cam = ortho.camera_coords(frame, photo)
     rgb = Image.fromarray(o.rgb)
     w, h = rgb.size
-    panel = Image.new("RGB", (w, h + LABEL_BAND) if vertical else (w + LABEL_BAND, h), (25, 25, 30))
-    panel.paste(rgb, (0, LABEL_BAND) if vertical else (LABEL_BAND, 0))
-    draw, font = ImageDraw.Draw(panel), vision._font(26)
-    at = lambda v: float(o.col(v)) + 0.5 if vertical else float(o.row(v)) + 0.5  # noqa: E731
-    m = at(model)
+    canvas = Image.new("RGB", (w, h + LABEL_BAND) if vertical else (w + LABEL_BAND, h), (25, 25, 30))
+    canvas.paste(rgb, (0, LABEL_BAND) if vertical else (LABEL_BAND, 0))
+    draw, font = ImageDraw.Draw(canvas), vision._font(LETTER_PX)
+    px = lambda v: float(o.col(v)) + 0.5 if vertical else float(o.row(v)) + 0.5  # noqa: E731
+    m = px(drawn_at({"pos": model, "delta": 0.0}, cam, "s" if vertical else "y", reference))
     for k in range(0, int(h if vertical else w), 16):  # the scan edge, dashed, as context
         seg = [(m, LABEL_BAND + k), (m, LABEL_BAND + k + 8)] if vertical else [(LABEL_BAND + k, m), (LABEL_BAND + k + 8, m)]
         draw.line(seg, fill=(255, 255, 255), width=2)
-    order = sorted(entries, key=lambda c: c["shown"])
+    drawn = {c["letter"]: drawn_at(c, cam, "s" if vertical else "y", reference) for c in entries}
+    order = sorted(entries, key=lambda c: drawn[c["letter"]])
     for n, c in enumerate(order):
-        x = at(c["shown"])
+        x = px(drawn[c["letter"]])
         slot = (n + 0.5) * (w if vertical else h) / len(order)  # letters spread evenly, in line order
         if vertical:
             draw.line([(x, LABEL_BAND), (x, LABEL_BAND + h)], fill=COLOURS[side], width=2)
-            draw.line([(slot, 40), (x, LABEL_BAND)], fill=COLOURS[side], width=1)
-            draw.text((slot, 22), c["letter"], font=font, fill=COLOURS[side], anchor="mm")
+            draw.line([(slot, LABEL_BAND - 26), (x, LABEL_BAND)], fill=COLOURS[side], width=1)
+            draw.text((slot, LABEL_BAND / 2 - 8), c["letter"], font=font, fill=COLOURS[side], anchor="mm")
         else:
             draw.line([(LABEL_BAND, x), (LABEL_BAND + w, x)], fill=COLOURS[side], width=2)
-            draw.line([(46, slot), (LABEL_BAND, x)], fill=COLOURS[side], width=1)
-            draw.text((24, slot), c["letter"], font=font, fill=COLOURS[side], anchor="mm")
-    return panel, float(o.valid.mean())
+            draw.line([(LABEL_BAND - 26, slot), (LABEL_BAND, x)], fill=COLOURS[side], width=1)
+            draw.text((LABEL_BAND / 2 - 8, slot), c["letter"], font=font, fill=COLOURS[side], anchor="mm")
+    return canvas, o, drawn
 
 
 def _edge_image(path: Path, ident: str, side: str, entry: dict) -> None:
-    """One image per edge: the VIEWS_PER_IMAGE views that show most of the edge, side by side."""
+    """One image per edge: the most frontal view covering the whole strip, then the view covering most of it."""
     views, frame, rect, reference = entry["_draw"]
     model = dict(zip(SIDES, rect))[side]
-    panels = [_panel(p, image, frame, side, entry["sides"][side], model, rect, reference) for p, image in views]
-    best = [pn for pn, share in sorted(panels, key=lambda t: -t[1])[:VIEWS_PER_IMAGE] if share > 0]
-    best = best or [panels[0][0]]
+    entries = entry["sides"][side]
+    box, res = _strip_box(views, frame, side, entries, model, rect, reference)
+    panels = []
+    for p, image in views:
+        canvas, o, _ = panel(p, image, frame, side, entries, model, box, res, reference)
+        cam = ortho.camera_coords(frame, p)
+        offset = np.array([cam[0] - np.mean(box[:2]), cam[1] - np.mean(box[2:]), cam[2]])
+        panels.append((canvas, float(o.valid.mean()), float(cam[2] / np.linalg.norm(offset))))  # cosine: how frontal
+    covering = [t for t in panels if t[1] >= COVERED] or panels
+    first = max(covering, key=lambda t: (t[2], t[1]))
+    rest = sorted((t for t in panels if t is not first and t[1] > 0), key=lambda t: -t[1])
+    best = [first[0]] + [t[0] for t in rest[:VIEWS_PER_IMAGE - 1]]
     width = sum(pn.width for pn in best) + vision.GAP * (len(best) + 1)
     sheet = Image.new("RGB", (width, vision.HEADER + max(pn.height for pn in best)), (40, 40, 48))
     ImageDraw.Draw(sheet).text((10, 8), f"{ident}: {side} edge", font=vision._font(26), fill=(255, 255, 255))
@@ -189,7 +218,7 @@ def _edge_image(path: Path, ident: str, side: str, entry: dict) -> None:
     for pn in best:
         sheet.paste(pn, (x, vision.HEADER))
         x += pn.width + vision.GAP
-    if max(sheet.size) > SHEET_SIDE:
+    if max(sheet.size) > SHEET_SIDE:  # never reached at PANEL_ACROSS x VIEWS_PER_IMAGE: letters stay LETTER_PX
         f = SHEET_SIDE / max(sheet.size)
         sheet = sheet.resize((int(sheet.width * f), int(sheet.height * f)), Image.BILINEAR)
     sheet.save(path, quality=vision.JPEG_QUALITY)
@@ -201,8 +230,13 @@ def _prompt(candidates: dict) -> str:
              "straightened onto the wall (vertical lines are vertical) and zoomed on the edge; two panels are the same "
              "edge seen from two photos. Coloured lines are candidate positions, each joined by a thin leader to its "
              "letter outside the photo. The dashed white line is where the scan put the edge: context only, not a choice.",
-             "", "For every image below, answer the letter of the line lying exactly on the edge described, or null "
-             "when no line does. Never guess: null is a good answer.", "", "## Images", ""]
+             "", "For every image below, answer the letter of the line closest to the edge described, within about 1 cm "
+             "(a few pixels). Answer null only when the edge is hidden or no line is near it.", "",
+             "What to look for: a door leaf (vantail) is the flat panel that moves, usually with mouldings and the handle; "
+             "around it the frame (huisserie) and the casing (chambranle) are narrow strips, often lighter or in relief, "
+             "standing proud of the wall. A window sash (ouvrant) holds the glass; when a curtain hides its outer edge, the "
+             "visible outline of the glazing bead next to it is acceptable. A jamb (tableau) is the side face of the hole "
+             "in the wall, usually plain plaster.", "", "## Images", ""]
     for ident, entry in candidates.items():
         for side, entries in entry["sides"].items():
             letters = ", ".join(f"`{c['letter']}`" for c in entries)
@@ -243,18 +277,20 @@ def validate(answer: object, candidates: dict) -> tuple[dict, list[dict]]:
     clean, rejected = {}, []
     for i, item in enumerate(answer["elements"]):
         ident = item.get("id") if isinstance(item, dict) else None
-        where = ident if isinstance(ident, str) else f"elements[{i}]"
-        entry, picks = candidates.get(ident), item.get("picks") if isinstance(item, dict) else None
+        ident = ident if isinstance(ident, str) else None
+        where = ident or f"elements[{i}]"
+        entry, picks = candidates.get(ident) if ident else None, item.get("picks") if isinstance(item, dict) else None
         if entry is None or not isinstance(picks, dict):
             rejected.append({"where": where, "reason": "unknown element or no `picks` object"})
             continue
         letters = {side: {c["letter"] for c in entries} for side, entries in entry["sides"].items()}
-        bad = [f"{side}={value!r}" for side, value in picks.items()
-               if side not in letters or not (value is None or value in letters[side])]
+        given = {side: value for side, value in picks.items() if not (value is None and side not in letters)}  # null on an unasked edge: nothing said
+        bad = [f"{side}={value!r}" for side, value in given.items()
+               if not isinstance(side, str) or side not in letters or not (value is None or (isinstance(value, str) and value in letters[side]))]
         if bad or ident in clean:
             rejected.append({"where": where, "reason": f"invalid picks: {', '.join(bad) or 'element given twice'}"})
             continue
-        clean[ident] = dict(picks)
+        clean[ident] = given
     return clean, rejected
 
 
@@ -320,7 +356,7 @@ def _on_plane(edges: dict, picked: dict) -> None:
         obs = picked.get(side, {}).get("obs")
         fix = ortho.triangulate([tuple(o) for o in obs], plane) if obs else None
         if fix is not None:
-            edges[side] = {**anchor.edge_entry(fix), "obs": obs}
+            edges[side] = {**anchor.edge_entry(fix, _distance(obs, fix)), "obs": obs}
 
 
 def merge(anchors: dict, picks: dict, floor_sigma: float) -> dict:

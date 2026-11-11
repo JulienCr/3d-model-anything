@@ -229,3 +229,23 @@ def test_a_view_off_by_more_than_the_outlier_bound_is_dropped(door_views):
     bad = (obs[1][0] + 0.05, obs[1][1], obs[1][2])  # the same camera reading another line 5 cm away
     fix = ortho.triangulate(obs + [bad], BOUNDS)
     assert fix.views == 3 and abs(fix.pos - LEAF_S[0]) < 0.002
+
+
+def test_candidates_still_hold_the_leaf_edge_when_the_mask_took_the_casing(door_views):
+    def casing_ring(rgb, box, points=None):  # SAM taking the whole framed region, casing included
+        mask = np.zeros(rgb.shape[:2], bool)
+        x0, y0, x1, y1 = (int(round(v)) for v in box)
+        mask[y0:y1, x0:x1] = True
+        return [(mask, 0.9)]
+
+    out = _measure("door", (0.42, 1.38, 0.0, 2.15), door_views, segment=casing_ring)
+    assert out["edges"]["left"]["pos"] < LEAF_S[0] - 0.1  # the mask edge is out on the casing
+    lefts = [c["pos"] for c in out["candidates"]["left"]]
+    assert min(abs(p - LEAF_S[0]) for p in lefts) < 0.005  # within a depth step; the pick re-triangulates it
+
+
+@pytest.mark.parametrize("rms, distance, angle, ok", [(0.003, 3.0, 0.66 / 2800, True), (0.005, 3.0, 0.66 / 2800, False),
+                                                       (0.008, 5.0, 1e-3, True)])
+def test_the_view_spread_gate_scales_with_the_pose_error_and_the_distance(rms, distance, angle, ok):
+    edge = {"pos": 0.5, "delta": 0.0, "sigma": 0.003, "views": 3, "rms": rms, "distance": distance, "depths": [0, 0]}
+    assert anchor._edge_ok(edge, angle) is ok  # floor: two views each within LOCALISATION

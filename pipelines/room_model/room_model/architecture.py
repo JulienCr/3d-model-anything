@@ -54,6 +54,19 @@ def _opening_dimensions(o: dict, params: dict, center) -> list[dict]:
     return out
 
 
+def _leaf_dimensions(arch: dict, el: dict) -> list[dict]:
+    """`<id>-leaf-w` / `-leaf-h` of a door or window whose leaf parameters exist and that no tape value created yet."""
+    from room_model.tape_merge import LEAF_DIMENSION
+
+    have = {d["id"] for d in arch["dimensions"]}
+    out = []
+    for name, (suffix, label) in LEAF_DIMENSION.items():
+        if name in el["params"] and f"{el['id']}-{suffix}" not in have:
+            out.append(_dimension(f"{el['id']}-{suffix}", name, f"{label} {el['id']}", arch["parameters"][el["params"][name]],
+                                  [el["id"]] + ([el["host"]] if el["host"] else []), None, el["flags"]))
+    return out
+
+
 def _wall_length_dimensions(model_doc: dict) -> list[dict]:
     """L-M<k>: corner to corner along the room face of each wall; the corners move with the neighbouring walls."""
     d = _Doc(model_doc)
@@ -84,7 +97,7 @@ def build(model_doc: dict, openings_doc: dict, vision: dict | None = None, tape:
 
     `vision` (the answers document), `anchors` (anchors.json), `tape` ({dimension id: metres}) and `overrides`
     ({element id: fields}) are merged in that order when given: see `llm_merge`, `anchor`, `tape_merge`, `overrides`.
-    `picks` (edge_pick answers) complete the anchors first; an anchored element ignores the LLM corner clicks. `ctx` gives the LLM corners their photos and the niche check its LiDAR samples.
+    `picks` (edge_pick answers) complete the anchors first; an element the photos measure whole ignores the LLM corners. `ctx` gives the LLM corners their photos and the niche check its LiDAR samples.
     """
     from room_model import anchor, edge_pick, llm_merge, overrides as user_overrides, tape_merge
 
@@ -95,7 +108,8 @@ def build(model_doc: dict, openings_doc: dict, vision: dict | None = None, tape:
     if anchors and edge_pick.usable(picks):
         anchors = edge_pick.merge(anchors, picks, arch["parameters"]["floor.level"]["sigma"])
     if llm_merge.usable(vision):
-        anchored = {i for i, item in (anchors or {}).get("elements", {}).items() if item.get("status") == "anchored"}
+        angle = anchor.pose_angle_of(anchors or {})
+        anchored = {i for i, item in (anchors or {}).get("elements", {}).items() if anchor.fully_applied(item, angle)}
         arch["diagnostics"]["vision"] = llm_merge.apply(arch, vision, ctx, frozenset(anchored))
     if anchors:
         arch["diagnostics"]["anchor"] = anchor.apply(arch, anchors)
@@ -111,6 +125,7 @@ def build(model_doc: dict, openings_doc: dict, vision: dict | None = None, tape:
             host = hosts.get(el["host"])
             centre = centres.get(el["id"]) if host is None else _face_point(arch, host, el.get("face"), _value(arch, el["params"]["center_s"]))
             arch["dimensions"] += _opening_dimensions(el, arch["parameters"], centre)
+            arch["dimensions"] += _leaf_dimensions(arch, el)
     for dim in arch["dimensions"]:
         ends = dimension_endpoints(arch, dim["id"])
         dim["endpoints"] = None if ends is None else [[float(c) for c in ends[0]], [float(c) for c in ends[1]]]
@@ -140,16 +155,22 @@ def _opening_endpoints(arch: dict, dim: dict, element: dict):
     az = _value(arch, host["params"]["azimuth"])
     normal = np.array([np.cos(az), np.sin(az)]) * (-1.0 if element["face"] == "B" else 1.0)
     edges = element.get("edges", {})  # depth of each anchored edge along the face normal
+    kind = dim["kind"]
+    if kind.startswith("leaf_"):  # the leaf's own span at its own edges' depths; a door leaf stands on the floor
+        edges = element.get("leaf_edges", {})
+        p = {"center_s": p.get("leaf_center_s", p["center_s"]), "width": p.get("leaf_width", p["width"]),
+             "sill": p.get("leaf_sill", 0.0 if element["kind"] == "door" else p["sill"]), "height": p.get("leaf_height", p["height"])}
+        kind = {"leaf_width": "opening_width", "leaf_height": "opening_height"}[kind]
 
     def at(s: float, side: str) -> np.ndarray:
         return _face_point(arch, host, element["face"], s) + edges.get(side, 0.0) * normal
 
-    if dim["kind"] == "opening_width":
+    if kind == "opening_width":
         y = floor + p["sill"] + p["height"] / 2
         (x0, z0), (x1, z1) = at(p["center_s"] - p["width"] / 2, "left"), at(p["center_s"] + p["width"] / 2, "right")
         return [x0, y, z0], [x1, y, z1]
     low, high = {"opening_height": ((p["sill"], "bottom"), (p["sill"] + p["height"], "top")),
-                 "opening_sill": ((0.0, "bottom"), (p["sill"], "bottom"))}[dim["kind"]]
+                 "opening_sill": ((0.0, "bottom"), (p["sill"], "bottom"))}[kind]
     (xa, za), (xb, zb) = at(p["center_s"], low[1]), at(p["center_s"], high[1])
     return [xa, floor + low[0], za], [xb, floor + high[0], zb]
 
@@ -176,7 +197,7 @@ def dimension_endpoints(arch: dict, dim_id: str) -> tuple[list[float], list[floa
         wall = elements[dim["elements"][0]]
         (x0, z0), (x1, z1) = wall["start"], wall["end"]
         return [x0, floor + STATION_HEIGHT, z0], [x1, floor + STATION_HEIGHT, z1]
-    if kind in ("opening_width", "opening_height", "opening_sill"):
+    if kind in ("opening_width", "opening_height", "opening_sill", "leaf_width", "leaf_height"):
         return _opening_endpoints(arch, dim, elements[dim["elements"][0]])
     return None
 

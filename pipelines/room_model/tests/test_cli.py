@@ -223,3 +223,23 @@ def test_overrides_flag_installs_the_file_and_reruns_the_architecture(build, tmp
     bad = tmp_path / "bad.json"
     bad.write_text("[]", encoding="utf-8")
     assert cli.main(["all", *args, "--overrides", str(bad)]) == 1 and len(capsys.readouterr().err.strip().splitlines()) == 1
+
+
+def test_edge_pick_reruns_after_a_new_anchor_and_architecture_after_new_picks(tmp_path, monkeypatch):
+    calls = []
+    for stage in ("anchor", "edge_pick", "architecture"):
+        def run(ctx, stage=stage):
+            calls.append(stage)
+            out = ctx.out / STAGE_OUTPUTS[stage]
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text('{"elements": {}}')
+            return out
+
+        _fake_stage(monkeypatch, stage, run)
+    for stage in ("anchor", "edge_pick", "architecture"):
+        assert _run(tmp_path, stage) == 0
+    out = tmp_path / "out"
+    os.utime(out / STAGE_OUTPUTS["anchor"], ns=(time.time_ns() + 10**10,) * 2)
+    assert _run(tmp_path, "edge_pick") == 0 and calls.count("edge_pick") == 2
+    os.utime(out / STAGE_OUTPUTS["edge_pick"], ns=(time.time_ns() + 2 * 10**10,) * 2)
+    assert _run(tmp_path, "architecture") == 0 and calls.count("architecture") == 2

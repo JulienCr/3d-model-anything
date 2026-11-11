@@ -971,3 +971,40 @@ def test_the_corner_clicks_of_an_anchored_element_are_ignored(env):
     assert _param(arch, "Door_1", "width") == _param(env.arch, "Door_1", "width")
     assert _vision(arch)["superseded"] == ["Door_1"] and _element(arch, "Door_1")["type"] == "hinged_single"
     assert _param(env.merge(answers), "Door_1", "width")["source"] == "llm"  # without an anchor the clicks still count
+
+
+def test_a_photo_leaf_has_its_dimensions_at_the_leaf_edges(env):
+    arch = env.merge(anchors=_anchors(Door_1=_door(env)))
+    width, height = _dim(arch, "Door_1-leaf-w"), _dim(arch, "Door_1-leaf-h")
+    assert width["source"] == "photo" and width["value"] == pytest.approx(0.80) and height["value"] == pytest.approx(2.01)
+    door = _element(arch, "Door_1")
+    host = _element(arch, door["host"])
+    az = arch["parameters"][host["params"]["azimuth"]]["value"]
+    n = np.array([np.cos(az), np.sin(az)])
+    centre = arch["parameters"][door["params"]["leaf_center_s"]]["value"]
+    (x0, _, z0), (x1, _, z1) = architecture.dimension_endpoints(arch, "Door_1-leaf-w")
+    assert np.allclose((x0, z0), architecture._face_point(arch, host, None, centre - 0.40) - 0.04 * n)
+    assert np.allclose((x1, z1), architecture._face_point(arch, host, None, centre + 0.40) - 0.03 * n)
+    low, high = architecture.dimension_endpoints(arch, "Door_1-leaf-h")
+    floor = arch["parameters"]["floor.level"]["value"]
+    assert low[1] == pytest.approx(floor) and high[1] == pytest.approx(floor + 2.01)
+
+
+def test_llm_corners_stay_where_the_photo_measures_only_part_of_the_element(env):
+    rect = _opening_rect(env.arch, "Door_1", widen=0.04)
+    answers = _answers(env, elements=[{"id": "Door_1", "corners": _corners(env, ["Door_1-a", "Door_1-b"], rect)}])
+    item = _door(env)
+    item["edges"]["top"].update(views=1)  # the height pair fails its gates
+    arch = env.merge(answers, anchors=_anchors(Door_1=item))
+    assert _vision(arch)["superseded"] == [] and _param(arch, "Door_1", "width")["source"] == "llm"
+    assert "leaf_width" in _element(arch, "Door_1")["params"] and "leaf_height" not in _element(arch, "Door_1")["params"]
+
+
+def test_an_llm_value_then_a_photo_pair_keeps_the_llm_value_of_that_pair_only(env):
+    rect = _face_rect(env, "Partition_P1", "A", (0.1, 0.45), (0.8, 1.6))
+    answers = _answers(env, new_elements=[{"kind": "niche", "host_hint": "Partition_P1", "corners": _corners(env, ["Partition_P1-A-ov"], rect)}])
+    niche = _anchor_item("niche", 0.28, 0.33, 1.58, bottom=0.82)
+    niche["edges"]["top"].update(views=1)
+    arch = env.merge(answers, anchors=_anchors(Niche_1=niche))
+    assert _param(arch, "Niche_1", "width")["source"] == "photo" and _param(arch, "Niche_1", "width")["llm_value"] == pytest.approx(0.35, abs=0.005)
+    assert _param(arch, "Niche_1", "height")["source"] == "llm"
