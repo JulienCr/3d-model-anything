@@ -402,9 +402,11 @@ SCRIPT = """
       open.onupgradeneeded = function () { open.result.createObjectStore('handles'); };
       open.onerror = function () { reject(open.error); };
       open.onsuccess = function () {
-        var tx = open.result.transaction('handles', mode), req = work(tx.objectStore('handles'));
-        tx.oncomplete = function () { resolve(req.result); };
-        tx.onerror = function () { reject(tx.error); };
+        try {
+          var tx = open.result.transaction('handles', mode), req = work(tx.objectStore('handles'));
+          tx.oncomplete = function () { resolve(req.result); };
+          tx.onerror = function () { reject(tx.error); };
+        } catch (e) { reject(e); }
       };
     });
   }
@@ -424,7 +426,7 @@ SCRIPT = """
     linkButton.addEventListener('click', async function () {
       try {
         var h = await window.showSaveFilePicker({ suggestedName: 'measurements.json', types: [{ description: 'Mesures', accept: { 'application/json': ['.json'] } }] });
-        await store('readwrite', function (s) { return s.put(h, storageKey); });
+        try { await store('readwrite', function (s) { return s.put(h, storageKey); }); } catch (e) { say('lien non mémorisé pour la prochaine ouverture'); }
         await attach(h);
       } catch (e) { if (e.name !== 'AbortError') say('liaison impossible : ' + e.message); }
     });
@@ -496,7 +498,7 @@ def _crop(photo: PosedPhoto, p0: list[float], p1: list[float], quality: int = 75
 
 
 def _host_normal(arch: dict, dim: dict) -> np.ndarray | None:
-    host = next((e for e in arch["elements"] if dim["kind"].startswith("opening_") and e["id"] == dim["elements"][-1]
+    host = next((e for e in arch["elements"] if dim["kind"].startswith(("opening_", "leaf_")) and e["id"] == dim["elements"][-1]
                  and e["kind"] in ("wall", "partition")), None)
     if host is None:
         return None

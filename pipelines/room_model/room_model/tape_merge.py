@@ -1,5 +1,8 @@
 """Apply the user's tape measurements (measurements.json, metres per dimension id) to the architecture.
 
+The file is either `{"<id>": metres}` or `{"version": 2, "capture": ..., "values": {"<id>": {"value_m", "date", "note"}}}`.
+A leaf measure (`<id>-leaf-w`, `-leaf-h`: the moving panel of a door or window) creates its parameter and dimension.
+
 An opening dimension replaces the parameter it measures; a ceiling height moves the ceiling level; a station moves
 the wall of its pair with the larger offset sigma along its normal. Whatever cannot be applied is listed, never applied.
 """
@@ -18,7 +21,9 @@ TAPE_SIGMA = 0.005  # m
 MOVE_SIGMAS = 10  # a wall moves by at most this many station sigmas or one wall thickness, whichever is larger:
 # beyond it the tape and the scan describe different places (wrong face, typing mistake)
 ON_LINE = 1e-4  # m; a plan point this close to a wall line lies on it
-OPENING_PARAM = {"w": "width", "h": "height", "sill": "sill"}
+OPENING_PARAM = {"w": "width", "h": "height", "sill": "sill", "leaf-w": "leaf_width", "leaf-h": "leaf_height"}
+LEAF_KINDS = ("door", "window")
+LEAF_DIMENSION = {"leaf_width": ("leaf-w", "Largeur du vantail de"), "leaf_height": ("leaf-h", "Hauteur du vantail de")}
 STATION_KINDS = ("width", "length")
 
 
@@ -36,11 +41,29 @@ def _set_tape(p: dict, value: float) -> None:
 
 
 def _opening(arch: dict, dim_id: str) -> tuple[dict, str] | None:
-    found = re.fullmatch(r"(.+)-(w|h|sill)", dim_id)
+    found = re.fullmatch(r"(.+?)-(leaf-w|leaf-h|w|h|sill)", dim_id)
     el = _elements(arch).get(found.group(1)) if found else None
     if el is None or el["kind"] not in RECT_KINDS or (found.group(2) == "sill" and el["kind"] not in ("window", "niche")):
         return None
+    if found.group(2).startswith("leaf") and el["kind"] not in LEAF_KINDS:
+        return None
     return el, OPENING_PARAM[found.group(2)]
+
+
+def _set_leaf(arch: dict, el: dict, name: str, value: float) -> None:
+    """Creates or updates the leaf parameter of a door or window and its dimension (source tape)."""
+    pid = el["params"].get(name) or f"{el['params']['width'].rsplit('.', 1)[0]}.{name}"
+    arch["parameters"][pid] = {"value": float(value), "sigma": TAPE_SIGMA, "unit": "m", "source": "tape"}
+    el["params"][name] = pid
+    dims = {d["id"]: d for d in arch["dimensions"]}
+    suffix, label = LEAF_DIMENSION[name]
+    dim_id = f"{el['id']}-{suffix}"
+    dim = {"id": dim_id, "kind": name, "label": f"{label} {el['id']}", "value": float(value), "sigma": TAPE_SIGMA,
+           "elements": [el["id"]] + ([el["host"]] if el.get("host") else []), "at": None, "source": "tape", "flags": []}
+    if dim_id in dims:
+        dims[dim_id].update(value=dim["value"], sigma=TAPE_SIGMA, source="tape")
+    else:
+        arch["dimensions"].append(dim)
 
 
 # --- walls --------------------------------------------------------------------------------------------------------
@@ -166,6 +189,23 @@ def _number(raw) -> float | None:
     return float(raw) if ok else None
 
 
+def normalize(doc: dict) -> dict:
+    """{id: metres} from either file format; an unusable v2 entry becomes None or stays as is, for `apply` to report."""
+    if doc.get("version") != 2 or not isinstance(doc.get("values"), dict):
+        return doc
+    return {k: (v.get("value_m") if isinstance(v, dict) else v) for k, v in doc["values"].items()}
+
+
+def read_store(doc: dict) -> dict:
+    """{id: {"value_m", "date", "note"}} from either file format, for pre-filling the survey page; unusable entries are dropped."""
+    out = {}
+    for key, raw in (doc["values"] if doc.get("version") == 2 and isinstance(doc.get("values"), dict) else doc).items():
+        entry = raw if isinstance(raw, dict) else {"value_m": raw}
+        if _number(entry.get("value_m")) is not None:
+            out[key] = {"value_m": float(entry["value_m"]), "date": str(entry.get("date") or ""), "note": str(entry.get("note") or "")}
+    return out
+
+
 def apply(arch: dict, tape: dict) -> dict:
     """Applies the measurements to `arch` in place (its model dimensions must already be in `arch["dimensions"]`).
 
@@ -173,6 +213,7 @@ def apply(arch: dict, tape: dict) -> dict:
     "derived": [{id, scan, applied}]}; `derived` lists station values that changed because a wall moved.
     """
     rep = {"applied": [], "not_applied": [], "moved": [], "derived": []}
+    tape = normalize(tape)
     dims = {d["id"]: d for d in arch["dimensions"]}
     anchors, changed = _anchors(arch), {}
     for dim_id, raw in tape.items():
@@ -184,9 +225,12 @@ def apply(arch: dict, tape: dict) -> dict:
         try:
             if (target := _opening(arch, dim_id)) is not None:
                 el, name = target
-                p = arch["parameters"][el["params"][name]]
-                row.update(scan=_scan(p)[0], llm=p.get("llm_value"))
-                _set_tape(p, value)
+                if name.startswith("leaf"):
+                    _set_leaf(arch, el, name, value)
+                else:
+                    p = arch["parameters"][el["params"][name]]
+                    row.update(scan=_scan(p)[0], llm=p.get("llm_value"))
+                    _set_tape(p, value)
                 _flag(el, "tape_corrected")
             elif (dim := dims.get(dim_id)) is not None and (dim_id in anchors or dim["kind"] == "ceiling_height"):
                 row.update(scan=dim.get("scan_value", changed.get(dim_id, (dim["value"],))[0]))

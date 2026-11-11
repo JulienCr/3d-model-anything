@@ -113,21 +113,21 @@ def test_survey_page(full):
     assert sorted(numbers) == list(range(1, len(numbers) + 1)) and set(rows) == set(numbers)
     for n in numbers:
         assert f'id="span-{n}"' in svg
-    assert html.count("<input") == len(numbers) and "Door_1-w" in numbers.values()
-    assert "http" not in html and "<script src" not in html and "<link" not in html
+    assert html.count("<input data-dim") + html.count("<input type=\"text\" inputmode") == len(numbers) and "Door_1-leaf-w" in numbers.values()
+    assert "http" not in re.sub(r"data:[^\"')]*", "", html) and "<script src" not in html and "<link" not in html
 
-    dims = {n: _dim(arch, d) for n, d in numbers.items()}
+    dims = {r.number: r.dim for r in survey_page.numbered_rows(arch)}
     flags = [_priority(dims[n]) for n in sorted(numbers)]
     assert flags == sorted(flags, reverse=True) and any(flags) and not all(flags)  # priority rows come first
     for n, row in rows.items():
         assert ("à reprendre en priorité" in row) == _priority(dims[n]), numbers[n]
     assert any(dims[n]["source"] == "roomplan" for n in numbers)
     assert not {"L-M1", "B1-u"} & set(numbers.values())  # not on the sheet
-    assert "Largeur de la porte Door_1" in rows[next(n for n, d in numbers.items() if d == "Door_1-w")]
-    assert all(d["kind"] in {"opening_width", "opening_height", "opening_sill", "width", "length", "ceiling_height"} for d in dims.values())
+    assert "Largeur du vantail" in rows[next(n for n, d in numbers.items() if d == "Door_1-leaf-w")]
+    assert all(d["kind"] in {"opening_width", "opening_height", "opening_sill", "leaf_width", "leaf_height", "width", "length", "ceiling_height"} for d in dims.values())
 
     cropped = {numbers[n] for n, r in rows.items() if "data:image/jpeg;base64," in r}
-    assert {"Door_1-w", "Door_1-h", "Window_1-w", "Window_1-sill"} <= cropped
+    assert {"Door_1-leaf-w", "Door_1-leaf-h", "Window_1-leaf-w", "Window_1-sill"} <= cropped
     assert _element(arch, "Opening_1")["face"] == "B" and not {"Opening_1-w", "Opening_1-h"} & cropped  # hidden behind the partition
     assert len(html) < 3_000_000
     assert "Télécharger measurements.json" in html and "Copier" in html and "localStorage" in html
@@ -136,10 +136,10 @@ def test_survey_page(full):
 def test_survey_page_shows_both_values_of_a_corrected_dimension(full):
     _, _, arch = full
     arch = copy.deepcopy(arch)
-    dim = _dim(arch, "Door_1-w")
+    dim = _dim(arch, "Window_1-sill")
     dim.update(scan_value=dim["value"] - 0.03, scan_sigma=0.01, source="llm", flags=["llm_corrected"])
     html = survey_page.render(arch, survey_page.numbered_rows(arch), {})
-    row = next(m.group(0) for m in re.finditer(r'<article class="row.*?</article>', html, re.S) if 'data-dim="Door_1-w"' in m.group(0))
+    row = next(m.group(0) for m in re.finditer(r'<article class="row.*?</article>', html, re.S) if 'data-dim="Window_1-sill"' in m.group(0))
     assert "Scan" in row and "LLM" in row and "img" not in row
 
 
@@ -184,7 +184,7 @@ def test_survey_photo_must_face_the_span_up_to_70_degrees(tmp_path, angle, kept)
         stage.run(ctx)
     _, rows = _sections((ctx.out / "measurements" / "index.html").read_text(encoding="utf-8"))
     numbers = json.loads((ctx.out / "measurements" / "plan_numbers.json").read_text(encoding="utf-8"))
-    row = rows[int(next(n for n, d in numbers.items() if d == "Window_1-w"))]
+    row = rows[int(next(n for n, d in numbers.items() if d == "Window_1-leaf-w"))]
     assert ("data:image/jpeg;base64," in row) is kept
 
 
@@ -578,7 +578,7 @@ def test_tape_overrides_llm(env):
     rect = _opening_rect(env.arch, "Door_1", widen=0.04)
     answers = _answers(env, elements=[{"id": "Door_1", "corners": _corners(env, ["Door_1-a", "Door_1-b"], rect)}])
     scan = _param(env.arch, "Door_1", "width")["value"]
-    arch = env.merge(answers, {"Door_1-w": 0.93})
+    arch = env.merge(answers, {"Door_1-w": 0.93, "Door_1-leaf-w": 0.8})
     width = _param(arch, "Door_1", "width")
     assert width["source"] == "tape" and width["value"] == 0.93 and width["sigma"] == 0.005
     assert width["scan_value"] == scan and width["llm_value"] == pytest.approx(scan + 0.04, abs=0.002)
@@ -589,8 +589,8 @@ def test_tape_overrides_llm(env):
     cells = [c.strip() for c in line.strip("|").split("|")]
     assert [_number(c) for c in cells[2:4]] == pytest.approx([scan * 100, scan * 100 + 4], abs=0.1)
     row = next(m.group(0) for m in re.finditer(r'<article class="row.*?</article>', survey_page.render(arch, survey_page.numbered_rows(arch), {}), re.S)
-               if 'data-dim="Door_1-w"' in m.group(0))
-    assert "Mètre : 93,0 cm" in row and "à reprendre en priorité" not in row
+               if 'data-dim="Door_1-leaf-w"' in m.group(0))
+    assert "Mètre : 80,0 cm" in row and "à reprendre en priorité" not in row
 
 
 def _offset(arch, wall):

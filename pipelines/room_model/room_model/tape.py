@@ -1,6 +1,7 @@
 """Tape measurements against the scan and LLM values, as a French Markdown report."""
 from __future__ import annotations
 
+from room_model import tape_merge
 from room_model.fmt import fr
 
 NONE = "–"
@@ -17,6 +18,7 @@ def compare(arch: dict, tape: dict) -> str:
     `tape` is {"<dimension id>": <metres>}; ids unknown to the architecture are listed apart.
     """
     dims = {d["id"]: d for d in arch["dimensions"]}
+    tape = tape_merge.normalize(tape)
     rows, gaps, unknown = [], [], []
     for dim_id, measured in tape.items():
         dim = dims.get(dim_id)

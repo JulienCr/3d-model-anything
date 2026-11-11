@@ -177,7 +177,7 @@ def test_tape_flag_installs_the_file_and_reruns_the_architecture(build, tmp_path
     first = json.loads((out / STAGE_OUTPUTS["architecture"]).read_text(encoding="utf-8"))
     door = next(d for d in first["dimensions"] if d["id"] == "Door_1-w")
     mine = tmp_path / "mine.json"
-    mine.write_text(json.dumps({"Door_1-w": door["value"] + 0.03}), encoding="utf-8")
+    mine.write_text(json.dumps({"Door_1-w": door["value"] + 0.03, "Door_1-leaf-w": 0.8}), encoding="utf-8")
     capsys.readouterr()
     assert cli.main(["architecture", *args, "--tape", str(mine)]) == 0  # no --force: the new file makes the output stale
     assert "skipped" not in capsys.readouterr().out
