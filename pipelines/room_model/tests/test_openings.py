@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from room_model import model, openings, shell
+from room_model.openings import ROOMPLAN_SIGMA
 from helpers import make_case, plan_point, truth_to_room
 from synthetic import DOOR, PARTITION, PARTITION_OPENING, WINDOW
 
@@ -57,12 +58,18 @@ def test_door_on_perimeter(full):
     assert _value(doc, door, "width") == pytest.approx(DOOR["w"], abs=0.02)
     assert _value(doc, door, "height") == pytest.approx(DOOR["h"], abs=0.02)
     assert _value(doc, door, "sill") == pytest.approx(0.0, abs=0.02)
+    sources = {n: doc["parameters"][door["params"][n]]["source"] for n in ("center_s", "width", "height", "sill")}
+    assert set(sources.values()) == {"lidar"}
+    floor = model_doc["parameters"]["floor.level"]
+    assert doc["parameters"][door["params"]["sill"]]["sigma"] == pytest.approx(floor["sigma"])
+    assert doc["parameters"][door["params"]["width"]]["sigma"] < ROOMPLAN_SIGMA
     assert _value(doc, door, "depth") == pytest.approx(model_doc["parameters"][host["params"]["thickness"]]["value"])
 
 
-def test_window_sill(full):
-    ctx, truth, doc, model_doc = full
+def test_window_sill(tmp_root):
+    ctx, truth, doc, model_doc = _run(tmp_root, "window-shifted", window=True, window_rp_error=0.06)
     win = _opening(doc, "Window_1")
+    assert {doc["parameters"][win["params"][n]]["source"] for n in ("center_s", "width", "height", "sill")} == {"lidar"}
     assert win["kind"] == "window" and win["roomplan_id"] == truth.opening_idents["window"]
     assert _value(doc, win, "sill") == pytest.approx(WINDOW["sill"], abs=0.02)
     assert _value(doc, win, "width") == pytest.approx(WINDOW["w"], abs=0.02)
@@ -130,3 +137,17 @@ def test_host_of_prefers_parent_then_nearest_parallel():
     turned[:3, :3] = [[0, 0, 1], [0, 1, 0], [-1, 0, 0]]  # x axis along z: not parallel to either host
     turned[:3, 3] = [2.0, 1.0, 0.05]
     assert openings.host_of(turned, None, hosts) is None
+
+
+def test_partition_opening_face_follows_z_axis(tmp_root):
+    faces = {f: _opening(_run(tmp_root, f"face-{f}", partition=True, partition_opening=True, partition_opening_face=f)[2], "Opening_1")["face"]
+             for f in ("A", "B")}
+    assert faces == {"A": "A", "B": "B"}
+
+
+def test_opening_beyond_host_end_is_orphan(tmp_root):
+    _, _, doc, _ = _run(tmp_root, "beyond", partition=True, partition_opening=True, partition_opening_width=0.2,
+                        partition_opening_z=2.4)
+    op = _opening(doc, "Opening_1")
+    assert op["host"] is None and "orphan" in op["flags"] and "Opening_1" in doc["diagnostics"]["orphans"]
+    assert _value(doc, op, "width") == pytest.approx(0.2)

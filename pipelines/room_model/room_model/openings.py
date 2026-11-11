@@ -16,6 +16,7 @@ ROOMPLAN_SIGMA = 0.03
 HOST_DISTANCE = 0.30  # m, an opening this far from the slab of a host (and no further) still belongs to it
 HOST_PARALLEL = np.cos(np.radians(10.0))
 CLAMP_TOLERANCE = 0.005  # m an opening may overhang its host before it counts as clamped
+MIN_SPAN = 0.10  # m of an opening that must overlap its host, else it is an orphan
 BIN = 0.01
 EDGE_RANGE = 0.15  # m searched each side of a RoomPlan edge
 EDGE_BAND_INSET = 0.10  # m kept clear of the opening corners when counting along an edge
@@ -152,13 +153,16 @@ def build(ctx: StageContext, model_doc: dict) -> dict:
                     "sill": _param(sill, ROOMPLAN_SIGMA, "roomplan")}
             flags, found = [], host_of(tf, raw.get("parentIdentifier"), hosts)
             host = by_id[found[0]] if found else None
+            if host is not None:
+                s, length = _along(host, tf[[0, 2], 3])
+                s = float(s)
+                lo, hi = max(s - width / 2, 0.0), min(s + width / 2, length)
+                if hi - lo < MIN_SPAN:
+                    host = None
             if host is None:
                 flags.append("orphan")
                 orphans.append(ident)
             else:
-                s, length = _along(host, tf[[0, 2], 3])
-                s = float(s)
-                lo, hi = max(s - width / 2, 0.0), min(s + width / 2, length)
                 if s - width / 2 < -CLAMP_TOLERANCE or s + width / 2 > length + CLAMP_TOLERANCE:
                     flags.append("clamped")
                     clamped.append(ident)

@@ -62,6 +62,8 @@ class SyntheticOptions:
     window_rp_error: float = 0.0  # m the RoomPlan window is shifted along the wall from the mesh hole
     partition_opening: bool = False  # a RoomPlan opening on the partition, no hole in the mesh
     partition_opening_width: float = 0.9
+    partition_opening_z: float = 1.3  # centre along the partition
+    partition_opening_face: str = "B"  # side the RoomPlan opening +z axis points to; A is the +x face
     orphan_opening: bool = False  # a RoomPlan opening standing in free space
 
 
@@ -101,7 +103,8 @@ CABINET = {"x": (0.0, 0.6), "z": (3.0, 4.0), "h": 1.90}
 DOOR = {"z": 1.25, "w": 0.90, "h": 2.05}
 PARTITION = {"x": 1.0, "z": (0.3, 2.3), "thickness": 0.10, "roomplan_offset": 0.015}  # runs along z; face A is the +x one
 WINDOW = {"x": 3.0, "w": 1.2, "sill": 0.9, "h": 1.0}  # in the south wall
-PARTITION_OPENING = {"z": 1.3, "h": 2.05}  # centre along the partition
+
+PARTITION_OPENING = {"z": 1.3, "h": 2.05}  # default centre along the partition
 ORPHAN_OPENING = {"centre": (1.5, 3.4), "w": 0.8, "h": 1.2, "sill": 0.5}
 OUTSIDE_WALL = {"centre": (-1.5, 2.0), "length": 1.0}  # beyond the west wall
 
@@ -449,9 +452,10 @@ def _roomplan(opt: SyntheticOptions, world: np.ndarray) -> tuple[dict, dict[str,
         windows.append(win)
     if opt.partition_opening:
         assert partition, "partition_opening needs partition=True"
-        c = np.array([PARTITION["x"] + PARTITION["roomplan_offset"], PARTITION_OPENING["z"]])
+        c = np.array([PARTITION["x"] + PARTITION["roomplan_offset"], opt.partition_opening_z])
+        sign = 1.0 if opt.partition_opening_face == "A" else -1.0
         openings.append(opening_json(_ident("partition-opening"), partition, (opt.partition_opening_width, PARTITION_OPENING["h"]),
-                                     frame_of(c, np.array([0.0, 1.0]), np.array([-1.0, 0.0]), PARTITION_OPENING["h"] / 2)))
+                                     frame_of(c, np.array([0.0, -sign]), np.array([sign, 0.0]), PARTITION_OPENING["h"] / 2)))
     if opt.orphan_opening:
         o_ = ORPHAN_OPENING
         openings.append(opening_json(_ident("orphan-opening"), None, (o_["w"], o_["h"]),
