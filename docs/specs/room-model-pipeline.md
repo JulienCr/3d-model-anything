@@ -164,3 +164,70 @@ viewer can load the enriched `room.json` via `room-runtime` without a hand-writt
   M5 squared variant + `rooms.mjs`/viewer integration.
 - **M1 validation** (no tape measurements yet): spike `out/eval` stations, the LLM-built couloir
   model, synthetic behavioural tests.
+
+## M1.5 Architecture → Blender (grilling rounds 1–4, 2026-11-11) — overrides the sections above
+
+Goal: a Blender scene of the **architecture only**, usable as is: walls and interior partitions,
+doors, windows, through-openings and niches cut in the walls, doors and windows rigged to open,
+dimensions, mouldings, walls textured from the photos. No furniture. Comes before M2 (networks).
+Development room: one private capture with 3 doors, 2 windows, an interior partition carrying a
+floor-height opening, and a mid-height through-niche (pass-through with shelves) that RoomPlan
+did not detect.
+
+### Delivery
+
+- `architecture.json` (schema `room-model/arch-1`) is the single source; a Blender script
+  `blender/build_scene.py` builds the scene from it. The pipeline runs it headless and writes
+  `architecture.blend`, `architecture.glb` (static, doors and windows closed) and viewport
+  renders. `model_measured.glb` stays as the M1 output.
+- Blender 5.1+; headless runs use `BLENDER` (default: the Steam install, 5.3.0).
+- Collections: `Coque`, `Menuiseries`, `Moulures`, `Cotes`, `À vérifier`, `Scan` (LiDAR mesh,
+  decimated, hidden by default).
+
+### Elements
+
+- **Interior partitions**: a RoomPlan wall off the floor outline but inside the floor polygon is a
+  partition (two faces, both in the room); no longer dropped.
+- **Openings**: RoomPlan doors, windows and openings, hosted on the fitted wall or partition.
+  Generic kinds: `door`, `window`, `opening` (through, floor-based), `niche` (sill above floor;
+  `through: true` when open on both faces). A niche carries `dividers` (vertical) and `shelves`
+  (horizontal) and a moulded `frame`.
+- **Catalogue** (short, extend only when the photos show something it lacks): doors `hinged_single`,
+  `hinged_double`, `sliding`, `pocket`, `french_window`; windows `casement_single`,
+  `casement_double`, `tilt_turn`, `sliding`, `fixed`. Parameters: hinge side, swing (in/out),
+  moulded panel count, handle.
+- **Rig**: an empty parent per door/window with custom properties `Ouverture` (0–1) and `Sens`
+  (flips swing); drivers rotate leaves (max angle property, default 90°) or translate sliding
+  leaves. A double door has one slider for both leaves.
+- **Mouldings**: cornice and skirting along the perimeter, architraves around openings, from a
+  small profile catalogue; heights estimated by the LLM, source `assumed`. Wall panel frames
+  (boiseries) optional, placed under `À vérifier`.
+- **Dimensions**: MeasureIt when the extension is available, checked by the script; otherwise
+  native objects (curve + arrows + text) in `Cotes`. Content: wall lengths, ceiling heights,
+  width × height of every opening, window sill heights, width stations.
+- **Materials**: walls, floor and ceilings get textures projected from the photos (2 cm per texel),
+  with an occlusion mask (LiDAR depth plus RoomPlan object boxes) so furniture is not printed;
+  masked texels are filled with a CC0 texture (`fetch_textures.py`) tinted to the measured colour.
+  Joinery and mouldings get plain named materials (paint, wood, glass).
+
+### LLM (vision)
+
+- Stage of the pipeline: writes `vision/pending/` (gravity-upright photo crops per element, the
+  RoomPlan rectangle drawn on them, a compact JSON and the answer schema), runs `claude -p` with
+  Opus, no API key; `--no-llm` skips it.
+- The LLM types every element (catalogue type, hinge side, swing, panels, moulding profiles) and
+  **may correct dimensions by default**. It answers in pixel corners on the crops, never in
+  centimetres; the pipeline back-projects them onto the host wall plane with the photo poses.
+  Every corrected value keeps the scan value beside it and carries the flag `llm_corrected`.
+- It can declare elements RoomPlan missed (the through-niche) the same way.
+
+### Validation
+
+- Tape measurements (6–8 at the development room: door and window widths and heights, the niche)
+  in `measurements.json`; the pipeline writes the list to take, one annotated photo crop per
+  measurement, and a report comparing the scan value and the LLM value to the tape.
+- Budget: < 30 min of compute per room excluding the LLM pass, < 500 MB per room, about ten photo
+  sheets per room for the LLM.
+- Traces: `D:\dev\room-model-traces\09-…` onward, one per delivery step: 09 openings and rig
+  (no LLM), 10 LLM pass and mouldings plus the tape comparison, 11 projected textures, 12 static
+  GLB and cleanup.
