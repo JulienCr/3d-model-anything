@@ -1,3 +1,4 @@
+import importlib.util
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -51,12 +52,15 @@ def _overview_crop(pending: Path) -> str:
     return next(c for c, v in crops.items() if v["kind"] == "overview")
 
 
+def _overview_host(pending: Path) -> str:
+    return _load(pending, "crops.json")[_overview_crop(pending)]["target"]
+
+
 def _canned(pending: Path) -> dict:
     crops = _load(pending, "crops.json")
     door = [c for c in crops if c.startswith("Door_1-")]
     window = [c for c in crops if c.startswith("Window_1-")]
-    host = _host_ids(pending)[0]
-    overview = _overview_crop(pending)
+    host, overview = _overview_host(pending), _overview_crop(pending)
     return {
         "elements": [
             {"id": "Door_1", "type": "hinged_double", "hinge": "right", "swing": "out", "panels": 4, "handle": True,
@@ -241,6 +245,20 @@ def test_schema_enums_match_the_catalogue(pending):
     assert set(props["hinge"]["enum"]) - {None} == set(catalogue.SIDES) and set(props["swing"]["enum"]) - {None} == set(catalogue.SWINGS)
 
 
+def test_schema_profiles_match_the_blender_profiles(pending):
+    spec = importlib.util.spec_from_file_location("room_model_profiles", vision.CATALOGUE_FILE.with_name("profiles.py"))
+    profiles = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(profiles)
+    schema = _load(pending, "schema.json")
+    enum = lambda node: set(node["properties"]["profile"]["enum"])  # noqa: E731
+    table = profiles.PROFILES
+    assert enum(schema["properties"]["cornice"]) == set(table["cornice"])
+    assert enum(schema["properties"]["skirting"]) == set(table["skirting"])
+    assert enum(schema["definitions"]["frame"]) == set(table["architrave"])
+    panel = enum(schema["properties"]["panel_frames"]["items"])
+    assert "flat" not in panel and panel == set(table["panel_frame"]) - {"flat"}
+
+
 def test_run_with_fake_claude(case, pending, fake):
     set_answer, log = fake
     set_answer(_canned(pending))
@@ -306,6 +324,10 @@ def _reasons(case):
     {"new_elements": [{"kind": "niche", "host_hint": "HOST", "through": True, "dividers": 0, "shelves_count": 0, "corners": []}]},
     {"new_elements": [{"kind": "column", "host_hint": "HOST", "corners": "CORNERS"}]},
     {"new_elements": [{"kind": "niche", "host_hint": "HOST", "through": True, "dividers": 0, "shelves_count": 0, "corners": "DOORCROP"}]},
+    {"elements": [{"id": "Door_1", "corners": "WINDOWCROP"}]},  # corners on another element's crop
+    {"elements": [{"id": "Door_1", "corners": "CORNERS"}]},  # corners on an overview crop
+    {"new_elements": [{"kind": "niche", "host_hint": "OTHERHOST", "through": True, "dividers": 0, "shelves_count": 0, "corners": "CORNERS"}]},
+    {"panel_frames": [{"host_hint": "OTHERHOST", "corners": "CORNERS", "profile": "ogee"}]},  # the crop shows another wall
     {"surprise": 1},
 ])
 def test_invalid_answers_are_rejected_item_by_item(case, pending, fake, answer):
@@ -313,15 +335,18 @@ def test_invalid_answers_are_rejected_item_by_item(case, pending, fake, answer):
     crops = _load(pending, "crops.json")
     corners = [_corner(crops, _overview_crop(pending))]
     door_crop = next(c for c in crops if c.startswith("Door_1-"))
-    text = json.dumps(answer).replace('"CORNERS"', json.dumps(corners)).replace('"HOST"', json.dumps(_host_ids(pending)[0]))
-    text = text.replace('"DOORCROP"', json.dumps([_corner(crops, door_crop)]))
+    window_crop = next(c for c in crops if c.startswith("Window_1-"))
+    host = _overview_host(pending)
+    text = json.dumps(answer).replace('"CORNERS"', json.dumps(corners)).replace('"HOST"', json.dumps(host))
+    text = text.replace('"DOORCROP"', json.dumps([_corner(crops, door_crop)])).replace('"WINDOWCROP"', json.dumps([_corner(crops, window_crop)]))
+    text = text.replace('"OTHERHOST"', json.dumps(next(h for h in _host_ids(pending) if h != host)))
     set_answer(text)
     before = (case.out / "architecture.json").read_bytes()
     path = vision.run(_stage(case, force=True))
     answers = _load(path.parent, "answers.json")
     assert [answers["elements"], answers["new_elements"], answers["panel_frames"], answers["cornice"], answers["skirting"]] \
         in ([[], [], [], None, None], [[{"id": "Door_1", "type": "sliding"}], [], [], None, None])
-    assert _reasons(case) and all({"where", "reason"} <= set(r) for r in _reasons(case))
+    assert "error" not in answers and _reasons(case) and all({"where", "reason"} <= set(r) for r in _reasons(case))
     assert (case.out / "architecture.json").read_bytes() == before
 
 
@@ -356,23 +381,45 @@ def test_a_good_item_survives_a_bad_neighbour(case, pending, fake):
     assert next(r for r in _reasons(case) if r["where"] == "elements[2]")["id"] == "Nope"
 
 
-@pytest.mark.parametrize("text, raw", [("Je ne sais pas.", False), ("", False), ('["not", "an", "object"]', False),
-                                      ("{\"elements\": [", False), ("plain text, no envelope", True), ("{\"result\": 5}", True)])
-def test_unparseable_output_is_rejected_not_fatal(case, pending, fake, text, raw):
+@pytest.mark.parametrize("text", ["Je ne sais pas.", "", '["not", "an", "object"]', "{\"elements\": ["])
+def test_unparseable_answer_text_is_rejected_not_fatal(case, pending, fake, text):
     set_answer, _ = fake
-    set_answer(text, raw=raw)
+    set_answer(text)
     path = vision.run(_stage(case, force=True))
     answers = _load(path.parent, "answers.json")
-    assert answers["elements"] == [] and answers["cornice"] is None and answers["model"] == "opus"
+    assert answers["elements"] == [] and answers["cornice"] is None and answers["model"] == "opus" and "error" not in answers
     assert len(_reasons(case)) == 1 and _reasons(case)[0]["where"] == "result"
 
 
-def test_failing_claude_is_rejected_not_fatal(case, pending, fake, monkeypatch, capsys):
-    monkeypatch.setenv("FAKE_CLAUDE_EXIT", "3")
+def _broken_script(tmp_path):
+    script = tmp_path / "broken-claude"
+    script.write_text("#!/nonexistent/interpreter\n", encoding="utf-8")
+    script.chmod(0o755)
+    return str(script)
+
+
+@pytest.mark.parametrize("failure", ["exit", "plain", "no_result", "is_error", "oserror"])
+def test_a_failed_call_is_recorded_and_retried_not_cached(case, pending, fake, monkeypatch, tmp_path, capsys, failure):
+    set_answer, _ = fake
+    if failure == "exit":
+        monkeypatch.setenv("FAKE_CLAUDE_EXIT", "3")
+    elif failure == "oserror":
+        monkeypatch.setenv("ROOM_MODEL_CLAUDE", _broken_script(tmp_path))
+    else:
+        set_answer({"plain": "plain text, no envelope", "no_result": '{"result": 5}', "is_error": '{"is_error": true, "result": "login expired"}'}[failure], raw=True)
     path = vision.run(_stage(case, force=True))
     answers = _load(path.parent, "answers.json")
-    assert answers["elements"] == [] and "authentication failed" in _reasons(case)[0]["reason"]
-    assert "authentication failed" in capsys.readouterr().err
+    assert answers["error"] and "elements" not in answers and answers["model"] == "opus"
+    assert _reasons(case)[0]["where"] == "claude" and _reasons(case)[0]["reason"] == answers["error"]
+    assert capsys.readouterr().err
+    args = ["--capture", str(case.capture), "--out", str(case.out)]
+    assert cli.main(["vision", *args, "--no-llm"]) == 0 and _load(path.parent, "answers.json") == {"skipped": True}  # the failure record is stale too
+    monkeypatch.delenv("FAKE_CLAUDE_EXIT", raising=False)
+    monkeypatch.delenv("FAKE_CLAUDE_RAW", raising=False)
+    monkeypatch.setenv("ROOM_MODEL_CLAUDE", FAKE)
+    set_answer({"skirting": {"profile": "flat", "height_cm": 8}})
+    assert cli.main(["vision", *args]) == 0  # no --force: the failure is not a finished stage
+    assert _load(path.parent, "answers.json")["skirting"]["height_cm"] == 8
 
 
 def test_missing_claude_binary(case, pending, monkeypatch, capsys):

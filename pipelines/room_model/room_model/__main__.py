@@ -25,17 +25,23 @@ STAGE_MODULES = {
 STALE_AFTER = {"architecture": "vision"}  # the stage reruns when the named stage's output is newer than its own
 
 
-def _skipped(path: Path) -> bool:
+def _placeholder(path: Path) -> str | None:
+    """`skipped` for the `--no-llm` placeholder, `error` for the record of a failed call, else None."""
     try:
-        return json.loads(path.read_text(encoding="utf-8")).get("skipped") is True
-    except (OSError, ValueError, AttributeError):
-        return False
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    return "skipped" if doc.get("skipped") is True else "error" if "error" in doc else None
 
 
 def _current(ctx: StageContext, name: str) -> bool:
-    """The stage output exists, is not a `--no-llm` placeholder and is not older than the output it merges."""
+    """The stage output exists, holds an answer (`--no-llm` accepts its own placeholder) and is not older than the output it merges."""
     out = ctx.out / STAGE_OUTPUTS[name]
-    if not out.exists() or (name == "vision" and not ctx.no_llm and _skipped(out)):
+    if not out.exists():
+        return False
+    if name == "vision" and (kind := _placeholder(out)) and (kind == "error" or not ctx.no_llm):
         return False
     if name in STALE_AFTER:
         newer = ctx.out / STAGE_OUTPUTS[STALE_AFTER[name]]

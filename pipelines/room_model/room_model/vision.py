@@ -388,15 +388,17 @@ def check(value, schema: dict, root: dict, path: str = "value") -> list[str]:
     return errors
 
 
-def _corner_errors(corners: list, crops: dict, overview_only: bool) -> list[str]:
+def _corner_errors(corners: list, crops: dict, kind: str, target: str) -> list[str]:
+    """Corners must sit on crops of `kind` that show `target` (an element id, or the host wall for overview crops)."""
     errors = []
     for i, c in enumerate(corners):
         info = crops.get(c["crop"])
         if info is None:
             errors.append(f"corners[{i}]: unknown crop {c['crop']!r}")
             continue
-        if overview_only and info["kind"] != "overview":
-            errors.append(f"corners[{i}]: {c['crop']!r} is not an overview crop")
+        if info["kind"] != kind or info["target"] != target:
+            errors.append(f"corners[{i}]: crop {c['crop']!r} is not a {kind} crop of {target!r}")
+            continue
         w, h = info["size"]
         uv = np.array(c["uv"], float)
         if not ((uv >= 0).all() and (uv[:, 0] <= w).all() and (uv[:, 1] <= h).all()):
@@ -423,7 +425,7 @@ def _semantic_errors(name: str, item: dict, known: dict, crops: dict, seen: set)
         if item["host_hint"] not in known["hosts"]:
             errors.append(f"unknown host {item['host_hint']!r}")
     if "corners" in item:
-        errors += _corner_errors(item["corners"], crops, overview_only=name != "elements")
+        errors += _corner_errors(item["corners"], crops, *(("element", item["id"]) if name == "elements" else ("overview", item["host_hint"])))
     return errors
 
 
@@ -474,16 +476,20 @@ def _command(model: str) -> list[str]:
     return [*prefix, found, "-p", "--model", model, "--output-format", "json", "--allowedTools", "Read"]
 
 
+class _CallFailed(Exception):
+    """The call itself failed (process, envelope, claude error): nothing was answered, so nothing may be cached."""
+
+
 def _result_text(stdout: str) -> str:
-    """The `result` field of the JSON envelope printed by `claude -p --output-format json`; ValueError otherwise."""
+    """The `result` field of the JSON envelope printed by `claude -p --output-format json`; _CallFailed otherwise."""
     try:
         envelope = json.loads(stdout)
     except ValueError:
-        raise ValueError("output is not the claude JSON envelope") from None
+        raise _CallFailed("output is not the claude JSON envelope") from None
     if not isinstance(envelope, dict) or not isinstance(envelope.get("result"), str):
-        raise ValueError("the claude JSON envelope has no text `result`")
+        raise _CallFailed("the claude JSON envelope has no text `result`")
     if envelope.get("is_error"):
-        raise ValueError(f"claude reported an error: {envelope['result'][:300]}")
+        raise _CallFailed(f"claude reported an error: {envelope['result'][:300]}")
     return envelope["result"]
 
 
@@ -503,7 +509,8 @@ def _parse_answer(text: str) -> object:
 def run_llm(pending: Path, model: str) -> dict:
     """Runs `claude -p` in `pending` on prompt.md and validates the answer; never raises on a bad answer.
 
-    Returns {"answer", "rejected", "model", "duration_s"}. ClaudeMissing when the executable does not exist.
+    Returns {"answer", "rejected", "model", "duration_s", "error"}; `error` is a message when the call itself failed
+    (timeout, exit code, OSError, bad envelope) and None otherwise. ClaudeMissing when the executable does not exist.
     """
     command = _command(model)
     schema = json.loads((pending / "schema.json").read_text(encoding="utf-8"))
@@ -512,26 +519,32 @@ def run_llm(pending: Path, model: str) -> dict:
     known = {"kinds": {e["id"]: e["kind"] for e in elements["elements"]}, "hosts": elements["room"]["hosts"]}
     prompt = (pending / "prompt.md").read_text(encoding="utf-8")
     started = time.monotonic()
-    answer, rejected = validate({}, schema, known, crops)[0], []  # an empty clean answer
+    answer, rejected, error = validate({}, schema, known, crops)[0], [], None  # an empty clean answer
     try:
         proc = subprocess.run(command, input=prompt, capture_output=True, text=True, cwd=pending, timeout=LLM_TIMEOUT_S, errors="replace")
         if proc.returncode != 0:
-            tail = (proc.stderr.strip() or proc.stdout.strip())[-400:]
-            rejected = [{"where": "claude", "reason": f"exit code {proc.returncode}: {tail}"}]
-        else:
-            try:
-                parsed = _parse_answer(_result_text(proc.stdout))
-            except ValueError as exc:
-                rejected = [{"where": "result", "reason": f"not a JSON answer: {exc}"}]
-            else:
-                answer, rejected = validate(parsed, schema, known, crops)
+            raise _CallFailed(f"exit code {proc.returncode}: {(proc.stderr.strip() or proc.stdout.strip())[-400:]}")
+        text = _result_text(proc.stdout)
+        try:
+            answer, rejected = validate(_parse_answer(text), schema, known, crops)
+        except ValueError as exc:
+            rejected = [{"where": "result", "reason": f"not a JSON answer: {exc}"}]
     except subprocess.TimeoutExpired:
-        rejected = [{"where": "claude", "reason": f"timed out after {LLM_TIMEOUT_S} s"}]
-    return {"answer": answer, "rejected": rejected, "model": model, "duration_s": round(time.monotonic() - started, 1)}
+        error = f"timed out after {LLM_TIMEOUT_S} s"
+    except OSError as exc:
+        error = f"could not run claude: {exc}"
+    except _CallFailed as exc:
+        error = str(exc)
+    if error:
+        rejected = [{"where": "claude", "reason": error}]
+    return {"answer": answer, "rejected": rejected, "model": model, "duration_s": round(time.monotonic() - started, 1), "error": error}
 
 
 def run(ctx: StageContext) -> Path:
-    """vision/answers.json (validated answer, model, duration, crops) and vision/rejected.json; `--no-llm` skips the model."""
+    """vision/answers.json (validated answer, model, duration, crops) and vision/rejected.json; `--no-llm` skips the model.
+
+    When the call itself fails, answers.json holds only {"error", "model", "duration_s"} and the CLI treats it as not done.
+    """
     path = output_path(ctx, "vision")
     path.parent.mkdir(parents=True, exist_ok=True)
     rejected_path = path.parent / "rejected.json"
@@ -545,7 +558,9 @@ def run(ctx: StageContext) -> Path:
     pending = prepare(ctx)
     result = run_llm(pending, ctx.llm_model)
     crops = json.loads((pending / "crops.json").read_text(encoding="utf-8"))
-    path.write_text(json.dumps({**result["answer"], "model": result["model"], "duration_s": result["duration_s"], "crops": crops}, indent=2), encoding="utf-8")
+    meta = {"model": result["model"], "duration_s": result["duration_s"]}
+    document = {"error": result["error"], **meta} if result["error"] else {**result["answer"], **meta, "crops": crops}
+    path.write_text(json.dumps(document, indent=2), encoding="utf-8")
     rejected_path.write_text(json.dumps(result["rejected"], indent=2), encoding="utf-8")
     for reject in result["rejected"]:
         print(f"vision: rejected {reject['where']}: {reject['reason']}", file=sys.stderr)
