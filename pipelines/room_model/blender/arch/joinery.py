@@ -24,12 +24,14 @@ HANDLE_HEIGHT = 1.0  # m above the sill on a door
 OVERLAP = 0.03  # m a surface sliding door covers on each side of the opening
 MIN_SIZE = 0.2  # m: a smaller opening gets no joinery
 DEG = math.pi / 180
-RIG_PROPS = {  # name: (default, min, max, description)
-    "Ouverture": (0.0, 0.0, 1.0, "Ouverture : 0 fermé, 1 ouvert"),
-    "Sens": (0, 0, 1, "Sens : 1 inverse le sens d'ouverture"),
-    "AngleMax": (90.0, 0.0, 180.0, "Angle maximal des vantaux battants, en degrés"),
+RIG_PROPS = {  # name: (default, description, (min, max) or None for a checkbox)
+    "Ouverture": (0.0, "Ouverture : 0 fermé, 1 ouvert", (0.0, 1.0)),
+    "Inverser sens": (False, "Coché : le sens d'ouverture est l'inverse de celui détecté", None),
+    "Inverser charnière": (False, "Coché : charnières (ou coulisse) de l'autre côté ; sans effet sur deux vantaux", None),
+    "AngleMax": (90.0, "Angle maximal des vantaux battants, en degrés", (0.0, 180.0)),
 }
-VARIABLES = {"ouv": "Ouverture", "sens": "Sens", "amax": "AngleMax"}
+VARIABLES = {"ouv": "Ouverture", "inv_sens": "Inverser sens", "inv_hinge": "Inverser charnière", "amax": "AngleMax"}
+SWING_SIGN, HINGE_SIGN = "(1-2*inv_sens)", "(1-2*inv_hinge)"  # 1 unchecked, -1 checked
 
 
 def _box_mesh(name: str, boxes: list[tuple]) -> bpy.types.Mesh:
@@ -104,32 +106,45 @@ def _leaf_boxes(lo: float, hi: float, height: float, glazed: bool) -> tuple[list
 
 
 def _leaves(j: catalogue.Joinery, inner: float, wall: float) -> list[dict]:
-    """Leaves in the frame of the empty: `pivot` (x, y), `x` extent around the pivot, closing edge and the motion."""
+    """Leaves in the frame of the empty: `pivot` (x, y), `x` extent around the pivot, closing edge and the motion.
+
+    `mirror` leaves switch jamb with `Inverser charnière`: everything but fixed panes and pairs of hinged leaves.
+    """
     spec, left = j.spec, j.hinge == "left"
     if spec.motion == HINGED:
         width = inner / spec.leaves
         hinges = [(-inner / 2, 1), (inner / 2, -1)] if spec.leaves == 2 else [(-inner / 2, 1) if left else (inner / 2, -1)]
-        return [{"pivot": (x, 0.0), "x": sorted((0.0, e * width)), "closing": e * width, "inward": -e, "rotation": e}
-                for x, e in hinges]
+        return [{"pivot": (x, 0.0), "x": sorted((0.0, e * width)), "closing": e * width, "inward": -e, "rotation": e,
+                 "mirror": spec.leaves == 1} for x, e in hinges]
     toward = -1 if left else 1  # the stack side
     if spec.motion == FIXED:
-        return [{"pivot": (0.0, 0.0), "x": [-inner / 2, inner / 2], "closing": 0.0, "inward": 0, "handle": False}]
+        return [{"pivot": (0.0, 0.0), "x": [-inner / 2, inner / 2], "closing": 0.0, "inward": 0, "handle": False, "mirror": False}]
     if spec.leaves == 2:  # sliding window: a fixed pane on the stack side, a sliding one on the other rail
         width, rail = inner / 2, LEAF_T / 2 + 0.002
-        return [{"pivot": (toward * width / 2, -rail), "x": [-width / 2, width / 2], "closing": 0.0, "inward": 0, "handle": False},
+        return [{"pivot": (toward * width / 2, -rail), "x": [-width / 2, width / 2], "closing": 0.0, "inward": 0, "handle": False,
+                 "slide": 0.0, "mirror": True},
                 {"pivot": (-toward * width / 2, rail), "x": [-width / 2, width / 2], "slide": toward * width,
-                 "closing": -toward * width / 2, "inward": toward}]
+                 "closing": -toward * width / 2, "inward": toward, "mirror": True}]
     width = inner + (2 * OVERLAP if spec.motion == SLIDING else 0.0)
     y = wall / 2 + LEAF_T / 2 + 0.01 if spec.motion == SLIDING else 0.0  # a surface door runs in front of the wall
     return [{"pivot": (0.0, y), "x": [-width / 2, width / 2], "slide": toward * width, "closing": -toward * width / 2,
-             "inward": toward}]
+             "inward": toward, "mirror": True}]
 
 
 def _rig(obj: bpy.types.Object, leaf: dict, root: bpy.types.Object) -> None:
+    """Drivers of a leaf; a `mirror` leaf is flipped about the centre of the opening by `Inverser charnière`.
+
+    `Inverser sens` reverses a swing, and moves a sliding leaf to the other face of the wall.
+    """
+    flip = HINGE_SIGN if leaf["mirror"] else "1"
+    px, py = leaf["pivot"]
     if "rotation" in leaf:
-        _driver(obj, "rotation_euler", 2, f"({leaf['rotation']})*ouv*amax*{DEG!r}*(1-2*sens)", root)
-    if "slide" in leaf:
-        _driver(obj, "location", 0, f"({leaf['pivot'][0]:.6f})+({leaf['slide']:.6f})*ouv*(1-2*sens)", root)
+        _driver(obj, "rotation_euler", 2, f"({leaf['rotation']})*ouv*amax*{DEG!r}*{SWING_SIGN}*{flip}", root)
+    if leaf["mirror"]:
+        _driver(obj, "location", 0, f"({px:.6f}+({leaf.get('slide', 0.0):.6f})*ouv)*{flip}", root)
+        _driver(obj, "scale", 0, flip, root)
+        if "slide" in leaf and py != 0.0:
+            _driver(obj, "location", 1, f"({py:.6f})*{SWING_SIGN}", root)
 
 
 def _root(arch: dict, el: dict, j: catalogue.Joinery, host: dict, collection) -> bpy.types.Object:
@@ -142,9 +157,13 @@ def _root(arch: dict, el: dict, j: catalogue.Joinery, host: dict, collection) ->
     root.empty_display_type, root.empty_display_size = "PLAIN_AXES", 0.15
     root.location = frame.to_blender(x - nx * t / 2, frame.value(arch, "floor.level") + sill, z - nz * t / 2)
     root.rotation_euler = (0.0, 0.0, math.atan2(-away * nx, -away * nz))  # local +Y = swing direction
-    for name, (default, low, high, text) in RIG_PROPS.items():
+    for name, (default, text, span) in RIG_PROPS.items():
         root[name] = default
-        root.id_properties_ui(name).update(min=low, max=high, soft_min=low, soft_max=high, description=text)
+        ui = root.id_properties_ui(name)
+        if span is None:
+            ui.update(default=default, description=text)
+        else:
+            ui.update(min=span[0], max=span[1], soft_min=span[0], soft_max=span[1], description=text)
     collection.objects.link(root)
     return root
 

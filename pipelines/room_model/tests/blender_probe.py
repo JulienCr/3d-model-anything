@@ -13,7 +13,7 @@ import bpy
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
-RIG_PROPS = ("Ouverture", "Sens", "AngleMax")
+RIG_PROPS = ("Ouverture", "Inverser sens", "Inverser charni\u00e8re", "AngleMax")
 
 
 def _object_facts(obj):
@@ -22,7 +22,8 @@ def _object_facts(obj):
              "parent": obj.parent.name if obj.parent else None, "dims": list(obj.dimensions),
              "props": {k: obj[k] for k in RIG_PROPS if k in obj},
              "flags": obj.get("flags"),
-             "drivers": len(obj.animation_data.drivers) if obj.animation_data else 0}
+             "drivers": len(obj.animation_data.drivers) if obj.animation_data else 0,
+             "drivers_simple": all(d.driver.is_simple_expression for d in obj.animation_data.drivers) if obj.animation_data else True}
     if obj.type == "FONT":
         facts["text"] = obj.data.body
         facts["normal"] = list(obj.matrix_world.to_3x3() @ Vector((0, 0, 1)))
@@ -81,9 +82,12 @@ def _rig(spec):
         ev = obj.evaluated_get(deps)
         rel = frame_inv @ ev.matrix_world
         entry = {"location": list(rel.translation), "rotation_z_deg": math.degrees(rel.to_euler().z),
+                 "driven_rotation_z_deg": math.degrees(ev.rotation_euler.z),
                  "world_origin": list(ev.matrix_world.translation)}
         if obj.type == "MESH":
             entry["world_centre"] = list(ev.matrix_world @ (sum((Vector(c) for c in ev.bound_box), Vector()) / 8))
+            xs = [(rel @ Vector(c)).x for c in ev.bound_box]
+            entry["extent_x"] = [min(xs), max(xs)]
         out[obj.name] = entry
     for key, value in saved.items():
         empty[key] = value

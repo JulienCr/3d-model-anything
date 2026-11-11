@@ -121,14 +121,19 @@ def _add_variants(arch, variants=JOINERY_VARIANTS):
 RIGS = [
     ("closed", "Door_1", {}),
     ("open", "Door_1", {"Ouverture": 1}),
-    ("open-flipped", "Door_1", {"Ouverture": 1, "Sens": 1}),
+    ("open-flipped", "Door_1", {"Ouverture": 1, "Inverser sens": True}),
+    ("open-mirrored", "Door_1", {"Ouverture": 1, "Inverser charni\u00e8re": True}),
+    ("open-both", "Door_1", {"Ouverture": 1, "Inverser sens": True, "Inverser charni\u00e8re": True}),
     ("half", "Door_1", {"Ouverture": 0.5}),
     ("short-angle", "Door_1", {"Ouverture": 1, "AngleMax": 60}),
 ]
 for _id in (*(f"Door_{k}" for k in range(1, 9)),
             "Window_1", "Window_2", "Window_3", "Window_4", "Window_5"):
     RIGS += [(f"closed-{_id}", _id, {}), (f"open-{_id}", _id, {"Ouverture": 1}),
-             (f"flipped-{_id}", _id, {"Ouverture": 1, "Sens": 1})]
+             (f"flipped-{_id}", _id, {"Ouverture": 1, "Inverser sens": True}),
+             (f"mirrored-{_id}", _id, {"Ouverture": 1, "Inverser charni\u00e8re": True}),
+             (f"closed-mirrored-{_id}", _id, {"Inverser charni\u00e8re": True}),
+             (f"closed-flipped-{_id}", _id, {"Inverser sens": True})]
 
 
 @pytest.fixture(scope="module")
@@ -340,7 +345,7 @@ def _plan_dir(vec):
 
 
 def _swing_direction(arch, el):
-    """Blender plan direction the leaves swing to at Sens = 0: the interior normal, reversed by `swing: out`; on a partition,
+    """Blender plan direction the leaves swing to with "Inverser sens" unchecked: the interior normal, reversed by `swing: out`; on a partition,
     face B faces the other way."""
     host = _element(arch, el["host"])
     az = _value(arch, host["params"]["azimuth"])
@@ -362,7 +367,8 @@ def test_joinery_objects(scene):
     for oid in JOINERY:
         root = objects[oid]
         assert root["type"] == "EMPTY" and root["collections"] == ["Menuiseries"]
-        assert root["props"] == {"Ouverture": 0.0, "Sens": 0, "AngleMax": 90.0}, oid
+        assert root["props"] == {"Ouverture": 0.0, "Inverser sens": False, "Inverser charni\u00e8re": False, "AngleMax": 90.0}, oid
+        assert all(type(root["props"][k]) is bool for k in ("Inverser sens", "Inverser charni\u00e8re")), "checkboxes, not integers"
         frame = objects[f"{oid}_Frame"]
         assert frame["parent"] == oid and frame["collections"] == ["Menuiseries"] and frame["materials"] == ["Menuiserie"]
         leaves = [n for n in objects if n.startswith(f"{oid}_Leaf_")]
@@ -409,11 +415,16 @@ def test_hinge_side_and_swing_direction(scene, oid):
     el, leaf = _element(arch, oid), f"{oid}_Leaf_1"
     f = _swing_direction(arch, el)
     left = np.array([-f[1], f[0]])  # the viewer's left when facing the swing direction
-    closed, opened, flipped = (facts["rigs"][f"{kind}-{oid}"][leaf] for kind in ("closed", "open", "flipped"))
-    hinge = np.array(closed["world_origin"])[:2]
-    assert np.sign((hinge - np.array(facts["objects"][oid]["location"])[:2]) @ left) == (1 if el.get("hinge", "left") == "left" else -1)
+    rig = facts["rigs"]
+    closed, opened, flipped, mirrored = (rig[f"{kind}-{oid}"][leaf] for kind in ("closed", "open", "flipped", "mirrored"))
+    centre = np.array(facts["objects"][oid]["location"])[:2]
+    hinge, other = (np.array(pose["world_origin"])[:2] for pose in (closed, rig[f"closed-mirrored-{oid}"][leaf]))
+    side = 1 if el.get("hinge", "left") == "left" else -1
+    assert np.sign((hinge - centre) @ left) == side
+    assert np.sign((other - centre) @ left) == -side, "Inverser charni\u00e8re moves the hinge to the other jamb"
     assert (np.array(opened["world_centre"])[:2] - hinge) @ f > 0.05, "opens towards the swing direction"
-    assert (np.array(flipped["world_centre"])[:2] - hinge) @ f < -0.05, "Sens flips it"
+    assert (np.array(flipped["world_centre"])[:2] - hinge) @ f < -0.05, "Inverser sens flips it"
+    assert (np.array(mirrored["world_centre"])[:2] - np.array(mirrored["world_origin"])[:2]) @ f > 0.05, "still opens towards the swing"
 
 
 @needs_blender
@@ -423,11 +434,27 @@ def test_rig_hinged(scene):
     assert _pose(facts, "closed", leaf)["rotation_z_deg"] == pytest.approx(0, abs=0.01)
     assert _pose(facts, "open", leaf)["rotation_z_deg"] == pytest.approx(90, abs=0.5)
     assert _pose(facts, "open-flipped", leaf)["rotation_z_deg"] == pytest.approx(-90, abs=0.5)
+    assert _pose(facts, "open-mirrored", leaf)["driven_rotation_z_deg"] == pytest.approx(-90, abs=0.5), "the sign follows the mirrored hinge"
+    assert _pose(facts, "open-both", leaf)["driven_rotation_z_deg"] == pytest.approx(90, abs=0.5)
     assert _pose(facts, "half", leaf)["rotation_z_deg"] == pytest.approx(45, abs=0.5)
     assert _pose(facts, "short-angle", leaf)["rotation_z_deg"] == pytest.approx(60, abs=0.5)
     for key in ("open", "half"):  # the hinge stays where it is
         assert _pose(facts, key, leaf)["location"] == pytest.approx(_pose(facts, "closed", leaf)["location"], abs=1e-4)
+    assert _pose(facts, "open-flipped", leaf)["location"] == pytest.approx(_pose(facts, "closed", leaf)["location"], abs=1e-4)
+    closed, mirrored = _pose(facts, "closed", leaf)["location"], _pose(facts, "open-mirrored", leaf)["location"]
+    assert mirrored[0] == pytest.approx(-closed[0], abs=1e-4) and mirrored[1:] == pytest.approx(closed[1:], abs=1e-4)
     assert facts["objects"][leaf]["drivers"] > 0 and facts["objects"]["Door_1"]["props"]["Ouverture"] == 0
+
+
+@needs_blender
+@pytest.mark.parametrize("oid", ["Door_1", "Window_2"])
+def test_leaf_is_mirrored_with_the_hinge(scene, oid):
+    _, _, facts = scene
+    for name in (f"{oid}_Leaf_1", f"{oid}_Glass_1") if oid.startswith("Window") else (f"{oid}_Leaf_1",):
+        lo, hi = facts["rigs"][f"closed-{oid}"][name]["extent_x"]
+        mirrored = facts["rigs"][f"closed-mirrored-{oid}"][name]["extent_x"]
+        assert mirrored == pytest.approx([-hi, -lo], abs=1e-4), name
+        assert facts["objects"][name]["drivers_simple"], "drivers use the simple-expression subset"
 
 
 @needs_blender
@@ -442,6 +469,8 @@ def test_rig_double(scene, oid, glass):
     assert flipped[one]["rotation_z_deg"] == pytest.approx(-90, abs=0.5) and flipped[two]["rotation_z_deg"] == pytest.approx(90, abs=0.5)
     closed = facts["rigs"][f"closed-{oid}"]
     assert closed[one]["location"][0] < 0 < closed[two]["location"][0], "hinges at the two jambs"
+    for name in (one, two):
+        assert facts["rigs"][f"mirrored-{oid}"][name] == opened[name], "no hinge side to switch on two leaves"
     if glass:
         for k in (1, 2):  # the glass follows its leaf
             assert opened[f"{oid}_Glass_{k}"]["rotation_z_deg"] == pytest.approx(opened[f"{oid}_Leaf_{k}"]["rotation_z_deg"], abs=0.5)
@@ -463,11 +492,15 @@ def _width(facts, leaf):
 def test_rig_sliding(scene, oid, leaf, direction):
     _, _, facts = scene
     closed, opened = facts["rigs"][f"closed-{oid}"][leaf], facts["rigs"][f"open-{oid}"][leaf]
-    flipped = facts["rigs"][f"flipped-{oid}"][leaf]
+    mirrored = facts["rigs"][f"mirrored-{oid}"][leaf]
     travel = np.array(opened["location"]) - np.array(closed["location"])
     assert travel[0] == pytest.approx(direction * _width(facts, leaf), abs=0.002)
     assert travel[1:] == pytest.approx([0, 0], abs=1e-4) and opened["rotation_z_deg"] == pytest.approx(0, abs=0.01)
-    assert flipped["location"][0] - closed["location"][0] == pytest.approx(-direction * _width(facts, leaf), abs=0.002)
+    assert mirrored["location"][0] == pytest.approx(-closed["location"][0] - direction * _width(facts, leaf), abs=0.002), "slides to the other side"
+    assert mirrored["location"][1] == pytest.approx(closed["location"][1], abs=1e-4)
+    flipped = facts["rigs"][f"flipped-{oid}"][leaf]
+    assert flipped["location"][0] == pytest.approx(opened["location"][0], abs=1e-4), "Inverser sens does not change the side it slides to"
+    assert flipped["location"][1] == pytest.approx(-closed["location"][1], abs=1e-4), "it runs on the other face of the wall"
 
 
 @needs_blender
@@ -489,6 +522,9 @@ def test_rig_sliding_window_moves_one_leaf(scene):
     mover = next(k for k in moved if k not in still)
     assert abs(moved[mover]) == pytest.approx(_width(facts, mover), abs=0.002)
     assert opened["Window_3_Glass_1"]["location"][1] != opened["Window_3_Glass_2"]["location"][1], "two rails"
+    mirrored = facts["rigs"]["mirrored-Window_3"]
+    for k in moved:
+        assert mirrored[k]["location"][0] == pytest.approx(-opened[k]["location"][0], abs=1e-4), "both panes swap sides"
 
 
 @needs_blender
@@ -519,7 +555,7 @@ def test_panels_are_evenly_split_and_handle_optional(scene):
 def test_static_glb_closed(scene):
     ctx, _, facts = scene
     raw = (ctx.out / "architecture.glb").read_bytes()
-    assert b"Ouverture" not in raw and b"Sens" not in raw
+    assert b"Ouverture" not in raw and b"Inverser" not in raw
     gltf = read_glb(ctx.out / "architecture.glb")
     nodes = {n["name"]: n for n in gltf["nodes"]}
     assert {"Door_1", "Door_1_Frame", "Door_1_Leaf_1", "Window_1_Glass_2"} <= set(nodes)
