@@ -15,7 +15,9 @@ from room_model.frame import world_to_room
 DEFAULT_BLENDER = "/mnt/c/Program Files (x86)/Steam/steamapps/common/Blender/blender.exe"
 BUILD_SCRIPT = Path(__file__).resolve().parents[1] / "blender" / "build_scene.py"
 SCAN_FILE = "scan_decimated.ply"
-OUTPUTS = ("architecture.blend", "architecture.glb", "renders/top.png", "renders/persp_1.png", "renders/persp_2.png")
+OUTPUTS = ("architecture.blend", "architecture.glb", "renders/top.png", "renders/persp_1.png", "renders/persp_2.png",
+           "renders/open.png")
+BACKUPS = ("architecture.blend1",)  # Blender's own copy of the file it overwrites
 
 
 def blender_executable() -> str:
@@ -97,6 +99,8 @@ def run(ctx: StageContext) -> Path:
     scan = _write_scan(ctx)
     if scan is not None:
         args += ["--scan", scan]
+    for name in (*OUTPUTS, *BACKUPS):  # so a run that writes nothing cannot pass on the previous run's files
+        (ctx.out / name).unlink(missing_ok=True)
     run_blender(args, ctx.out / "blender.log")
     missing = [name for name in OUTPUTS if not (ctx.out / name).exists()]
     if missing:

@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from arch import collections as collection_names  # noqa: E402
 from arch import frame, materials, render, scan, shell  # noqa: E402
 
-HOOKS = ("joinery", "niches", "mouldings", "dimensions", "textures")  # later tasks: arch/<name>.py with add(arch, collections)
+HOOKS = ("joinery", "niches", "mouldings", "dimensions", "textures")  # arch/<name>.py with add(arch, collections, ctx)
 
 
 def _hook(name: str):
@@ -29,24 +29,36 @@ def _hook(name: str):
         raise
 
 
+def check_linked(hook: str, objects: list) -> None:
+    """Raises when a hook returned an object that no collection of the scene holds (it would vanish from saves and exports)."""
+    loose = sorted(o.name for o in objects if o.name not in bpy.context.scene.objects)
+    if loose:
+        raise RuntimeError(f"arch.{hook} returned objects linked to no collection of the scene: {', '.join(loose)}")
+
+
 def _clear() -> None:
     for datablocks in (bpy.data.objects, bpy.data.collections, bpy.data.meshes, bpy.data.cameras, bpy.data.lights):
         for item in list(datablocks):
             datablocks.remove(item)
 
 
-def build(arch: dict, textures: dict | None, scan_path: str | None) -> None:
-    """Builds the whole scene in the current file; `textures` is reserved for arch/textures.py."""
+def build(arch: dict, textures: dict | None, scan_path: str | None, out_dir: str) -> None:
+    """Builds the whole scene in the current file.
+
+    Each hook arch.<name> exposes `add(arch, collections, ctx) -> list[bpy.types.Object]` with
+    ctx = {"textures": dict | None, "scan_path": str | None, "out_dir": str}; the objects it returns must be linked.
+    """
     _clear()
     scene = bpy.context.scene
     scene.unit_settings.system, scene.unit_settings.scale_length = "METRIC", 1.0
     colls = collection_names.create(scene)
     mats = materials.ensure_materials()
     shell.build(arch, colls, mats)
+    ctx = {"textures": textures, "scan_path": scan_path, "out_dir": out_dir}
     for name in HOOKS:
         module = _hook(name)
         if module is not None:
-            module.add(arch, colls)
+            check_linked(name, module.add(arch, colls, ctx))
     if scan_path:
         scan.add(scan_path, colls["Scan"])
     bpy.context.view_layer.update()
@@ -76,7 +88,7 @@ def main(argv: list[str]) -> None:
     if args.textures:
         with open(args.textures, encoding="utf-8") as fh:
             textures = json.load(fh)
-    build(arch, textures, args.scan)
+    build(arch, textures, args.scan, args.out_dir)
     colls = {c.name: c for c in bpy.data.collections}
     os.makedirs(args.out_dir, exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=os.path.join(args.out_dir, "architecture.blend"))

@@ -12,6 +12,7 @@ EYE_HEIGHT = 1.6  # m above the floor
 VIEW_MARGIN = 0.6  # m a perspective camera keeps from the walls
 FOCAL_MM = 16.0
 BACKGROUND = (0.62, 0.72, 0.82)
+OPEN_RATIO = 0.6  # Ouverture of every door and window in renders/open.png
 
 
 def _inside(poly: list, p: tuple, margin: float) -> bool:
@@ -73,7 +74,7 @@ def _setup(scene: bpy.types.Scene) -> None:
 
 
 def render_views(arch: dict, out_dir: str) -> None:
-    """Writes renders/{top,persp_1,persp_2}.png; the ceilings are hidden for the renders only."""
+    """Writes renders/{top,persp_1,persp_2,open}.png (open: plan view, doors and windows at OPEN_RATIO); ceilings hidden meanwhile."""
     scene = bpy.context.scene
     _setup(scene)
     floor = frame.element(arch, "Floor")
@@ -95,6 +96,16 @@ def render_views(arch: dict, out_dir: str) -> None:
         scene.camera = cam
         scene.render.filepath = os.path.join(out_dir, "renders", f"{name}.png")
         bpy.ops.render.render(write_still=True)
+    rigged = [o for o in bpy.data.objects if o.type == "EMPTY" and "Ouverture" in o]
+    for o in rigged:
+        o["Ouverture"] = OPEN_RATIO
+        o.update_tag()
+    scene.camera = views[0][1]
+    scene.render.filepath = os.path.join(out_dir, "renders", "open.png")
+    bpy.ops.render.render(write_still=True)
+    for o in rigged:
+        o["Ouverture"] = 0.0
+        o.update_tag()
     for c, hidden in saved:
         c.hide_render = hidden
     for _, cam in views:
