@@ -33,6 +33,12 @@ def ctx(anchored, tmp_path):
     """A private copy of the anchored outputs, so that each test writes its own answers."""
     out = tmp_path / "out"
     shutil.copytree(anchored.out, out)
+    doc = json.loads((out / "openings.json").read_text(encoding="utf-8"))
+    for o in doc["openings"]:  # the synthetic leaf fills its hole: a frameless joinery, no visible jamb
+        if o["kind"] in ("door", "window"):
+            o["params"]["jamb_width"] = pid = f"opening.{o['id']}.jamb_width"
+            doc["parameters"][pid] = {"value": 0.0, "sigma": 0.0, "unit": "m", "source": "assumed"}
+    (out / "openings.json").write_text(json.dumps(doc), encoding="utf-8")
     return dataclasses.replace(anchored, out=out)
 
 

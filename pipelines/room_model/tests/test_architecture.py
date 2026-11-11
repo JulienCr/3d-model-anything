@@ -887,10 +887,24 @@ def test_a_door_leaf_gets_its_own_parameters_and_the_hole_stays(env):
     assert "photo_anchored" in door["flags"] and "to_verify" not in door["flags"]
 
 
-def test_a_leaf_larger_than_its_hole_is_flagged_to_verify(env):
+@pytest.mark.parametrize("excess", [0.10, 0.09])
+def test_a_leaf_that_cannot_fit_its_hole_is_flagged_and_not_applied(env, excess):
+    openings_doc = copy.deepcopy(env.openings_doc)  # a RoomPlan-grade hole: 3 cm sigma
+    door = next(o for o in openings_doc["openings"] if o["id"] == "Door_1")
+    hole = openings_doc["parameters"][door["params"]["width"]]
+    hole.update(sigma=0.03, source="roomplan")
+    item = _door(env, width=hole["value"] + excess)
+    arch = architecture.build(env.model_doc, openings_doc, None, None, env.ctx, None, _anchors(Door_1=item))
+    el = _element(arch, "Door_1")
+    assert "leaf_width" not in el["params"] and "to_verify" in el["flags"]
+    assert "Door_1.leaf_width" in arch["diagnostics"]["anchor"]["kept"] and "exceeds" in arch["diagnostics"]["anchor"]["reasons"]["Door_1.leaf_width"]
+    assert "leaf_height" in el["params"]  # the height pair fits and stays
+
+
+def test_a_leaf_that_fits_with_its_jambs_is_applied(env):
     hole = _param(env.arch, "Door_1", "width")["value"]
-    arch = env.merge(anchors=_anchors(Door_1=_door(env, width=hole + 0.10)))
-    assert "to_verify" in _element(arch, "Door_1")["flags"] and arch["diagnostics"]["anchor"]["to_verify"] == ["Door_1"]
+    arch = env.merge(anchors=_anchors(Door_1=_door(env, width=hole - 2 * anchor.JAMB_VISIBLE)))
+    assert "leaf_width" in _element(arch, "Door_1")["params"] and "to_verify" not in _element(arch, "Door_1")["flags"]
 
 
 def test_an_opening_on_face_b_takes_the_photo_values_with_endpoints_at_their_depth(env):
@@ -996,7 +1010,7 @@ def test_llm_corners_stay_where_the_photo_measures_only_part_of_the_element(env)
     item = _door(env)
     item["edges"]["top"].update(views=1)  # the height pair fails its gates
     arch = env.merge(answers, anchors=_anchors(Door_1=item))
-    assert _vision(arch)["superseded"] == [] and _param(arch, "Door_1", "width")["source"] == "llm"
+    assert _vision(arch)["superseded"] == [] and "Door_1.width" in arch["diagnostics"]["anchor"]["llm_not_applied"]
     assert "leaf_width" in _element(arch, "Door_1")["params"] and "leaf_height" not in _element(arch, "Door_1")["params"]
 
 
@@ -1008,3 +1022,15 @@ def test_an_llm_value_then_a_photo_pair_keeps_the_llm_value_of_that_pair_only(en
     arch = env.merge(answers, anchors=_anchors(Niche_1=niche))
     assert _param(arch, "Niche_1", "width")["source"] == "photo" and _param(arch, "Niche_1", "width")["llm_value"] == pytest.approx(0.35, abs=0.005)
     assert _param(arch, "Niche_1", "height")["source"] == "llm"
+
+
+def test_door_hole_keeps_its_scan_extent_once_the_photo_measured_the_leaf(env):
+    rect = _opening_rect(env.arch, "Door_1", widen=0.04)
+    answers = _answers(env, elements=[{"id": "Door_1", "corners": _corners(env, ["Door_1-a", "Door_1-b"], rect)}])
+    item = _door(env)
+    item["edges"]["top"].update(views=1)  # only the width pair applies: corners are not superseded
+    arch = env.merge(answers, anchors=_anchors(Door_1=item))
+    assert _param(arch, "Door_1", "width") == _param(env.arch, "Door_1", "width")
+    noted = arch["diagnostics"]["anchor"]["llm_not_applied"]
+    assert noted["Door_1.width"] == pytest.approx(_param(env.merge(answers), "Door_1", "width")["value"])
+    assert "llm_corrected" not in _element(arch, "Door_1")["flags"]

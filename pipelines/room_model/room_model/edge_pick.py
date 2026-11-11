@@ -46,8 +46,9 @@ QUESTIONS = {
     "niche": {"left": "the inner face of the left jamb (tableau) of the niche, where the recess starts, not a frame around it",
               "right": "the inner face of the right jamb (tableau) of the niche, where the recess starts",
               "bottom": "the top of the niche sill (appui)", "top": "the underside of the niche head (linteau)"},
-    "opening": {"left": "the inner face of the left jamb (tableau) of the passage, not a casing around it",
-                "right": "the inner face of the right jamb (tableau) of the passage", "top": "the underside of the lintel (linteau)",
+    "opening": {"left": "the arris where the left jamb (tableau) of the passage meets the wall face on this side (the near corner), not a casing nor the far side",
+                "right": "the arris where the right jamb (tableau) meets the wall face on this side (the near corner), not a casing nor the far side",
+                "top": "the arris where the lintel (linteau) meets the wall face on this side",
                 "bottom": "the floor of the passage"},
 }
 

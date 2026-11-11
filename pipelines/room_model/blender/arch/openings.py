@@ -89,6 +89,11 @@ def resolve(arch: dict, el: dict) -> Layout:
             leaf_h = max(h - ends * jamb, MIN_LEAF)
             flags.append("to_verify")
     cut_w, cut_h = leaf_w + 2 * jamb, leaf_h + ends * jamb
+    low, high = max(centre - cut_w / 2, outer_centre - w / 2), min(centre + cut_w / 2, outer_centre + w / 2)
+    if high - low < cut_w - 1e-9 or cut_h > h + 1e-9:  # the cut never opens the wall beyond the measured outer extent
+        flags.append("to_verify")
+        centre, cut_w, cut_h = (low + high) / 2, high - low, min(cut_h, h)
+        leaf_w, leaf_h = cut_w - 2 * jamb, cut_h - ends * jamb
     bottom = sill if door else sill + max(0.0, (h - cut_h) / 2)
     casings = (0.0,) * 4
     if casing is not None:  # what is left between each edge of the cut and the outer extent

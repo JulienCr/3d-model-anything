@@ -90,3 +90,22 @@ def test_leaf_centre_defaults_to_the_element_centre():
 def test_a_window_without_a_casing_starts_at_its_cut_not_at_its_outer_sill():
     lay = _layout("window", sill=0.08, height=1.2, width=1.0, leaf_width=0.8, leaf_height=0.9)
     assert lay.casings == (0.0,) * 4 and lay.lowest == lay.bottom == pytest.approx(0.08 + (1.2 - 1.0) / 2)
+
+
+@pytest.mark.parametrize("frame", [None, {"width": 0.07}])
+def test_a_leaf_wider_than_the_outer_extent_never_cuts_beyond_it(frame):
+    lay = _layout("door", width=0.9, leaf_width=0.95, leaf_height=2.0, frame=frame)
+    low, high = lay.span
+    assert low >= 1.0 - 0.45 - 1e-9 and high <= 1.0 + 0.45 + 1e-9 and "to_verify" in lay.flags
+    assert lay.leaf_w == pytest.approx(lay.cut_w - 2 * J)
+
+
+def test_a_leaf_off_centre_is_clamped_on_its_overhanging_side():
+    lay = _layout("door", width=0.9, leaf_width=0.7, leaf_height=2.0, leaf_center_s=1.15)
+    assert lay.span[1] == pytest.approx(1.45) and "to_verify" in lay.flags
+
+
+def test_the_pipeline_jamb_matches_the_scene_jamb():
+    from room_model import anchor
+
+    assert anchor.JAMB_VISIBLE == J

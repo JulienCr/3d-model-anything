@@ -107,12 +107,14 @@ def build(model_doc: dict, openings_doc: dict, vision: dict | None = None, tape:
             "diagnostics": copy.deepcopy({**model_doc["diagnostics"], "openings": openings_doc["diagnostics"]}), "dimensions": []}
     if anchors and edge_pick.usable(picks):
         anchors = edge_pick.merge(anchors, picks, arch["parameters"]["floor.level"]["sigma"])
+    scan = copy.deepcopy(arch["parameters"])
     if llm_merge.usable(vision):
         angle = anchor.pose_angle_of(anchors or {})
         anchored = {i for i, item in (anchors or {}).get("elements", {}).items() if anchor.fully_applied(item, angle)}
         arch["diagnostics"]["vision"] = llm_merge.apply(arch, vision, ctx, frozenset(anchored))
     if anchors:
         arch["diagnostics"]["anchor"] = anchor.apply(arch, anchors)
+        arch["diagnostics"]["anchor"]["llm_not_applied"] = anchor.keep_hole_from_scan(arch, scan)
     arch["dimensions"] = copy.deepcopy(model_doc["dimensions"])
     if tape:
         arch["diagnostics"]["tape"] = tape_merge.apply(arch, tape)

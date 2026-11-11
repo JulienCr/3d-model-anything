@@ -6,6 +6,7 @@ face is solved across views (`ortho.triangulate`). Floor-based bottoms are the f
 """
 from __future__ import annotations
 
+import copy
 import json
 import time
 import warnings
@@ -429,6 +430,7 @@ RMS_VIEWS = 2  # the view spread allowed is two single-view errors (two views ea
 # m; RoomPlan's own stated accuracy: a photo measure looser than the coarsest scan source is a depth ambiguity
 # (two views without baseline), not a measurement.
 PLAUSIBLE_SIGMA = 0.03
+JAMB_VISIBLE = 0.05  # m; mirrors blender/arch/openings.JAMB_VISIBLE (a test ties them): a frame's visible sightline
 DISAGREE = 3.0  # combined sigmas beyond which photo and scan disagree: flagged to_verify, never settled silently
 MEASURED = ("roomplan", "lidar")  # sources that measured the hole; `assumed` and `llm` (clicks) did not
 
@@ -451,18 +453,27 @@ def _param_doc(m: dict) -> dict:
     return {"value": float(m["value"]), "sigma": float(m["sigma"]), "unit": "m", "source": "photo"}
 
 
+def _leaf_too_large(arch: dict, el: dict, names, item: dict) -> str | None:
+    """Why the leaf cannot fit its hole, or None: the leaf plus its visible jambs (one at the head of a door, which
+    has none at the floor) must stay within the outer extent plus that extent's sigma and the leaf's own."""
+    name = "width" if "width" in names else "height"
+    jambs = 2 if name == "width" or el["kind"] != "door" else 1
+    pid = el["params"].get("jamb_width")
+    jamb = arch["parameters"][pid]["value"] if pid else JAMB_VISIBLE
+    leaf, hole = item["measures"][name], arch["parameters"][el["params"][name]]
+    if leaf["value"] + jambs * jamb > hole["value"] + hole["sigma"] + leaf["sigma"]:
+        return (f"leaf {name} {leaf['value']:.3f} m + {jambs} jamb(s) {jamb:.3f} m exceeds the hole "
+                f"{hole['value']:.3f} +- {hole['sigma']:.3f} m")
+    return None
+
+
 def _set_leaf(arch: dict, el: dict, names, item: dict) -> bool:
-    """leaf_<name> parameters beside the hole's; True when the leaf is larger than its hole beyond DISAGREE sigmas."""
+    """leaf_<name> parameters beside the hole's (`_leaf_too_large` is checked first); never a disagreement."""
     prefix = el["params"]["width"].rsplit(".", 1)[0]
-    wrong = False
     for name in names:
-        m = item["measures"][name]
         pid = el["params"][f"leaf_{name}"] = f"{prefix}.leaf_{name}"
-        arch["parameters"][pid] = _param_doc(m)
-        if name in ("width", "height"):
-            hole = arch["parameters"][el["params"][name]]
-            wrong |= m["value"] - hole["value"] > DISAGREE * np.hypot(m["sigma"], hole["sigma"])
-    return wrong
+        arch["parameters"][pid] = _param_doc(item["measures"][name])
+    return False
 
 
 def _replace(arch: dict, el: dict, names, item: dict) -> bool:
@@ -484,6 +495,24 @@ def _replace(arch: dict, el: dict, names, item: dict) -> bool:
     return wrong
 
 
+def keep_hole_from_scan(arch: dict, scan: dict) -> dict:
+    """{"<id>.<name>": LLM value} put back to the scan value: a door or window whose leaf the photos measured keeps
+    its hole (`width`, `height`, `center_s`, `sill`: the LiDAR outer extent) from the scan, as corner clicks on a
+    door are ambiguous (leaf, frame or casing) and would redefine the extent the casings are built from."""
+    out = {}
+    for el in arch["elements"]:
+        if el["kind"] not in LEAF_KINDS or not el.get("leaf_edges"):
+            continue
+        for name in ("center_s", "width", "height", "sill"):
+            pid = el["params"].get(name)
+            if pid and arch["parameters"][pid]["source"] == "llm" and pid in scan:
+                out[f"{el['id']}.{name}"] = arch["parameters"][pid]["value"]
+                arch["parameters"][pid] = copy.deepcopy(scan[pid])
+        if any(k.startswith(f"{el['id']}.") for k in out):
+            el["flags"] = [f for f in el["flags"] if f not in ("llm_corrected", "llm_single_view", "llm_inconsistent")]
+    return out
+
+
 def pose_angle_of(doc: dict) -> float:
     return float((doc.get("diagnostics") or {}).get("pose_angle", 0.0))
 
@@ -499,11 +528,12 @@ def apply(arch: dict, doc: dict) -> dict:
 
     Doors and windows get leaf_* parameters and `leaf_edges` depths, the hole's width and height stay; niches and
     openings get their own parameters replaced (below tape) and `edges` depths. A disagreement beyond DISAGREE
-    sigmas with a measured source, or a leaf larger than its hole, flags the element `to_verify`.
+    sigmas with a measured source flags the element `to_verify`; so does a leaf that cannot fit its hole
+    (`_leaf_too_large`), whose pair is then kept out with its reason under `reasons`.
     """
     elements, pose_angle = {e["id"]: e for e in arch["elements"]}, pose_angle_of(doc)
     report = {"anchored": [], "candidates": [], "open": [], "no_view": [], "no_host": [], "unknown": [], "kept": [],
-              "to_verify": []}
+              "reasons": {}, "to_verify": []}
     for ident, item in sorted(doc.get("elements", {}).items()):
         el = elements.get(ident)
         if el is None or el["kind"] != item.get("kind"):
@@ -516,6 +546,12 @@ def apply(arch: dict, doc: dict) -> dict:
         for sides, names in PAIRS.items():
             if not all(_edge_ok(item["edges"].get(side), pose_angle) for side in sides):
                 report["kept"] += [f"{ident}.{name}" for name in names if name in el["params"]]
+                continue
+            reason = _leaf_too_large(arch, el, names, item) if leaf else None
+            if reason:
+                report["kept"] += [f"{ident}.leaf_{name}" for name in names]
+                report["reasons"].update({f"{ident}.leaf_{name}": reason for name in names})
+                wrong = True
                 continue
             wrong |= (_set_leaf if leaf else _replace)(arch, el, names, item)
             applied |= set(sides)
