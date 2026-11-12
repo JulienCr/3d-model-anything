@@ -16,6 +16,7 @@ Source: `pipelines/room_model/room_model/overrides.py`. Format `{"<element id>":
 | `through` | niche only | `true` = goes all the way through its host; `false` = recess with an assumed depth. |
 | `dividers` | niche only | Number of vertical dividers. |
 | `shelves_count` | niche only | Number of shelves, evenly spaced. |
+| `prefer` | any element with parameters | `{"<parameter name>": "scan"}` (or the scan's own source, `lidar`/`roomplan`): the parameter goes back to the value the scan gave, over an LLM, photo or tape value. Written by the `room-reconcile` skill for `prefer:` actions. |
 | `remove` | door, window, niche, opening, panel_frame, cornice, skirting | `true` deletes the element and parameters nothing else uses. Other kinds (walls, floor, ceilings) cannot be removed. |
 
 Enums come from `pipelines/room_model/room_model/vision_schema.json` and the catalogue; re-read them if the code moved, never invent a value.

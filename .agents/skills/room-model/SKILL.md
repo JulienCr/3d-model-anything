@@ -87,7 +87,7 @@ Apply it:
 
 `--tape` (on `architecture` and `all`) copies the file to `<out>/measurements.json`. Effects: an opening dimension replaces the parameter it measures; a ceiling height moves the ceiling; a station moves the wall of its pair with the larger offset sigma (bounded); a leaf larger than its hole is refused. Whatever cannot be applied is listed in `report.md` (`Mesures au mètre`) and `diagnostics.tape`; relay it. Compare scan, LLM and tape: `compare-tape --arch <out>/architecture.json --tape <out>/measurements.json -o tape.md`.
 
-Reconciling human measurements against the model (conflicts, outliers, deciding which source wins) is the job of the `room-reconcile` skill. It is being written and may not exist yet; if `.agents/skills/room-reconcile/` is absent, do the tape application above and flag suspicious values to the user yourself.
+Reconciling human measurements against the model (conflicts, outliers, deciding which source wins) is the job of the `room-reconcile` skill (`.agents/skills/room-reconcile/`): hand over to it once the survey is filled. `architecture` writes `reconcile.json` and `reconcile.md` for it.
 
 ## Overrides: translating the user's requests
 
