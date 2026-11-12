@@ -114,6 +114,7 @@ class Room:
                 self.seeded_from_outline.append(self.walls[-1].ident)
         used = {raw[i]["identifier"] for i in matched.values()}
         self.off_outline = [w["identifier"] for w in raw if w["identifier"] not in used]
+        self.off_outline_walls = [self._free_wall(w, T) for w, T in zip(raw, wall_t) if w["identifier"] not in used]
         self._attach_doors(data["doors"], w2r)
 
     def _match_walls(self, raw: list, wall_t: list) -> dict[int, int]:
@@ -133,6 +134,15 @@ class Room:
             if candidates:
                 matched[k] = min(candidates)[3]
         return matched
+
+    @staticmethod
+    def _free_wall(w: dict, T: np.ndarray) -> Wall:
+        """A RoomPlan wall that stands on no outline edge; `edge` is its own extent at the wall's mid height."""
+        x, c = T[:3, 0].copy(), T[:3, 3].copy()
+        half = float(w["dimensions"][0]) / 2
+        return Wall(label="", ident=w["identifier"], c=c, x=x, y=T[:3, 1].copy(), n=T[:3, 2].copy(),
+                    w=2 * half, h=float(w["dimensions"][1]), poly=[(float(p[0]), float(p[1])) for p in w["polygonCorners"]],
+                    edge=(c - x * half, c + x * half))
 
     def _seed_wall(self, k: int, a_pt: np.ndarray, b_pt: np.ndarray, height: float) -> Wall:
         d = (b_pt - a_pt)[[0, 2]]

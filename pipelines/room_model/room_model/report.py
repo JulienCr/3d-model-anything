@@ -15,6 +15,10 @@ WALL_FLAGS = {
     "seeded_from_outline": "mur absent de la liste RoomPlan, initialisé depuis le contour du sol",
     "near_parallel_corner": "angle quasi plat avec un mur voisin, coin obtenu par projection",
 }
+PARTITION_FLAGS = {
+    "one_face_seen": "une seule face vue par le LiDAR, épaisseur supposée",
+    "roomplan_fallback": "cloison non vue par le LiDAR, position RoomPlan conservée",
+}
 GENERAL_FLAGS = {
     "floor:roomplan_fallback": "sol non vu par le LiDAR, niveau RoomPlan conservé",
     "columns:no_ceiling": "aucun plafond détecté, poteaux non recherchés",
@@ -52,7 +56,7 @@ class _Report:
         self.doc, self.poses = doc, poses
         self.params = doc["parameters"]
         self.diag = doc["diagnostics"]
-        self.els = {k: [e for e in doc["elements"] if e["kind"] == k] for k in ("floor", "wall", "ceiling", "beam", "column")}
+        self.els = {k: [e for e in doc["elements"] if e["kind"] == k] for k in ("floor", "wall", "partition", "ceiling", "beam", "column")}
         self.floor_y = self.params["floor.level"]["value"]
 
     def p(self, pid: str) -> dict:
@@ -67,7 +71,7 @@ class _Report:
 
     def sections(self) -> list[tuple[str, list[str]]]:
         return [("Entrées", self.inputs()), ("Repère", self.frame()), ("Recalage", self.registration()),
-                ("Murs", self.walls()), ("Sol", self.floor()), ("Plafonds", self.ceilings()), ("Poutres", self.beams()),
+                ("Murs", self.walls()), ("Cloisons", self.partitions()), ("Sol", self.floor()), ("Plafonds", self.ceilings()), ("Poutres", self.beams()),
                 ("Poteaux", self.columns()), ("Surfaces verticales non expliquées", self.unexplained()), ("Éléments horizontaux non expliqués (réseaux, luminaires ?)", self.horizontal()),
                 ("Orthogonalité", self.orthogonality()), ("Alertes", self.alerts()), ("Épaisseurs", self.thickness())]
 
@@ -75,7 +79,7 @@ class _Report:
         src, n = self.doc["source"], self.doc
         stations = [d for d in n["dimensions"] if d["kind"] in STATION_KINDS]
         counts = " ; ".join(f"{name} : {len(self.els[k])}" for name, k in
-                            (("murs", "wall"), ("plafonds", "ceiling"), ("poutres", "beam"), ("poteaux", "column")))
+                            (("murs", "wall"), ("cloisons", "partition"), ("plafonds", "ceiling"), ("poutres", "beam"), ("poteaux", "column")))
         return [f"- Capture : `{src['capture']}`, pièce {src['room']}",
                 f"- Modèle : `{n['schema']}`, version `{n['version']}`",
                 f"- Éléments : {counts}",
@@ -108,6 +112,17 @@ class _Report:
                          _cell(d["support_m2"]), f"{_cell(d['offset_vs_roomplan_cm'])} cm, {_cell(d['angle_vs_roomplan_deg'])}°",
                          _cell(d["tilt_deg"], 2) + ("" if d["tilt_deg"] is None else "°"), alerts])
         return _table(["Mur", "Source", "σ cm", "RMS cm", "Appui m²", "Écart / angle vs RoomPlan", "Inclinaison", "Alertes"], rows)
+
+    def partitions(self) -> list[str]:
+        support = {d["id"]: d for d in self.diag.get("partitions", [])}
+        rows = []
+        for el in self.els["partition"]:
+            p, d = el["params"], support.get(el["id"], {})
+            alerts = "; ".join(PARTITION_FLAGS.get(f, f) for f in el["flags"]) or DASH
+            length = float(np.linalg.norm(np.subtract(el["end"], el["start"])))
+            rows.append([el["label"], self.level(p["thickness"]), SOURCES[self.p(p["thickness"])["source"]],
+                         fr(length, 2) + " m", f"{_cell(d.get('support_a_m2'))} / {_cell(d.get('support_b_m2'))}", alerts])
+        return _table(["Cloison", "Épaisseur", "Source", "Longueur", "Appui faces A / B m²", "Alertes"], rows)
 
     def floor(self) -> list[str]:
         d = self.diag["floor"]
@@ -179,8 +194,9 @@ class _Report:
         for el in self.els["wall"]:
             out += [f"- Mur {el['label']} : {WALL_FLAGS.get(f, f)}" for f in el["flags"]]
         out += [f"- {GENERAL_FLAGS[f]}" for f in self.diag["flags"] if f in GENERAL_FLAGS]
-        known = set(GENERAL_FLAGS) | {f"{e['label']}:{f}" for e in self.els["wall"] for f in e["flags"]}
+        known = set(GENERAL_FLAGS) | {f"{e['label']}:{f}" for e in self.els["wall"] + self.els["partition"] for f in e["flags"]}
         out += [f"- {f}" for f in self.diag["flags"] if f not in known]
+        out += [f"- Cloison {e['label']} : {PARTITION_FLAGS.get(f, f)}" for e in self.els["partition"] for f in e["flags"]]
         out += [f"- Poutre {e['id'].split('_')[1]} : {TO_VERIFY}" for e in self.els["beam"] if "to_verify" in e.get("flags", [])]
         out += [f"- Mur RoomPlan hors du contour du sol (cloison ?), ignoré : {i}" for i in self.diag["off_outline_walls"]]
         out += [f"- Porte rattachée à un mur hors contour, ignorée : {i}" for i in self.diag.get("orphan_doors", [])]

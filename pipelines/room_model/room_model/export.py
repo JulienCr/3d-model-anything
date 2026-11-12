@@ -11,7 +11,7 @@ from room_model import meshes, plan_svg, report
 from room_model.context import StageContext, output_path, require
 from room_model.gltf import GltfNode, write_glb
 
-KIND_ORDER = ["floor", "ceiling", "wall", "beam", "column"]
+KIND_ORDER = ["floor", "ceiling", "wall", "partition", "beam", "column"]
 CSV_HEADER = ["id", "kind", "label", "value_cm", "sigma_cm", "source", "elements", "flags"]
 
 
@@ -31,10 +31,11 @@ def build_nodes(doc: dict) -> list[GltfNode]:
             mesh = meshes.floor_mesh(el["polygon"], y0)
         elif kind == "ceiling":
             mesh = meshes.ceiling_mesh(el["region"], value(p["level"]))
-        elif kind == "wall":
+        elif kind in ("wall", "partition"):
             az = value(p["azimuth"])
             normal = (math.cos(az), math.sin(az))
-            mesh = meshes.wall_mesh(el["start"], el["end"], normal, value(p["thickness"]), y0, value(p["top"]))
+            mesh = meshes.wall_mesh(el["start"], el["end"], normal, value(p["thickness"]), y0, value(p["top"]),
+                                    extend_end=kind == "wall")
         elif kind == "beam":
             mesh = meshes.beam_mesh(el["axis"], value(p["width"]), value(p["underside"]), value(p["top"]))
         else:

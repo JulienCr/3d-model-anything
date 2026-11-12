@@ -7,7 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 from plyfile import PlyData, PlyElement
+
+from room_model import raster
 
 UP = np.array([0.0, 1.0, 0.0])
 OUTLINE = [(0.0, 0.0), (6.0, 0.0), (6.0, 2.5), (2.5, 2.5), (2.5, 4.5), (0.0, 4.5)]
@@ -55,6 +58,17 @@ class SyntheticOptions:
     wall_duct: bool = False
     offset_wall: str | None = None
     no_ceiling: bool = False  # the mesh has no ceiling at all
+    partition: bool = False  # a full-height partition inside the floor, with its RoomPlan wall
+    partition_faces: str = "ab"  # faces in the mesh: a = +x face, b = -x face
+    outside_roomplan_wall: bool = False  # a RoomPlan wall standing outside the floor polygon
+    window: bool = False  # a window with a hole in the south wall mesh
+    window_rp_error: float = 0.0  # m the RoomPlan window is shifted along the wall from the mesh hole
+    partition_opening: bool = False  # a RoomPlan opening on the partition, no hole in the mesh
+    partition_opening_width: float = 0.9
+    partition_opening_z: float = 1.3  # centre along the partition
+    partition_opening_face: str = "B"  # side the RoomPlan opening +z axis points to; A is the +x face
+    orphan_opening: bool = False  # a RoomPlan opening standing in free space
+    photos: int = 0  # posed photos (first N of PHOTO_POSES) rendered from the mesh, stored in sensor orientation
 
 
 @dataclass
@@ -68,6 +82,9 @@ class SyntheticTruth:
     columns: list[dict]
     outline: list[tuple[float, float]] = field(default_factory=lambda: list(OUTLINE))
     extra_ident: str | None = None
+    partition: dict | None = None
+    outside_ident: str | None = None
+    opening_idents: dict[str, str] = field(default_factory=dict)  # option name -> RoomPlan identifier
 
 
 BEAM = {"x": (3.85, 4.15), "z": (0.0, 2.5), "underside": 2.20, "top": 2.50, "width": 0.30}
@@ -88,6 +105,26 @@ STEP_COLUMN = {"x": (2.15, 2.50), "z": (2.50, 2.85), "top": H_WING, "engaged": "
 TABLE = {"x": (0.0, 0.6), "z": (0.5, 1.7), "h": 0.75}
 CABINET = {"x": (0.0, 0.6), "z": (3.0, 4.0), "h": 1.90}
 DOOR = {"z": 1.25, "w": 0.90, "h": 2.05}
+PARTITION = {"x": 1.0, "z": (0.3, 2.3), "thickness": 0.10, "roomplan_offset": 0.015}  # runs along z; face A is the +x one
+WINDOW = {"x": 3.0, "w": 1.2, "sill": 0.9, "h": 1.0}  # in the south wall
+
+PARTITION_OPENING = {"z": 1.3, "h": 2.05}  # default centre along the partition
+ORPHAN_OPENING = {"centre": (1.5, 3.4), "w": 0.8, "h": 1.2, "sill": 0.5}
+OUTSIDE_WALL = {"centre": (-1.5, 2.0), "length": 1.0}  # beyond the west wall
+PHOTO_SIZE = (320, 240)  # sensor image (landscape), width x height
+PHOTO_FOCAL = 277.0
+SKY = (135, 206, 235)
+# (camera position, target, roll in degrees about the optical axis) in the truth-local frame; +-90 = phone held upright
+PHOTO_POSES = [
+    ((2.4, 1.4, 1.9), (6.0, 1.2, 1.25), -90.0),  # east wall and its door
+    ((3.0, 1.4, 2.2), (3.0, 1.4, 0.0), 90.0),  # south wall and its window
+    ((4.5, 1.4, 1.2), (0.0, 1.4, 1.2), -90.0),  # west wall, a column in the way
+    ((1.6, 1.4, 2.1), (6.0, 1.4, 0.5), 90.0),
+    ((5.5, 1.4, 2.0), (1.0, 1.2, 0.0), -90.0),
+    ((3.0, 1.4, 0.8), (6.0, 1.0, 2.5), 90.0),
+    ((2.5, 1.4, 1.3), (1.0, 1.2, 1.3), -90.0),  # the partition
+    ((2.0, 1.4, 0.9), (1.5, 1.2, 4.5), 90.0),  # down the wing
+]
 
 
 def _short_beam_z(opt: SyntheticOptions) -> tuple[float, float]:
@@ -143,7 +180,7 @@ def _in_rects(u, v, rects):
 class _Mesh:
     def __init__(self, cell: float, noise: float, rng):
         self.cell, self.noise, self.rng = cell, noise, rng
-        self.verts, self.normals, self.inroom, self.faces, self.cls = [], [], [], [], []
+        self.verts, self.normals, self.inroom, self.faces, self.cls, self.surface = [], [], [], [], [], []
         self.n_verts = 0
 
     def rect(self, origin, U, V, normal, cls, u_range, v_range, keep=None, inroom=1):
@@ -178,6 +215,7 @@ class _Mesh:
         self.inroom.append(np.full(len(pts), inroom, np.uint8))
         self.faces.append(tri)
         self.cls.append(np.full(len(tri), cls, np.uint8))
+        self.surface.append(np.full(len(tri), len(self.surface), np.int64))
         self.n_verts += len(pts)
 
 
@@ -201,7 +239,9 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
             return
         m.rect(origin, U, Y, normal, 1, u_range, (0, v_top), lambda u, v: ~_in_rects(u, v, excl))
 
-    wall("south", o, X, Z, (0, 6), H_MAIN, [(c["x"], (0, 9)) for c in columns if c["engaged"] == "south"] + [beam_xy])
+    hole = ((WINDOW["x"] - WINDOW["w"] / 2, WINDOW["x"] + WINDOW["w"] / 2), (WINDOW["sill"], WINDOW["sill"] + WINDOW["h"]))
+    wall("south", o, X, Z, (0, 6), H_MAIN,
+         [(c["x"], (0, 9)) for c in columns if c["engaged"] == "south"] + [beam_xy] + ([hole] if opt.window else []))
     door_z = (DOOR["z"] - DOOR["w"] / 2, DOOR["z"] + DOOR["w"] / 2)
     if drop != "east":
         m.rect(np.array([6.0, 0, 0]), Z, Y, -X, 1, (0, 2.5), (0, H_MAIN),
@@ -294,6 +334,13 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
         m.rect(np.array([0, 0, z0]), X, Y, -Z, cls, (x0, x1), (0, h))
         m.rect(np.array([0, 0, z1]), X, Y, Z, cls, (x0, x1), (0, h))
 
+    if opt.partition:
+        half = PARTITION["thickness"] / 2
+        if "a" in opt.partition_faces:
+            m.rect(np.array([PARTITION["x"] + half, 0, 0]), Z, Y, X, 1, PARTITION["z"], (0, H_MAIN))
+        if "b" in opt.partition_faces:
+            m.rect(np.array([PARTITION["x"] - half, 0, 0]), Z, Y, -X, 1, PARTITION["z"], (0, H_MAIN))
+
     if opt.other_room_panel:
         m.rect(np.array([0, 0, -0.05]), X, Y, -Z, 1, (1, 3), (0, 2), inroom=0)
 
@@ -349,7 +396,7 @@ def _intersect(p1, d1, p2, d2):
     return np.asarray(p1) + t[0] * np.asarray(d1)
 
 
-def _roomplan(opt: SyntheticOptions, world: np.ndarray) -> tuple[dict, dict[str, list[str]], str | None]:
+def _roomplan(opt: SyntheticOptions, world: np.ndarray) -> tuple[dict, dict[str, list[str]], str | None, str | None, str | None]:
     n_edges = len(OUTLINE)
     lines, info = [], []
     for k, name in enumerate(WALL_NAMES):
@@ -398,6 +445,42 @@ def _roomplan(opt: SyntheticOptions, world: np.ndarray) -> tuple[dict, dict[str,
         extra = _ident("extra")
         walls.append(wall_json(extra, np.array([1.0, 3.5]), np.array([0.0, 1.0]), np.array([-1.0, 0.0]), 1.8))
 
+    outside = None
+    if opt.outside_roomplan_wall:
+        outside = _ident("outside")
+        walls.append(wall_json(outside, np.array(OUTSIDE_WALL["centre"]), np.array([0.0, 1.0]), np.array([-1.0, 0.0]), OUTSIDE_WALL["length"]))
+    partition = None
+    if opt.partition:
+        z0, z1 = PARTITION["z"]
+        centre = np.array([PARTITION["x"] + PARTITION["roomplan_offset"], (z0 + z1) / 2])
+        partition = _ident("partition")
+        walls.append(wall_json(partition, centre, np.array([0.0, 1.0]), np.array([-1.0, 0.0]), z1 - z0))
+
+    def opening_json(ident, parent, dims, tf):
+        return {"category": {"opening": {}}, "completedEdges": [], "confidence": {"high": {}}, "curve": None,
+                "dimensions": [*dims, 0], "identifier": ident, "parentIdentifier": parent, "polygonCorners": [],
+                "story": 0, "transform": _flat(tf)}
+
+    windows, openings = [], []
+    if opt.window:
+        south = info[WALL_NAMES.index("south")]
+        c = south[1] + (WINDOW["x"] - 3.0 + opt.window_rp_error) * south[2]
+        win = opening_json(_ident("window"), idents["south"][0], (WINDOW["w"], WINDOW["h"]),
+                           frame_of(c, south[2], south[3], WINDOW["sill"] + WINDOW["h"] / 2))
+        win["category"] = {"window": {}}
+        windows.append(win)
+    if opt.partition_opening:
+        assert partition, "partition_opening needs partition=True"
+        c = np.array([PARTITION["x"] + PARTITION["roomplan_offset"], opt.partition_opening_z])
+        sign = 1.0 if opt.partition_opening_face == "A" else -1.0
+        openings.append(opening_json(_ident("partition-opening"), partition, (opt.partition_opening_width, PARTITION_OPENING["h"]),
+                                     frame_of(c, np.array([0.0, -sign]), np.array([sign, 0.0]), PARTITION_OPENING["h"] / 2)))
+    if opt.orphan_opening:
+        o_ = ORPHAN_OPENING
+        openings.append(opening_json(_ident("orphan-opening"), None, (o_["w"], o_["h"]),
+                                     frame_of(np.array(o_["centre"]), np.array([0.0, 1.0]), np.array([-1.0, 0.0]),
+                                              o_["sill"] + o_["h"] / 2)))
+
     east = info[WALL_NAMES.index("east")]
     door_c = east[1] + (DOOR["z"] - 1.25) * east[2]
     door = {
@@ -414,12 +497,50 @@ def _roomplan(opt: SyntheticOptions, world: np.ndarray) -> tuple[dict, dict[str,
         "story": 0, "transform": _flat(world @ floor_local),
     }
     data = {
-        "coreModel": "", "doors": [door], "floors": [floor], "objects": [], "openings": [],
+        "coreModel": "", "doors": [door], "floors": [floor], "objects": [], "openings": openings,
         "referenceOriginTransform": _flat(np.eye(4)),
         "sections": [{"center": [0.0, 0.0, 0.0], "label": "unidentified", "story": 0}],
-        "story": 0, "version": 2, "walls": walls, "windows": [],
+        "story": 0, "version": 2, "walls": walls, "windows": windows,
     }
-    return data, idents, extra
+    return data, idents, extra, partition, outside
+
+
+def _look_at(pos, target, roll_deg: float) -> np.ndarray:
+    """OpenCV camera-to-world (x right, y down, z forward) looking from pos to target, rolled about its axis."""
+    pos = np.asarray(pos, float)
+    f = np.asarray(target, float) - pos
+    f /= np.linalg.norm(f)
+    right = np.cross(f, UP)
+    right /= np.linalg.norm(right)
+    up = np.cross(right, f)
+    rho = np.radians(roll_deg)
+    right, up = np.cos(rho) * right + np.sin(rho) * up, -np.sin(rho) * right + np.cos(rho) * up
+    m = np.eye(4)
+    m[:3, 0], m[:3, 1], m[:3, 2], m[:3, 3] = right, -up, f, pos
+    return m
+
+
+def _render_photos(mesh: _Mesh, world: np.ndarray, count: int, folder: Path) -> list[dict]:
+    """Photos of the mesh with a flat colour per surface; entries of photos.json with ARKit poses in the world frame."""
+    assert count <= len(PHOTO_POSES), f"photos: at most {len(PHOTO_POSES)}"
+    verts, faces = np.concatenate(mesh.verts), np.concatenate(mesh.faces)
+    surface, face_cls = np.concatenate(mesh.surface), np.concatenate(mesh.cls)
+    w, h = PHOTO_SIZE
+    K = np.array([[PHOTO_FOCAL, 0, w / 2], [0, PHOTO_FOCAL, h / 2], [0, 0, 1.0]])
+    base = np.array([CLASS_COLORS[int(c)] for c in face_cls], float)
+    tint = ((surface * 37) % 41 - 20)[:, None].astype(float)
+    colours = np.clip(base + tint, 0, 255).astype(np.uint8)
+    entries = []
+    for i, (pos, target, roll) in enumerate(PHOTO_POSES[:count]):
+        c2w_local = _look_at(pos, target, roll)
+        _, ids = raster.rasterize(verts, faces, K, np.linalg.inv(c2w_local), PHOTO_SIZE)
+        image = np.where((ids >= 0)[..., None], colours[np.maximum(ids, 0)], np.array(SKY, np.uint8))
+        name = f"{i:04d}.jpg"
+        Image.fromarray(image.astype(np.uint8)).save(folder / name, quality=92)
+        c2w_arkit = world @ c2w_local @ np.diag([1.0, -1.0, -1.0, 1.0])
+        entries.append({"file": f"photos/{name}", "width": w, "height": h, "intrinsics": [float(v) for v in K.T.ravel()],
+                        "transform": _flat(c2w_arkit), "timestamp": float(i), "room": 0})
+    return entries
 
 
 def make_capture(root: Path, options: SyntheticOptions | None = None) -> SyntheticTruth:
@@ -428,13 +549,15 @@ def make_capture(root: Path, options: SyntheticOptions | None = None) -> Synthet
     for sub in ("rooms", "mesh", "photos"):
         (root / sub).mkdir(parents=True, exist_ok=True)
     world = _world_from_local()
-    n_verts, n_faces = _write_ply(_build_mesh(opt), world, root / "mesh" / "room-0.ply")
-    data, idents, extra = _roomplan(opt, world)
+    mesh = _build_mesh(opt)
+    n_verts, n_faces = _write_ply(mesh, world, root / "mesh" / "room-0.ply")
+    photo_entries = _render_photos(mesh, world, opt.photos, root / "photos") if opt.photos else []
+    data, idents, extra, partition, outside = _roomplan(opt, world)
     (root / "rooms" / "room-0.json").write_text(json.dumps(data), encoding="utf-8")
-    (root / "photos" / "photos.json").write_text("[]", encoding="utf-8")
+    (root / "photos" / "photos.json").write_text(json.dumps(photo_entries), encoding="utf-8")
     mesh_entry = {"anchors": 0, "faces": int(n_faces), "file": "mesh/room-0.ply", "vertices": int(n_verts)}
     manifest = {
-        "format": "house-capture/5", "mesh": mesh_entry, "photos": "photos/photos.json", "photoCount": 0,
+        "format": "house-capture/5", "mesh": mesh_entry, "photos": "photos/photos.json", "photoCount": len(photo_entries),
         "rooms": [{"index": 0, "name": "Synthetic", "file": "rooms/room-0.json", "mesh": mesh_entry,
                    "walls": len(data["walls"]), "doors": 1}],
     }
@@ -445,5 +568,8 @@ def make_capture(root: Path, options: SyntheticOptions | None = None) -> Synthet
         ceilings=[H_MAIN, H_WING], beam=dict(BEAM),
         columns=[{**c, "center": [sum(c["x"]) / 2, sum(c["z"]) / 2], "size": [c["x"][1] - c["x"][0], c["z"][1] - c["z"][0]]}
                  for c in _columns(opt)],
-        extra_ident=extra,
+        extra_ident=extra, outside_ident=outside,
+        opening_idents={n: _ident(n) for n in ('window', 'partition-opening', 'orphan-opening')},
+        partition=None if partition is None else {"ident": partition, "thickness": PARTITION["thickness"],
+                                                  "ends": [(PARTITION["x"] + PARTITION["thickness"] / 2, z) for z in PARTITION["z"]]},
     )

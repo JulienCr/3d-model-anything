@@ -55,11 +55,12 @@ def prism(quad: np.ndarray, y0: float, y1: float) -> Mesh:
     return pos, np.array(tris, np.uint32)
 
 
-def wall_mesh(start, end, normal, thickness: float, y0: float, y1: float) -> Mesh:
-    """Wall body behind the interior face, extended by its thickness past `end` only (exterior corners meet without overlap)."""
+def wall_mesh(start, end, normal, thickness: float, y0: float, y1: float, extend_end: bool = True) -> Mesh:
+    """Wall body behind the interior face, extended by its thickness past `end` (exterior corners meet without overlap)
+    unless `extend_end` is False (a free-standing partition)."""
     start, end, normal = (np.asarray(v, float) for v in (start, end, normal))
     t = (end - start) / np.linalg.norm(end - start)
-    a, b = start, end + t * thickness
+    a, b = start, end + t * thickness if extend_end else end
     return prism(np.array([a, b, b - normal * thickness, a - normal * thickness]), y0, y1)
 
 
