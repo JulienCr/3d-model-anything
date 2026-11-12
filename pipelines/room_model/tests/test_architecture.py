@@ -1094,3 +1094,23 @@ def test_every_prefer_action_reconcile_proposes_is_accepted_and_changes_the_sour
     for action in prefers:
         pid, source = action.removeprefix("prefer:").rsplit(":", 1)
         assert llm["parameters"][pid]["source"] != source and arch["parameters"][pid]["source"] == source
+
+
+
+def test_an_llm_door_extent_leaves_the_casings_outside_the_passage(env):
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(architecture.__file__).resolve().parents[1] / "blender"))
+    from arch import openings as layout
+
+    casing = 0.07
+    rect = _opening_rect(env.arch, "Door_1", widen=2 * casing)  # the LLM clicks the outer edges of the casings
+    answers = _answers(env, elements=[{"id": "Door_1", "frame": {"profile": "flat", "width_cm": casing * 100},
+                                       "corners": _corners(env, ["Door_1-a", "Door_1-b"], rect)}])
+    arch = env.merge(answers)
+    width = _param(arch, "Door_1", "width")
+    assert width["source"] == "llm"
+    lay = layout.resolve(arch, _element(arch, "Door_1"))
+    assert lay.leaf_w == pytest.approx(width["value"] - 2 * (casing + layout.JAMB_VISIBLE), abs=1e-6)
+    assert lay.casings[0] == pytest.approx(casing, abs=1e-6) and "to_verify" not in lay.flags
