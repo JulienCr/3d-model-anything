@@ -387,7 +387,7 @@ def markdown(doc: dict) -> str:
                          f"(écart {cm(c['residual'])} cm, tolérance {cm(c['sigma'])} cm). Le mètre peut avoir raison (scan masqué) : à confirmer.")
         elif c["verdict"] == "probable_tape_error":
             lines.append(f"- **{c['dims'][0]}** : erreur de mètre probable. Le reste du relevé implique {cm(c['implied'])} cm, "
-                         f"écart {cm(c['residual'])} cm. À remesurer avant de l'appliquer.")
+                         f"écart {cm(c['residual'])} cm. Écartée du modèle, à remesurer.")
         else:
             lines.append(f"- Relevé incohérent, mesures suspectes par ordre de probabilité : {', '.join(c['dims'])}.")
         for loop in c.get("loops", []):
@@ -433,4 +433,34 @@ def write(ctx, final: dict, inputs: dict) -> Path:
     doc = build(layers, tape)
     (ctx.out / "reconcile.json").write_text(json.dumps(doc, indent=2), encoding="utf-8")
     (ctx.out / "reconcile.md").write_text(markdown(doc), encoding="utf-8")
-    return ctx.out / "reconcile.json"
+    return doc
+
+
+def write_error(ctx, error: str) -> None:
+    """Stub files in place of a failed reconciliation, so that no stale report survives next to a new model."""
+    (ctx.out / "reconcile.json").write_text(json.dumps({"schema": SCHEMA, "error": error}, indent=2), encoding="utf-8")
+    (ctx.out / "reconcile.md").write_text(f"# Réconciliation du relevé\n\nRéconciliation indisponible : {error}\n", encoding="utf-8")
+
+
+def set_aside(doc: dict) -> list[dict]:
+    """The tape entries named as probable tape errors: {id, implied} to keep out of the model."""
+    return [{"id": c["dims"][0], "implied": c["implied"]} for c in doc["checks"] if c["verdict"] == "probable_tape_error"]
+
+
+def without(tape: dict, ids) -> dict:
+    """The tape document (either format) without the entries `ids`; the file itself is never rewritten."""
+    if tape.get("version") == 2 and isinstance(tape.get("values"), dict):
+        return {**tape, "values": {k: v for k, v in tape["values"].items() if k not in ids}}
+    return {k: v for k, v in tape.items() if k not in ids}
+
+
+def mark_set_aside(arch: dict, entries: list[dict]) -> None:
+    """Record in the model the tape entries kept out of it: a `not_applied` row each and a flag on the dimension."""
+    tape = arch["diagnostics"].setdefault("tape", {"applied": [], "not_applied": [], "moved": [], "derived": []})
+    for e in entries:
+        tape["not_applied"].append({"id": e["id"], "reason": "écartée, à remesurer : erreur de mètre probable (le reste du relevé "
+                                                               f"implique {fr(e['implied'] * 100)} cm)"})
+        for dim in arch["dimensions"]:
+            if dim["id"] == e["id"] and "tape_set_aside" not in dim["flags"]:
+                dim["flags"].append("tape_set_aside")
+    tape["set_aside"] = [e["id"] for e in entries]

@@ -235,11 +235,18 @@ def run(ctx: StageContext) -> Path:
         arch["diagnostics"]["vision_unreadable"] = unreadable
     path = output_path(ctx, "architecture")
     path.parent.mkdir(parents=True, exist_ok=True)
+    aside = []
     try:  # the reconciliation reads the model, it must never cost the user the model itself
-        reconcile.write(ctx, arch, {"model_doc": model_doc, "openings_doc": openings_doc, "vision": vision, "anchors": anchors,
-                                    "picks": picks, "tape": tape, "overrides": overrides})
+        aside = reconcile.set_aside(reconcile.write(ctx, arch, {"model_doc": model_doc, "openings_doc": openings_doc, "vision": vision,
+                                                                "anchors": anchors, "picks": picks, "tape": tape, "overrides": overrides}))
     except Exception as exc:  # noqa: BLE001
         arch["diagnostics"]["reconcile_error"] = f"{type(exc).__name__}: {exc}"
+        reconcile.write_error(ctx, arch["diagnostics"]["reconcile_error"])
+    if aside:  # a tape value the other measures reject is never forced into the model: one rebuild without it
+        arch = build(model_doc, openings_doc, vision, reconcile.without(tape, {e["id"] for e in aside}), ctx, overrides, anchors, picks)
+        reconcile.mark_set_aside(arch, aside)
+        if unreadable:
+            arch["diagnostics"]["vision_unreadable"] = unreadable
     path.write_text(json.dumps(arch, indent=2), encoding="utf-8")
     survey_page.write(ctx, arch)
     report.write_sections(ctx.out / "report.md", arch)

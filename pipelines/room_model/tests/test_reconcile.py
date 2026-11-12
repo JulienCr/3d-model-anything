@@ -176,8 +176,7 @@ def test_two_tape_typos_are_both_named(ctx):
     doc, md = _run(ctx, survey)
     named = [c for c in doc["checks"] if c["kind"] == "tape_consistency"]
     errors = sorted(d for c in named if c["verdict"] == "probable_tape_error" for d in c["dims"])
-    ranked = next((c["dims"] for c in named if c["verdict"] == "conflict"), [])
-    assert errors == sorted(typos) or set(ranked[:2]) == set(typos)
+    assert errors == sorted(typos) and len(named) == 2  # no single entry clears the relations, exactly one pair does
     assert all(f"measure:{k}" in doc["actions"] for k in typos)
 
 
@@ -204,7 +203,7 @@ def test_a_failing_reconciliation_is_recorded_and_the_model_still_written(ctx, m
     def broken(*args, **kwargs):
         raise ValueError("boom")
 
-    monkeypatch.setattr(reconcile, "write", broken)
+    monkeypatch.setattr(reconcile, "build", broken)
     architecture.run(ctx)
     assert _arch(ctx)["diagnostics"]["reconcile_error"] == "ValueError: boom"
 
@@ -216,3 +215,28 @@ def test_actions_are_explained_and_failures_indexed_by_element(ctx):
     assert "`measure:Door_1-w` : mesurer au mètre la cote Door_1-w" in md
     assert "Infinity" not in json.dumps(doc) and isinstance(doc["elements"], dict)
     assert reconcile.explain("prefer:opening.Door_1.height:lidar").startswith("revenir pour opening.Door_1.height à la valeur LiDAR")
+
+
+
+def test_a_probable_tape_error_is_kept_out_of_the_model(ctx):
+    arch = _arch(ctx)
+    survey = _survey(arch)
+    station = next(d for d in arch["dimensions"] if d["kind"] in ("width", "length"))
+    survey[station["id"]] = round(survey[station["id"]] + 0.10, 4)  # a station misread: applied, it would move a wall
+    doc, md = _run(ctx, survey)
+    assert [c["dims"] for c in doc["checks"] if c["verdict"] == "probable_tape_error"] == [[station["id"]]]
+    kept = _arch(ctx)
+    dim = next(d for d in kept["dimensions"] if d["id"] == station["id"])
+    assert dim["value"] == pytest.approx(station["value"], abs=0.002) and "tape_set_aside" in dim["flags"]
+    assert kept["diagnostics"]["tape"]["set_aside"] == [station["id"]]
+    assert any(n["id"] == station["id"] and "écartée, à remesurer" in n["reason"] for n in kept["diagnostics"]["tape"]["not_applied"])
+    assert json.loads((ctx.out / "measurements.json").read_text(encoding="utf-8"))[station["id"]] == survey[station["id"]]  # file untouched
+    assert "Écartée du modèle" in md and "écartée, à remesurer" in (ctx.out / "report.md").read_text(encoding="utf-8")
+
+
+def test_a_failed_reconciliation_leaves_no_stale_report(ctx, monkeypatch):
+    _run(ctx)
+    monkeypatch.setattr(reconcile, "build", lambda *a, **k: (_ for _ in ()).throw(ValueError("boom")))
+    architecture.run(ctx)
+    assert json.loads((ctx.out / "reconcile.json").read_text(encoding="utf-8")) == {"schema": reconcile.SCHEMA, "error": "ValueError: boom"}
+    assert "indisponible" in (ctx.out / "reconcile.md").read_text(encoding="utf-8")

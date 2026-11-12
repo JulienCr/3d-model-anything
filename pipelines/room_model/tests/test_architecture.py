@@ -1067,3 +1067,26 @@ def test_a_prefer_override_may_name_the_scan_source(env):
     scan = _param(env.arch, "Door_1", "width")
     arch = env.merge(None, {"Door_1-w": scan["value"] + 0.25}, {"Door_1": {"prefer": {"width": scan["source"]}}})
     assert _param(arch, "Door_1", "width")["value"] == scan["value"] and _overrides(arch)["rejected"] == []
+
+
+
+def test_every_prefer_action_reconcile_proposes_is_accepted_and_changes_the_source(env):
+    from room_model import reconcile
+
+    rect = _opening_rect(env.arch, "Door_1", widen=0.10)
+    answers = _answers(env, elements=[{"id": "Door_1", "corners": _corners(env, ["Door_1-a", "Door_1-b"], rect)}])
+    llm = env.merge(answers)
+    doc = reconcile.build([("scan", env.merge()), ("llm", llm)], None)
+    prefers = [a for a in doc["actions"] if a.startswith("prefer:")]
+    assert prefers
+    overrides = {}
+    for action in prefers:
+        pid, source = action.removeprefix("prefer:").rsplit(":", 1)
+        el = next(e for e in llm["elements"] if pid in e.get("params", {}).values())
+        name = next(n for n, v in el["params"].items() if v == pid)
+        overrides.setdefault(el["id"], {}).setdefault("prefer", {})[name] = source
+    arch = env.merge(answers, None, overrides)
+    assert _overrides(arch)["rejected"] == []
+    for action in prefers:
+        pid, source = action.removeprefix("prefer:").rsplit(":", 1)
+        assert llm["parameters"][pid]["source"] != source and arch["parameters"][pid]["source"] == source

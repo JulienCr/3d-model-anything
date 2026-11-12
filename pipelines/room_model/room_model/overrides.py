@@ -15,8 +15,6 @@ REMOVABLE = (*RECT_KINDS, "panel_frame", "cornice", "skirting")
 TYPING = ("type", "hinge", "swing", "panels", "handle")
 NICHE_FIELDS = ("through", "dividers", "shelves_count")
 FIELDS = ("kind", *TYPING, "frame", *NICHE_FIELDS, "remove", "prefer")
-# A parameter can be sent back to its scan value (the model and openings stages), named `scan` or by its own source.
-SCAN_SOURCES = ("scan", "lidar", "roomplan", "assumed")
 NICHE_ONLY = ("through", "dividers", "shelves")
 SCHEMA_OF = {**{f: "elements" for f in (*TYPING, "frame")}, **{f: "new_elements" for f in NICHE_FIELDS}}
 
