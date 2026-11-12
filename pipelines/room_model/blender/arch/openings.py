@@ -72,7 +72,8 @@ def resolve(arch: dict, el: dict) -> Layout:
         c = casing or 0.0
         return Layout(w, h, sill, centre, (c, c, c, c if sill > SILL_TOL else 0.0))
     door = el["kind"] == "door"
-    jamb = _param(arch, el, "jamb_width") or JAMB_VISIBLE
+    jamb = _param(arch, el, "jamb_width")
+    jamb = JAMB_VISIBLE if jamb is None else jamb  # an explicit 0 (a frameless leaf) is a value
     flags = []
     leaf_w, leaf_h = _param(arch, el, "leaf_width"), _param(arch, el, "leaf_height")
     if leaf_w is None or leaf_h is None:

@@ -106,6 +106,11 @@ def test_a_leaf_off_centre_is_clamped_on_its_overhanging_side():
 
 
 def test_the_pipeline_jamb_matches_the_scene_jamb():
-    from room_model import anchor
+    from room_model import anchor, survey_page
 
-    assert anchor.JAMB_VISIBLE == J
+    assert anchor.JAMB_VISIBLE == survey_page.JAMB_VISIBLE == J
+
+
+def test_an_explicit_zero_jamb_is_honoured():
+    lay = _layout("door", width=0.9, jamb_width=0.0)
+    assert lay.jamb == 0.0 and lay.leaf_w == pytest.approx(0.9) and lay.cut_w == pytest.approx(0.9)

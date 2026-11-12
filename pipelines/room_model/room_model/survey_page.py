@@ -12,6 +12,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from room_model import plan_svg
+from room_model.anchor import JAMB_VISIBLE
 from room_model.architecture import KIND_WORDS, STATION_HEIGHT, dimension_endpoints
 from room_model.capture import colmajor, load_roomplan
 from room_model import tape_merge
@@ -28,9 +29,6 @@ BADGE = "à reprendre en priorité"
 MASKED_NOTE = "vue partiellement masquée par un meuble"
 CROP_SIDE = 480  # px on the long side of a crop
 MAX_ALTERNATIVES = 3
-# Visible part of the frame between the hole in the wall and the leaf (jamb and rebate): a door or window frame is
-# 2 to 4 cm thick. The casing width (`frame.width`) comes on top when the element has one.
-JAMB_VISIBLE = 0.03  # m
 ESTIMATE_SIGMA = 0.05  # m; the opening's own error plus the spread of casing and jamb widths
 FLOOR_BASED = 0.03  # m; a niche whose sill is below this stands on the floor (RoomPlan's sigma is 3 cm)
 DOUBLE_TYPES = ("hinged_double", "casement_double", "french_window")
@@ -86,7 +84,9 @@ def _estimated_leaf(arch: dict, el: dict, suffix: str, base: dict):
         return None
     p0, p1 = np.array(ends[0], float), np.array(ends[1], float)
     span = float(np.linalg.norm(p1 - p0))
-    inset = min(((el.get("frame") or {}).get("width") or 0.0) + JAMB_VISIBLE, 0.25 * span)
+    pid = el["params"].get("jamb_width")  # the visible frame between hole and leaf; the casing comes on top
+    jamb = JAMB_VISIBLE if pid is None else arch["parameters"][pid]["value"]
+    inset = min(((el.get("frame") or {}).get("width") or 0.0) + jamb, 0.25 * span)
     low = 0.0 if el["kind"] == "door" and suffix == "leaf-h" else inset
     u = (p1 - p0) / span
     return [float(c) for c in p0 + u * low], [float(c) for c in p1 - u * inset], span - low - inset
