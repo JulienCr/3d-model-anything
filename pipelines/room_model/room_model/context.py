@@ -11,11 +11,16 @@ STAGE_OUTPUTS = {
     "export": "model_measured.glb",
     "openings": "openings.json",
     "architecture": "architecture.json",
+    "blender": "architecture.blend",
 }
 
 
 class StageInputMissing(RuntimeError):
     """A stage was asked to run before the stage producing its input."""
+
+
+class BlenderMissing(StageInputMissing):
+    """The Blender executable named by BLENDER does not exist."""
 
 
 class NoPhotos(StageInputMissing, ValueError):

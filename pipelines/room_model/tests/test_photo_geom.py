@@ -111,3 +111,21 @@ def test_best_views_prefer_the_closer_photo_and_skip_those_that_cannot_see(tmp_p
     thin = np.array([[0.0, 0, 3.05], [0.1, 0, 3.05]])  # 5 cm behind the box: a frame or skirting in front of an end
     assert photo_geom.best_views([near], thin, (verts, faces)) == []
     assert [p.name for p in photo_geom.best_views([near], thin, (verts, faces), tolerance=0.10)] == ["near"]
+
+
+def test_best_views_rank_box_occluded_views_last(tmp_path):
+    wall = _plane(5.0, 4.0, 3.0)[0:2]  # the mesh has no trace of the furniture
+    near, far = _pinhole("near", 1.0, tmp_path), _pinhole("far", -2.0, tmp_path)
+    span = np.array([[1.5, 0, 5.0], [2.5, 0, 5.0]])
+    chair = photo_geom.RoomBox(np.array([0.7, 0, 3.0]), np.eye(3), np.array([0.2, 0.2, 0.2]))
+    assert [p.name for p in photo_geom.best_views([near, far], span, wall)] == ["near", "far"]
+    assert [p.name for p in photo_geom.best_views([near, far], span, wall, boxes=[chair])] == ["far", "near"]
+    assert [p.name for p in photo_geom.best_views([near], span, wall, boxes=[chair])] == ["near"]  # still usable alone
+    assert 0 < photo_geom.occluded_fraction(near.centre, span, [chair]) < 1 and photo_geom.occluded_fraction(far.centre, span, [chair]) == 0
+    around_span = photo_geom.RoomBox(np.array([2.0, 0, 5.0]), np.eye(3), np.array([1.0, 1.0, 0.1]))
+    assert photo_geom.occluded_fraction(near.centre, span, [around_span]) == 0  # a box holding the span is no obstacle
+    around_camera = photo_geom.RoomBox(near.centre, np.eye(3), np.array([1.0, 1.0, 1.0]))
+    assert photo_geom.occluded_fraction(near.centre, span, [around_camera]) == 0  # nor one the photographer stands in
+    turned = photo_geom.room_boxes({"objects": [{"transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.7, 0, 3.0, 1],
+                                                  "dimensions": [0.4, 0.4, 0.4]}]}, np.eye(4))
+    assert [p.name for p in photo_geom.best_views([near, far], span, wall, boxes=turned)] == ["far", "near"]

@@ -85,6 +85,14 @@ def test_dimension_endpoints_lie_on_the_element(full):
     assert architecture.dimension_endpoints(arch, "nope") is None
 
 
+def test_every_dimension_carries_its_endpoints(full):
+    _, _, arch = full
+    for dim in arch["dimensions"]:
+        ends = architecture.dimension_endpoints(arch, dim["id"])
+        assert dim["endpoints"] == (None if ends is None else [list(ends[0]), list(ends[1])])
+    assert sum(d["endpoints"] is not None for d in arch["dimensions"]) >= 5
+
+
 def _sections(html):
     svg = re.search(r"<svg.*?</svg>", html, re.S).group(0)
     rows = {int(m.group(1)): m.group(0) for m in re.finditer(r'<article class="row[^"]*" id="row-(\d+)".*?</article>', html, re.S)}
@@ -153,3 +161,21 @@ def test_build_ignores_absent_vision(full):
     model_doc = json.loads((ctx.out / "model.json").read_text(encoding="utf-8"))
     openings_doc = json.loads((ctx.out / "openings.json").read_text(encoding="utf-8"))
     assert architecture.build(model_doc, openings_doc, None) == arch
+
+
+def test_survey_alternatives(full):
+    ctx, _, _ = full
+    html = (ctx.out / "measurements" / "index.html").read_text(encoding="utf-8")
+    _, rows = _sections(html)
+    alts = {n: len(re.findall(r'class="alt"', r)) for n, r in rows.items()}
+    assert max(alts.values()) in (1, 2, 3) and all(a <= 3 for a in alts.values())
+    assert all(r.count('class="main"') == 1 for r in rows.values() if "data:image/jpeg" in r)
+    assert "swap" in html and "http" not in html and "<script src" not in html
+
+
+def test_survey_masked_note(full):
+    _, _, arch = full
+    rows = survey_page.numbered_rows(arch)[:2]
+    html = survey_page.render(arch, rows, {1: ["AAAA", "BBBB"], 2: ["CCCC"]}, frozenset({1}))
+    sections = {int(m.group(1)): m.group(0) for m in re.finditer(r'<article class="row[^"]*" id="row-(\d+)".*?</article>', html, re.S)}
+    assert "vue partiellement masquée par un meuble" in sections[1] and "meuble" not in sections[2]

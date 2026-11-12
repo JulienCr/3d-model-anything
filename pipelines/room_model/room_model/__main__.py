@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from room_model.capture import room_entry
-from room_model.context import STAGE_OUTPUTS, InvalidCapture, NoPhotos, StageContext, StageInputMissing
+from room_model.context import STAGE_OUTPUTS, BlenderMissing, InvalidCapture, NoPhotos, StageContext, StageInputMissing
 
 STAGE_MODULES = {
     "registration": "room_model.registration",
@@ -17,6 +17,7 @@ STAGE_MODULES = {
     "export": "room_model.export",
     "openings": "room_model.openings",
     "architecture": "room_model.architecture",
+    "blender": "room_model.blender_stage",
 }
 
 
@@ -48,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_stage(name: str, ctx: StageContext, skip_without_photos: bool = False) -> int:
+def _run_stage(name: str, ctx: StageContext, in_all: bool = False) -> int:
     out = ctx.out / STAGE_OUTPUTS[name]
     if out.exists() and not ctx.force:
         print(f"stage {name}: {out} exists, skipped (use --force)")
@@ -57,8 +58,14 @@ def _run_stage(name: str, ctx: StageContext, skip_without_photos: bool = False) 
     try:
         result = module.run(ctx)
     except NoPhotos as exc:
-        if skip_without_photos:
+        if in_all:
             print(f"registration skipped: no photos for room {ctx.room}")
+            return 0
+        print(str(exc), file=sys.stderr)
+        return 1
+    except BlenderMissing as exc:
+        if in_all:
+            print(f"blender skipped: {exc}")
             return 0
         print(str(exc), file=sys.stderr)
         return 1
@@ -124,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     for name in STAGE_MODULES if args.command == "all" else [args.command]:
-        code = _run_stage(name, ctx, skip_without_photos=args.command == "all")
+        code = _run_stage(name, ctx, in_all=args.command == "all")
         if code:
             return code
     return 0

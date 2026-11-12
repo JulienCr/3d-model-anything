@@ -79,9 +79,13 @@ def build(model_doc: dict, openings_doc: dict, vision: dict | None = None) -> di
     dimensions = [*model_doc["dimensions"], *_wall_length_dimensions(model_doc)]
     for o in openings_doc["openings"]:
         dimensions += _opening_dimensions(o, parameters)
-    return {"schema": SCHEMA, "version": VERSION, "source": model_doc.get("source"), "frame": model_doc["frame"],
+    arch = {"schema": SCHEMA, "version": VERSION, "source": model_doc.get("source"), "frame": model_doc["frame"],
             "parameters": parameters, "elements": [*model_doc["elements"], *map(_opening_element, openings_doc["openings"])],
             "diagnostics": {**model_doc["diagnostics"], "openings": openings_doc["diagnostics"]}, "dimensions": dimensions}
+    for dim in dimensions:
+        ends = dimension_endpoints(arch, dim["id"])
+        dim["endpoints"] = None if ends is None else [[float(c) for c in ends[0]], [float(c) for c in ends[1]]]
+    return arch
 
 
 def _value(arch: dict, pid: str) -> float:
