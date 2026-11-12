@@ -269,3 +269,44 @@ def test_a_casing_is_cut_back_to_the_free_stretch_and_dropped_below_the_minimum(
     result = clip.fit(lay, (0.0, lay.span[1] + room))
     assert result.casings == pytest.approx((0.07, 0.07, kept, 0.0)) and result.flags == flags
     assert result.bars == pytest.approx((lay.span[0], min(lay.span[1], lay.span[1] + room)))
+
+
+def _tops(arch, tops):
+    """Sets the top of each wall or partition: {id: (value, sigma)}."""
+    for e in arch["elements"]:
+        if e["id"] in tops:
+            arch["parameters"][e["params"]["top"]] = {"value": tops[e["id"]][0], "sigma": tops[e["id"]][1]}
+
+
+def _levelled(arch):
+    out = plan.level_tops(arch)
+    return {e["id"]: out["parameters"][e["params"]["top"]]["value"] for e in out["elements"] if e["kind"] in ("wall", "partition")}
+
+
+def test_tops_that_agree_within_noise_become_one_height():
+    arch = _ring(RECT)
+    _tops(arch, {"W0": (2.50, 0.012), "W1": (2.53, 0.017), "W2": (2.60, 0.010), "W3": (2.52, 0.012)})
+    out = _levelled(arch)
+    weights = np.array([1 / 0.012 ** 2, 1 / 0.017 ** 2, 1 / 0.012 ** 2])
+    assert out["W0"] == out["W1"] == out["W3"] == pytest.approx(np.average([2.50, 2.53, 2.52], weights=weights))
+    assert out["W2"] == 2.60, "7 cm is more than the noise of two measures: a real step"
+
+
+def test_a_partition_takes_the_height_of_the_wall_it_ends_on():
+    arch = _ring(RECT)
+    _wall(arch, "partition", "Partition_P1", (2.0, -0.02), (2.0, 2.0), 0.1, (-1.0, 0.0))
+    _tops(arch, {"W0": (2.50, 0.012), "W1": (2.50, 0.012), "W2": (2.50, 0.012), "W3": (2.50, 0.012), "Partition_P1": (2.52, 0.012)})
+    out = _levelled(arch)
+    assert out["Partition_P1"] == out["W0"] and 2.50 < out["W0"] < 2.52
+
+
+def test_a_run_of_walls_whose_ends_disagree_is_not_levelled_by_chaining_neighbours():
+    arch = _ring(RECT)
+    _tops(arch, {"W0": (2.50, 0.015), "W1": (2.54, 0.015), "W2": (2.58, 0.015), "W3": (2.62, 0.015)})
+    assert _levelled(arch) == {"W0": 2.50, "W1": 2.54, "W2": 2.58, "W3": 2.62}
+
+
+def test_tops_without_a_sigma_are_left_alone():
+    arch = _ring(RECT)
+    _tops(arch, {"W0": (2.50, 0.0), "W1": (2.51, 0.0)})
+    assert _levelled(arch)["W0"] == 2.50 and _levelled(arch)["W1"] == 2.51

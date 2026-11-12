@@ -948,6 +948,7 @@ def joined(tmp_path_factory):
                  "direction": [0.0, -1.0, 0.0]})
     rays += _cornice_rays(arch)
     rays += _face_rays(arch, "skirting", "Skirting", 0.01, lambda host: _value(arch, "floor.level") + _value(arch, "skirting.height"))
+    rays += _top_grid(arch, [shapely.Point(_element(arch, "Wall_M1")["end"]), min(_partition_ends(arch, "Partition_P1"), key=lambda p: p.y)])
     return ctx, arch, _probe(ctx, arch_path, rays, moulding_overlaps=True), {r["name"]: r for r in rays}
 
 
@@ -1078,6 +1079,71 @@ def test_partition_collinear_with_a_wall_comes_flush_with_it(junctions):
 @needs_blender
 def test_junction_walls_do_not_overlap(junctions):
     assert junctions[2]["overlaps"] == {}
+
+
+def _levelled_arch(arch):
+    """The junction room with tops that differ by a few cm, less than the noise of two measures, where the bodies meet."""
+    _junction_arch(arch)
+    base = _value(arch, "wall.M3.top")
+    for oid, delta in (("Wall_M3", 0.0), ("Wall_M6", 0.0), ("Wall_M7", 0.025), ("Partition_P1", -0.02), ("Partition_P2", 0.01)):
+        pid = _element(arch, oid)["params"]["top"]
+        arch["parameters"][pid] = {"value": base + delta, "sigma": 0.012, "unit": "m", "source": "lidar"}
+
+
+def _partition_ends(arch, pid):
+    """The middle of each end of a partition, as built."""
+    quad = wall_plan.built(arch)[0][pid]
+    return [shapely.Point((quad[a][0] + quad[b][0]) / 2, (quad[a][1] + quad[b][1]) / 2) for a, b in ((0, 3), (1, 2))]
+
+
+def _top_grid(arch, centres, radius=0.3, step=0.02, prefix="top"):
+    """Rays coming down on a grid round each of the `centres` (plan points), over the region the shell's plan fills."""
+    _, solids = wall_plan.built(arch)
+    parts = [shapely.Polygon(solid).difference(shapely.union_all([shapely.Polygon(c) for c in cuts])) if cuts else shapely.Polygon(solid)
+             for solid, cuts in solids.values()]
+    filled = shapely.union_all(parts).buffer(-0.003)
+    rays = []
+    for k, c in enumerate(centres):
+        for i in range(-int(radius / step), int(radius / step) + 1):
+            for j in range(-int(radius / step), int(radius / step) + 1):
+                p = shapely.Point(c.x + (i + 0.13) * step, c.y + (j + 0.29) * step)
+                if p.distance(c) <= radius and filled.contains(p):
+                    rays.append({"name": f"{prefix}-{k}-{i}-{j}", "object": _shell_ids(arch), "origin": _blender_point(p.x, 5.0, p.y),
+                                 "direction": [0.0, 0.0, -1.0]})
+    return rays
+
+
+def _assert_flat_top(facts, rays):
+    heights = [facts["rays"][r["name"]] for r in rays]
+    assert all(h["hit"] for h in heights), "a hole in the top"
+    zs = np.array([h["location"][2] for h in heights])
+    assert zs.max() - zs.min() < 0.0005, f"the top steps by {1000 * (zs.max() - zs.min()):.1f} mm between bodies that meet"
+
+
+@pytest.fixture(scope="module")
+def levelled(tmp_path_factory):
+    ctx, _ = make_case(tmp_path_factory.mktemp("levelled"), "levelled", window=True, partition=True)
+    shell.run(ctx)
+    model.run(ctx)
+    openings.run(ctx)
+    architecture.run(ctx)
+    arch_path = output_path(ctx, "architecture")
+    arch = json.loads(arch_path.read_text(encoding="utf-8"))
+    _levelled_arch(arch)
+    arch_path.write_text(json.dumps(arch), encoding="utf-8")
+    blender_stage.run(ctx)
+    # the joint of the two west walls, the end of Partition_P1 on them, and the end of Partition_P2 on Partition_P1
+    centres = [shapely.Point(_element(arch, "Wall_M6")["end"]), min(_partition_ends(arch, "Partition_P1"), key=lambda p: p.x),
+               min(_partition_ends(arch, "Partition_P2"), key=lambda p: p.distance(shapely.Polygon(wall_plan.built(arch)[0]["Partition_P1"])))]
+    rays = _top_grid(arch, centres)
+    return ctx, arch, _probe(ctx, arch_path, rays), rays
+
+
+@needs_blender
+def test_the_top_is_continuous_where_bodies_meet_within_the_noise_of_their_heights(levelled):
+    _, _, facts, rays = levelled
+    assert len(rays) > 900
+    _assert_flat_top(facts, rays)
 
 
 SKIRT_ELEMENTS = [  # (kind, id, host, face, centre along the host, width, sill, height, frame, extra fields)
@@ -1280,6 +1346,12 @@ def _assert_mouldings_only_in_their_host(arch, facts):
         host = _element(arch, re.split("_(?:Architrave|Frame)", name)[0])["host"]
         deep = {b: v for b, v in bodies.items() if b != host and (not name.endswith("_Frame") or v > FRAME_BITE_VOLUME)}
         assert not deep, f"{name} lies inside {deep}"
+
+
+@needs_blender
+def test_the_top_has_no_hole_or_step_at_a_jog_and_where_a_partition_ends_on_a_wall(joined):
+    _, _, facts, rays = joined
+    _assert_flat_top(facts, [r for name, r in rays.items() if name.startswith("top-")])
 
 
 @needs_blender

@@ -19,6 +19,7 @@ REACH = 1.5  # x t: a RoomPlan partition ends within about a wall thickness of t
 SNAP = 0.5
 SHADOW = 5.0  # x t a host is swept along a partition line to remove what sticks out behind it
 TOUCH_TOL = 0.001  # m: polygons overlapping by less than this only touch (mesh precision)
+SAME_TOP = 2.0  # sigmas: two tops measured this close, given their uncertainties, are the same height (about 95%)
 
 
 def _sub(a, b):
@@ -279,8 +280,9 @@ def _middle(quad: list):
 
 
 def partition_plans(arch: dict, walls: dict[str, list]) -> dict[str, dict]:
-    """{partition id: {"face", "solid", "cut"}}: the partition quad with each face line stopped on the host face it meets,
-    the quad extended through those hosts, and the polygons (host shadows, other overlapped hosts) to subtract from it.
+    """{partition id: {"face", "solid", "cut", "hosts"}}: the partition quad with each face line stopped on the host face it
+    meets, the quad extended through those hosts, the polygons (host shadows, other overlapped hosts) to subtract from it,
+    and the ids of the hosts it reaches.
 
     A partition whose body holds the middle of this one is a crossing, not a host; of two partitions that run into
     each other only the later one extends. Hosts are taken untrimmed, so the order of the elements does not matter.
@@ -295,8 +297,9 @@ def partition_plans(arch: dict, walls: dict[str, list]) -> dict[str, dict]:
     reach = {k: {j for j in quads if j != k and _hits(quad, [quads[j]])} for k, quad in quads.items()}
     out = {}
     for pid, quad in quads.items():
-        hosts = [*walls.values(), *(q for j, q in quads.items() if j != pid and not _contains(q, _middle(quad))
-                                    and not (pid in reach[j] and j in reach[pid] and j > pid))]
+        named = [*walls.items(), *((j, q) for j, q in quads.items() if j != pid and not _contains(q, _middle(quad))
+                                   and not (pid in reach[j] and j in reach[pid] and j > pid))]
+        hosts = [q for _, q in named]
         face, solid, cut = list(quad), list(quad), []
         hits = _hits(quad, hosts)
         for i, (enter, leave, host, unit) in hits.items():
@@ -305,7 +308,8 @@ def partition_plans(arch: dict, walls: dict[str, list]) -> dict[str, dict]:
                 cut.append((host, unit))
         shadows = [_shadow(host, unit) for host, unit in cut]
         others = [h for h in hosts if not any(h is c[0] for c in cut) and overlap(h, solid, 1e-9)]
-        out[pid] = {"face": face, "solid": solid, "cut": [*shadows, *others]}
+        met = [name for name, q in named if any(hit[2] is q for hit in hits.values())]
+        out[pid] = {"face": face, "solid": solid, "cut": [*shadows, *others], "hosts": met}
     return out
 
 
@@ -354,3 +358,35 @@ def overlap(a: list, b: list, tol: float = TOUCH_TOL) -> bool:
             if min(max(ra), max(rb)) - max(min(ra), min(rb)) <= tol:
                 return False
     return True
+
+
+def level_tops(arch: dict) -> dict:
+    """`arch` with the tops of the walls and partitions that meet set to one height where they agree within their sigmas.
+
+    Two bodies that join (consecutive walls, a partition and the host it ends on) are one height when their tops differ by
+    less than SAME_TOP combined sigmas; a group takes the inverse-variance mean, unless a member is further than SAME_TOP of
+    its own sigmas from it (a chain of small steps is not one level). A top without a sigma is never merged.
+    """
+    bodies = {e["id"]: arch["parameters"][e["params"]["top"]] for e in arch["elements"] if e["kind"] in ("wall", "partition")}
+    ids = {e["id"]: e["params"]["top"] for e in arch["elements"] if e["kind"] in ("wall", "partition")}
+    links = [*wall_links(arch).items(), *((pid, h) for pid, p in partition_plans(arch, wall_footprints(arch)).items() for h in p["hosts"])]
+    sigma = {k: max(v.get("sigma", 0.0), 1e-6) for k, v in bodies.items()}
+    group = {k: k for k in bodies}
+
+    def root(k):
+        while group[k] != k:
+            k = group[k]
+        return k
+
+    for a, b in links:
+        if abs(bodies[a]["value"] - bodies[b]["value"]) <= SAME_TOP * math.hypot(sigma[a], sigma[b]):
+            group[root(a)] = root(b)
+    parameters = dict(arch["parameters"])
+    for r in {root(k) for k in bodies}:
+        members = [k for k in bodies if root(k) == r]
+        weights = [1 / sigma[k] ** 2 for k in members]
+        mean = sum(w * bodies[k]["value"] for w, k in zip(weights, members)) / sum(weights)
+        if len(members) > 1 and all(abs(bodies[k]["value"] - mean) <= SAME_TOP * sigma[k] for k in members):
+            for k in members:
+                parameters[ids[k]] = {**bodies[k], "value": mean}
+    return {**arch, "parameters": parameters}
