@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
+from room_model import regularize
 from room_model.context import StageContext, StageInputMissing, output_path, require
 from room_model.model import _Doc
 
@@ -131,6 +132,8 @@ def build(model_doc: dict, openings_doc: dict, vision: dict | None = None, tape:
     for dim in arch["dimensions"]:
         ends = dimension_endpoints(arch, dim["id"])
         dim["endpoints"] = None if ends is None else [[float(c) for c in ends[0]], [float(c) for c in ends[1]]]
+    if any("extent" in el for el in arch["elements"]):
+        regularize.underlay(arch)
     return arch
 
 

@@ -1801,8 +1801,10 @@ def floored(tmp_path_factory):
     width = _value(arch, door["params"]["width"])
     for along in (-width / 2 + 0.1, 0.0, width / 2 - 0.1):
         _, p, n = _on_face(arch, door, along)
-        for depth in (0.03, 0.08):
+        thickness = _value(arch, _element(arch, door["host"])["params"]["thickness"])
+        for depth in (0.03, 0.08, thickness - 0.02):  # as far as the outer face of the wall
             add("threshold", *(p - n * depth))
+        add("outside", *(p - n * (thickness + 0.03)))
     for host in (e for e in arch["elements"] if e["kind"] == "wall"):
         thickness = _value(arch, host["params"]["thickness"])
         n = np.array([math.cos(_value(arch, host["params"]["azimuth"])), math.sin(_value(arch, host["params"]["azimuth"]))])

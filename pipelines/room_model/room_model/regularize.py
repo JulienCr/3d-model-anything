@@ -14,6 +14,7 @@ SQUARING_SIGMAS = 3.0  # a deviation within 3 sigma_azimuth cannot be told from 
 FRAME_PASSES = 4
 FRAME_STEP_DEG = 0.05  # resolution of the frame scan, far below the squaring tolerance
 QUARTER = np.pi / 2
+FLOOR_SILL = 0.03  # m: an opening whose sill is this low (the parameters' own sigma is of that order) is cut down to the floor
 ON_BOUNDARY = 1e-6  # m: a segment end this close to the old floor boundary touched a wall
 
 
@@ -149,9 +150,30 @@ def _rings(region: shapely.MultiPolygon) -> list[dict]:
              "holes": [[[float(x), float(z)] for x, z in h.coords[:-1]] for h in g.interiors]} for g in region.geoms]
 
 
+def _thresholds(doc: dict) -> list[shapely.Polygon]:
+    """Plan strip of each floor-based cut (a door, a passage, a through niche down to the floor) in a wall, from the
+    interior face to the outer face: the threshold is floor too."""
+    params, by_id, out = doc["parameters"], {e["id"]: e for e in doc["elements"]}, []
+    for el in doc["elements"]:
+        host = by_id.get(el.get("host"))
+        if el["kind"] not in ("door", "opening", "niche") or host is None or host["kind"] != "wall":
+            continue
+        if params[el["params"]["sill"]]["value"] > FLOOR_SILL or (el["kind"] == "niche" and not el.get("through")):
+            continue
+        az = params[host["params"]["azimuth"]]["value"]
+        n, thickness = _normal(az), params[host["params"]["thickness"]]["value"]
+        start, end = np.array(host["start"]), np.array(host["end"])
+        u = (end - start) / np.linalg.norm(end - start)
+        centre, half = params[el["params"]["center_s"]]["value"], params[el["params"]["width"]]["value"] / 2
+        a, b = (start + u * (centre + s * half) for s in (-1.0, 1.0))
+        a, b = (q + n * (params[host["params"]["offset"]]["value"] - n @ q) for q in (a, b))
+        out.append(shapely.Polygon([a, b, b - n * thickness, a - n * thickness]).buffer(0))
+    return out
+
+
 def underlay(doc: dict) -> None:
     """Give the floor and each ceiling an `extent`: the polygon or region pushed under (over) the walls to their
-    mid-thickness, so that its edge is hidden inside the bodies and it runs through door thresholds.
+    mid-thickness, so that its edge is hidden inside the bodies; the floor also runs to the outer face through floor-based cuts.
 
     The walls' lines are moved outward by half their thickness and joined by the shell's corner rule. `polygon` and
     `region` stay the interior; builders draw `extent` when it is there. No extent is written when the outer lines do
@@ -165,7 +187,8 @@ def underlay(doc: dict) -> None:
     outer = shapely.Polygon(shell._corners(outline, lines))
     if not outer.is_valid or not outer.contains(inner):
         return
-    floor["extent"] = [[float(x), float(z)] for x, z in outer.exterior.coords[:-1]]
+    joined = shapely.union_all([outer, *_thresholds(doc)])
+    floor["extent"] = [[float(x), float(z)] for x, z in (joined if joined.geom_type == "Polygon" else outer).exterior.coords[:-1]]
     band = outer.difference(inner)
     reach = max(doc["parameters"][e["params"]["thickness"]]["value"] for e in doc["elements"] if e["kind"] == "wall") / 2 + zones.MIN_FEATURE
     for el in (e for e in doc["elements"] if e["kind"] == "ceiling"):

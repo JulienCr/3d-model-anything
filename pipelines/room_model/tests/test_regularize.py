@@ -259,6 +259,24 @@ def test_floor_and_ceilings_extend_under_the_walls_to_their_mid_thickness():
     assert sum(c["area_m2"] for c in out["diagnostics"]["ceilings"]) == pytest.approx(inner.area, abs=1e-6)
 
 
+def test_the_floor_runs_through_the_whole_thickness_of_a_floor_based_cut():
+    doc, outline = hand_shell(RECT, [0.0] * 4)
+    out = regularize.apply(doc, outline, NO_SAMPLES)
+    wall = _walls(out)["M1"]
+    for kind, sill, through, expected in (("door", 0.0, None, True), ("opening", 0.0, None, True), ("niche", 0.0, True, True),
+                                           ("niche", 0.0, False, False), ("window", 0.9, None, False), ("door", 0.5, None, False)):
+        arch = copy.deepcopy(out)
+        for name, v in (("center_s", 2.0), ("width", 0.9), ("sill", sill)):
+            arch["parameters"][f"x.{name}"] = {"value": v, "sigma": 0.01, "unit": "m", "source": "lidar"}
+        arch["elements"].append({"id": "X", "kind": kind, "host": wall["id"], "through": through,
+                                 "params": {n: f"x.{n}" for n in ("center_s", "width", "sill")}})
+        regularize.underlay(arch)
+        extent = shapely.Polygon(next(e for e in arch["elements"] if e["kind"] == "floor")["extent"])
+        reached = extent.contains(shapely.Point(2.0, -0.18)) and not extent.contains(shapely.Point(2.0, -0.23))
+        assert reached == expected, (kind, sill, through)
+        assert not extent.contains(shapely.Point(3.0, -0.18))  # beside the cut the extent stops at mid-thickness
+
+
 def test_a_squaring_beyond_three_sigma_is_recorded_as_imposed():
     doc, outline = hand_shell(RECT, [1.5, 0.0, 0.0, 0.0], sigma_deg=0.2)
     walls = regularize.apply(doc, outline, NO_SAMPLES)["diagnostics"]["squaring"]["walls"]
