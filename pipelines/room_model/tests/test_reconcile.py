@@ -240,3 +240,37 @@ def test_a_failed_reconciliation_leaves_no_stale_report(ctx, monkeypatch):
     architecture.run(ctx)
     assert json.loads((ctx.out / "reconcile.json").read_text(encoding="utf-8")) == {"schema": reconcile.SCHEMA, "error": "ValueError: boom"}
     assert "indisponible" in (ctx.out / "reconcile.md").read_text(encoding="utf-8")
+
+
+def test_a_taped_wall_length_moves_the_less_certain_end_wall(ctx):
+    arch = _arch(ctx)
+    length = next(d for d in arch["dimensions"] if d["kind"] == "wall_length")
+    doc, _ = _run(ctx, {length["id"]: round(length["value"] + 0.04, 4)})
+    after = _arch(ctx)
+    dim = next(d for d in after["dimensions"] if d["id"] == length["id"])
+    assert dim["value"] == pytest.approx(length["value"] + 0.04, abs=1e-4) and dim["source"] == "tape"
+    applied = after["diagnostics"]["tape"]["applied"]
+    assert [r["id"] for r in applied] == [length["id"]] and "déplacé" in applied[0]["effect"]
+    assert after["diagnostics"]["tape"]["moved"][0]["wall"] != dim["elements"][0]  # a neighbour moved, not the wall itself
+
+
+def test_a_wall_length_that_would_move_a_wall_too_far_is_refused(ctx):
+    arch = _arch(ctx)
+    length = next(d for d in arch["dimensions"] if d["kind"] == "wall_length")
+    _run(ctx, {length["id"]: round(length["value"] + 1.5, 4)})
+    tape = _arch(ctx)["diagnostics"]["tape"]
+    assert tape["applied"] == [] and "déplacement" in tape["not_applied"][0]["reason"]
+
+
+def test_every_measure_action_names_a_row_of_the_survey(ctx):
+    arch = _arch(ctx)
+    outline = reconcile._outline(arch)
+    a, b = outline[0], outline[1]
+    b_dir = reconcile._direction(b)
+    b["end"] = [b["end"][0] - 0.3 * b_dir[1], b["end"][1] + 0.3 * b_dir[0]]  # a corner far out of square
+    outline[2]["start"] = list(b["end"])
+    actions = [x for c in reconcile.element_checks(arch) for x in c["actions"] if x.startswith("measure:")]
+    from room_model import survey_page
+
+    rows = {r.dim["id"] for r in survey_page.numbered_rows(_arch(ctx))}
+    assert actions and all(x.removeprefix("measure:") in rows for x in actions)

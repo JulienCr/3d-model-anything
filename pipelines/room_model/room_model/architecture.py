@@ -122,6 +122,10 @@ def build(model_doc: dict, openings_doc: dict, vision: dict | None = None, tape:
     if overrides:
         arch["diagnostics"]["overrides"] = user_overrides.apply(arch, overrides, {**model_doc["parameters"], **openings_doc["parameters"]})
     arch["dimensions"] += _wall_length_dimensions(arch)
+    for row in (arch["diagnostics"].get("tape") or {}).get("applied", []):  # a taped wall length keeps its tape identity
+        dim = next((d for d in arch["dimensions"] if d["id"] == row["id"] and d["kind"] == "wall_length"), None)
+        if dim is not None:
+            dim.update(scan_value=row["scan"], scan_sigma=dim["sigma"], value=row["tape"], source="tape", sigma=tape_merge.TAPE_SIGMA)
     hosts, centres = {e["id"]: e for e in arch["elements"]}, {o["id"]: o["center"] for o in openings_doc["openings"]}
     for el in arch["elements"]:
         if el["kind"] in OPENING_KINDS:

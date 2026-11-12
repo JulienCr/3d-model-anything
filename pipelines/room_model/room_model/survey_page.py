@@ -19,7 +19,8 @@ from room_model.context import StageContext
 from room_model.fmt import fr
 from room_model.photo_geom import LOOSE_TOLERANCE, SURVEY_FACING_COS, DepthMaps, PosedPhoto, best_views, load_posed_photos, load_room_mesh, occluded_fraction, project, room_boxes, to_upright, upright, upright_size
 
-GROUP = {"opening_width": 0, "opening_height": 0, "opening_sill": 0, "leaf_width": 0, "leaf_height": 0, "width": 1, "length": 1, "ceiling_height": 2}
+GROUP = {"opening_width": 0, "opening_height": 0, "opening_sill": 0, "leaf_width": 0, "leaf_height": 0, "width": 1, "length": 1,
+         "wall_length": 1, "ceiling_height": 2}
 SOURCES = {"lidar": "LiDAR", "roomplan": "RoomPlan", "assumed": "valeur supposée", "llm": "LLM", "photo": "photos", "tape": "mètre ruban"}
 PRIORITY_SIGMA = 0.02  # m
 PRIORITY_SOURCES = ("roomplan", "llm", "assumed")
@@ -210,6 +211,8 @@ def _describe(dim: dict, arch: dict) -> str:
         return f"{label}{where}"
     if kind == "ceiling_height":
         return f"{label}, du sol au plafond, à l'endroit marqué sur le plan"
+    if kind == "wall_length":  # above the skirtings, which shorten a reading taken at the floor
+        return f"{label}, le long du mur à environ {fr(STATION_HEIGHT, 2)} m du sol, au-dessus des plinthes"
     return f"{label}, à environ {fr(STATION_HEIGHT, 2)} m du sol, entre les deux murs"
 
 

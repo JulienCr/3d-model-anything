@@ -122,9 +122,9 @@ def test_survey_page(full):
     for n, row in rows.items():
         assert ("à reprendre en priorité" in row) == _priority(dims[n]), numbers[n]
     assert any(dims[n]["source"] == "roomplan" for n in numbers)
-    assert not {"L-M1", "B1-u"} & set(numbers.values())  # not on the sheet
+    assert "B1-u" not in set(numbers.values()) and "L-M1" in set(numbers.values())  # wall lengths are taped, beams are not
     assert "Largeur du vantail" in rows[next(n for n, d in numbers.items() if d == "Door_1-leaf-w")]
-    assert all(d["kind"] in {"opening_width", "opening_height", "opening_sill", "leaf_width", "leaf_height", "width", "length", "ceiling_height"} for d in dims.values())
+    assert all(d["kind"] in {"opening_width", "opening_height", "opening_sill", "leaf_width", "leaf_height", "width", "length", "wall_length", "ceiling_height"} for d in dims.values())
 
     cropped = {numbers[n] for n, r in rows.items() if "data:image/jpeg;base64," in r}
     assert {"Door_1-leaf-w", "Door_1-leaf-h", "Window_1-leaf-w", "Window_1-sill"} <= cropped
@@ -667,10 +667,10 @@ def test_tape_moves_the_ceiling(env):
 
 
 def test_tape_unknown_id(env):
-    arch = env.merge(None, {"Nope-w": 1.0, "Door_1-w": "abc", "Door_1-h": -2.0, "L-M1": 6.0, "Window_1-w": 1.25})
+    arch = env.merge(None, {"Nope-w": 1.0, "Door_1-w": "abc", "Door_1-h": -2.0, "L-M1": 16.0, "Window_1-w": 1.25})
     listed = {n["id"]: n["reason"] for n in arch["diagnostics"]["tape"]["not_applied"]}
     assert set(listed) == {"Nope-w", "Door_1-w", "Door_1-h", "L-M1"} and all(listed.values())
-    assert "inconnue" in listed["Nope-w"]
+    assert "inconnue" in listed["Nope-w"] and "déplacement" in listed["L-M1"]  # a wall length that would move a wall metres away
     assert _param(arch, "Door_1", "width") == _param(env.arch, "Door_1", "width")
     assert [a["id"] for a in arch["diagnostics"]["tape"]["applied"]] == ["Window_1-w"]
 

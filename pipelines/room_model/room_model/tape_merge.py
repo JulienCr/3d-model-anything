@@ -171,6 +171,46 @@ def _apply_station(arch: dict, dim: dict, value: float, anchors: dict, changed: 
     return {"effect": f"mur {mover['id']} déplacé de {'+' if delta >= 0 else '-'}{abs(delta) * 100:.1f} cm".replace(".", ",")}
 
 
+def _corner(a: dict, b: dict) -> np.ndarray:
+    return np.linalg.solve(np.stack([a["normal"], b["normal"]]), [a["offset"], b["offset"]])
+
+
+def _apply_wall_length(arch: dict, dim_id: str, value: float, anchors: dict, changed: dict, rep: dict) -> dict:
+    """`L-<label>`: the wall's corner-to-corner length, set by moving whichever of its two end walls has the larger
+    offset sigma along its normal (bounded like a station: MOVE_SIGMAS sigmas or one wall thickness)."""
+    walls = [e for e in arch["elements"] if e["kind"] == "wall"]
+    wall = next((w for w in walls if f"L-{w['label']}" == dim_id), None)
+    if wall is None:
+        raise ValueError("cote inconnue de l'architecture")
+    near = lambda p, q: np.linalg.norm(np.subtract(p, q)) < ON_LINE  # noqa: E731
+    prev = next((w for w in walls if w is not wall and near(w["end"], wall["start"])), None)
+    nxt = next((w for w in walls if w is not wall and near(w["start"], wall["end"])), None)
+    if prev is None or nxt is None:
+        raise ValueError(f"le mur {wall['label']} n'a pas deux murs voisins, sa longueur ne se règle pas")
+    sigma = {w["id"]: arch["parameters"][w["params"]["offset"]]["sigma"] for w in (prev, nxt)}
+    mover = prev if sigma[prev["id"]] > sigma[nxt["id"]] else nxt
+
+    def length(shift: float) -> float:
+        lines = {k: dict(v) for k, v in _lines(arch).items()}
+        lines[mover["label"]]["offset"] += shift
+        return float(np.linalg.norm(_corner(lines[wall["label"]], lines[nxt["label"]]) - _corner(lines[prev["label"]], lines[wall["label"]])))
+
+    slope = length(1e-3) / 1e-3 - length(0.0) / 1e-3
+    if abs(slope) < 1e-6:
+        raise ValueError("murs voisins parallèles au mur, sa longueur ne dépend pas d'un déplacement")
+    before = length(0.0)
+    delta = (value - before) / slope
+    limit = max(MOVE_SIGMAS * float(np.hypot(*sigma.values())), arch["parameters"][mover["params"]["thickness"]]["value"])
+    if abs(delta) > limit:
+        raise ValueError(f"déplacement du mur {mover['label']} de {abs(delta) * 100:.0f} cm (au-delà de {limit * 100:.0f} cm), saisie écartée".replace(".", ","))
+    if abs(delta) > 1e-9:
+        _move_wall(arch, mover, delta)
+        rep["moved"].append({"wall": mover["id"], "delta": float(delta), "station": dim_id})
+    _refresh_stations(arch, anchors, changed)
+    return {"effect": f"mur {mover['id']} déplacé de {'+' if delta >= 0 else '-'}{abs(delta) * 100:.1f} cm".replace(".", ","),
+            "scan": before}
+
+
 def _apply_ceiling(arch: dict, dim: dict, value: float) -> dict:
     ceiling = _elements(arch)[dim["elements"][0]]
     pid = ceiling["params"]["level"]
@@ -245,7 +285,10 @@ def apply(arch: dict, tape: dict) -> dict:
                 else:
                     row["effect"] = _apply_station(arch, dim, value, anchors, changed, rep)["effect"]
                 dim.update(scan_value=row["scan"], scan_sigma=changed.get(dim_id, (None, dim["sigma"]))[1], value=value, sigma=TAPE_SIGMA, source="tape")
-            elif dim_id in dims or dim_id.startswith("L-"):
+            elif dim_id.startswith("L-"):
+                done = _apply_wall_length(arch, dim_id, value, anchors, changed, rep)
+                row.update(effect=done["effect"], scan=done["scan"])
+            elif dim_id in dims:
                 raise ValueError("cote non mesurable au mètre sur le relevé")
             else:
                 raise ValueError("cote inconnue de l'architecture")
