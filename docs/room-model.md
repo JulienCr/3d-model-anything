@@ -54,9 +54,10 @@ A stage whose output exists is skipped unless `--force`. Some stages also rerun 
 
 | Stage | Reruns when newer |
 |---|---|
+| `openings` | `model.json` |
 | `anchor` | `openings.json`, `vision/answers.json`, `overrides.json` |
 | `edge_pick` | `anchors.json` |
-| `architecture` | `anchors.json`, `edge_pick/answers.json`, `vision/answers.json`, `measurements.json`, `overrides.json` |
+| `architecture` | `model.json`, `openings.json`, `anchors.json`, `edge_pick/answers.json`, `vision/answers.json`, `measurements.json`, `overrides.json` |
 | `textures` | `architecture.json` |
 | `blender` | `architecture.json`, `textures/textures.json` |
 
@@ -83,7 +84,7 @@ Source priority, the higher replaces the lower: `tape` > `photo` > `llm` > `lida
 
 - A door or window gets its photo measure in separate `leaf_width` / `leaf_height` / `leaf_center_s` parameters (the moving panel); `width` / `height` stay the extent of the hole. A niche or an opening takes its photo measure in place of the lower sources.
 - A photo value that disagrees with a measured source (`roomplan`, `lidar`) by more than 3 combined sigmas is kept but the element gets `to_verify`. A photo leaf that cannot fit the scanned hole (leaf plus its visible jambs) is refused: its pair of edges is kept out, the reason is in `diagnostics.anchor.reasons` and the element gets `to_verify`. A tape leaf is applied; `reconcile.json` then reports a `leaf_fits` conflict.
-- An element the photos measured whole ignores the corners the LLM clicked; its typing (type, hinge, swing...) is still copied.
+- An element the photos measured whole ignores the corners the LLM clicked; its typing (type, hinge, swing...) is still copied. The LLM clicks a door or window at the outer edges of its casings (its `width` and `height` are the outer extent, casings included) and a bare opening or niche at the arris where the jamb meets the room-side face.
 - The tape sigma is fixed at 0.5 cm. A tape value that cannot be applied is listed in `diagnostics.tape.not_applied`, never applied.
 
 Sigma propagation: wall planes get their sigma from the LiDAR fit (see Sigma model); a derived dimension takes its sigma from the parameters it uses (a station or a wall length: the sigmas of the wall lines it spans, at the measuring points or corners); a dimension's `source` is the weakest source among the parameters it uses. The LLM's corner clicks get the spread of the crops that agree (at least 1 cm). A moved wall keeps its scan value and sigma in `scan_value` / `scan_sigma` next to the tape ones.
@@ -321,6 +322,9 @@ Edge `i` runs from `polygon[i]` to `polygon[i+1]`; `edge_heights[i]` is its heig
 ## Limits
 
 - Wall thickness is assumed unless a jamb is measured.
+- `jamb_width` (the visible frame between hole and leaf) is honoured by the anchor guard, the survey estimate and the Blender layout, but nothing produces it yet: the 5 cm default stands unless an override or a future measure sets it.
+- Squareness is checked (`corner_square` in the reconciliation) but the survey page offers no diagonal to tape; the two wall lengths of the corner are the measures it proposes.
+- Blender is stopped after 30 minutes (`BLENDER_TIMEOUT_S`): a scene takes about a minute, so a hung Blender (a modal dialog, a stuck add-on) fails the stage with a clear message instead of blocking it.
 - Open doors are not anchored.
 - A curtained or frosted window defeats the mask: it needs the pick step (the LLM picks a lettered candidate edge), or a tape value.
 - Anchoring and textures need photos; without them the scan and RoomPlan values stand.

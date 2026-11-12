@@ -98,7 +98,7 @@
 - [ ] **Step 1: tests.** `test_upright_roundtrip` (random sensor pixels → upright → `to_sensor` identity for each of the 4 `up_turns`); `test_backproject_hits_wall` (pixel of a known synthetic wall corner back-projects within 1 cm); `test_depth_map_occlusion` (a box in front of a wall: wall points behind it fail the 3 cm depth test); `test_architecture_dimensions` (synthetic with door + window: `Door_1-w`, `Door_1-h`, `Window_1-sill`, `L-M1` present and within 2 cm of truth); `test_survey_page` (synthetic with door + window: page exists, every number in `plan_numbers.json` appears in the SVG and has one input row, `Door_1-w` row present, a dimension with source `roomplan` carries the priority badge, no `http` URL in the file); `test_tape_report` (tape value 2 cm off → difference column shows `+2,0`).
 - [ ] **Step 2:** FAIL.
 - [ ] **Step 3: implement** per interfaces. Rasterise at most 320 px on the long side.
-- [ ] **Step 4:** full suite passes; run on the real capture: `.venv/bin/python -m room_model architecture --capture ../../data/captures-in/bureau/Room --out ../../data/room-model/bureau` (with `--no-llm`) succeeds and writes the sheet.
+- [ ] **Step 4:** full suite passes; run on the real capture: `.venv/bin/python -m room_model architecture --capture ../../data/captures-in/<room>/Room --out ../../data/room-model/<room>` (with `--no-llm`) succeeds and writes the sheet.
 - [ ] **Step 5: commit** `feat(room-model): add the architecture stage and the tape measurement sheet`.
 
 ### Task 4: Blender scene builder: shell, cuts, collections, scan, GLB — `sonnet-high`
@@ -165,7 +165,7 @@
 - [ ] **Step 2–4:** FAIL, implement, pass.
 - [ ] **Step 5: commit** `feat(room-model): add niches, cornices, skirting and architraves`.
 
-**Checkpoint (orchestrator):** run `all --no-llm` on the capture, write trace `09-bureau-ouvertures-rig` (blend, glb, renders, measurement sheet, index.html), hand the measurement list to the user.
+**Checkpoint (orchestrator):** run `all --no-llm` on the capture, write trace `09-<room>-ouvertures-rig` (blend, glb, renders, measurement sheet, index.html), hand the measurement list to the user.
 
 ### Task 8: `vision` stage — `sonnet-high`
 
@@ -200,7 +200,7 @@
 - [ ] **Step 2–4:** FAIL, implement, pass.
 - [ ] **Step 5: commit** `feat(room-model): apply LLM corrections and declared niches with scan values kept`.
 
-**Checkpoint (orchestrator):** run `vision` (Opus) on the capture, rebuild, trace `10-bureau-llm-moulures`; hand the survey page (`measurements/index.html`) to the user; with their `measurements.json`, run `compare-tape`, rebuild with `--tape`, and put both reports in the trace.
+**Checkpoint (orchestrator):** run `vision` (Opus) on the capture, rebuild, trace `10-<room>-llm-moulures`; hand the survey page (`measurements/index.html`) to the user; with their `measurements.json`, run `compare-tape`, rebuild with `--tape`, and put both reports in the trace.
 
 ### Task 10: Projected textures — `sonnet-high`
 
@@ -219,7 +219,7 @@
 - [ ] **Step 2–4:** FAIL, implement, pass; time the stage on the capture (must stay within the 30 min budget with the other stages).
 - [ ] **Step 5: commit** `feat(room-model): project photos onto walls, floor and ceilings with an occlusion mask`.
 
-**Checkpoint (orchestrator):** trace `11-bureau-textures`.
+**Checkpoint (orchestrator):** trace `11-<room>-textures`.
 
 ### Task 11: Integration and docs — `sonnet-low`
 
@@ -230,7 +230,7 @@
 - [ ] **Step 1–4:** test, FAIL, implement, pass.
 - [ ] **Step 5: commit** `docs(room-model): document the architecture stages and the Blender scene`.
 
-**Checkpoint (orchestrator):** full run timed on the capture, trace `12-bureau-final`, whole-branch review.
+**Checkpoint (orchestrator):** full run timed on the capture, trace `12-<room>-final`, whole-branch review.
 
 ---
 

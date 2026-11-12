@@ -61,9 +61,10 @@ Order: `registration, shell, model, export, openings, vision, anchor, edge_pick,
 
 | Stage | Reruns by itself when newer |
 |---|---|
+| `openings` | `model.json` |
 | `anchor` | `openings.json`, `vision/answers.json`, `overrides.json` |
 | `edge_pick` | `anchors.json` |
-| `architecture` | `anchors.json`, `edge_pick/answers.json`, `vision/answers.json`, `measurements.json`, `overrides.json` |
+| `architecture` | `model.json`, `openings.json`, `anchors.json`, `edge_pick/answers.json`, `vision/answers.json`, `measurements.json`, `overrides.json` |
 | `textures` | `architecture.json` |
 | `blender` | `architecture.json`, `textures/textures.json` |
 
