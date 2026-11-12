@@ -19,6 +19,7 @@ SCAN_FILE = "scan_decimated.ply"
 OUTPUTS = ("architecture.blend", "architecture.glb", "renders/top.png", "renders/persp_1.png", "renders/persp_2.png",
            "renders/open.png", "blender_report.json")
 FORWARDED_ENV = ("ROOM_MODEL_NO_MEASUREIT",)
+BLENDER_TIMEOUT_S = 1800  # a scene builds and renders in about a minute; after 30 min Blender waits on a dialog or a stuck add-on
 BACKUPS = ("architecture.blend1",)  # Blender's own copy of the file it overwrites
 
 
@@ -42,11 +43,19 @@ def _resolve() -> str:
     return exe
 
 
-def run_blender(args: list, log: Path) -> None:
-    """Runs Blender with `args` (Path items are converted for a Windows exe); the output goes to `log`."""
+def run_blender(args: list, log: Path, timeout: float = BLENDER_TIMEOUT_S) -> None:
+    """Runs Blender with `args` (Path items are converted for a Windows exe); the output goes to `log`.
+
+    RuntimeError when Blender fails or runs longer than `timeout` seconds (then it is killed).
+    """
     exe = _resolve()
     env = {**os.environ, "WSLENV": ":".join(filter(None, [os.environ.get("WSLENV"), *FORWARDED_ENV]))}  # a Windows exe sees only WSLENV-listed variables
-    proc = subprocess.run([exe, *map(_native, args)], capture_output=True, text=True, errors="replace", env=env)
+    try:
+        proc = subprocess.run([exe, *map(_native, args)], capture_output=True, text=True, errors="replace", env=env, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("".join(x if isinstance(x, str) else (x or b"").decode(errors="replace") for x in (exc.stdout, exc.stderr)), encoding="utf-8")
+        raise RuntimeError(f"Blender still running after {timeout:.0f} s, stopped (hung on a dialog or an add-on?), see {log}") from None
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text(proc.stdout + proc.stderr, encoding="utf-8")
     if proc.returncode != 0:

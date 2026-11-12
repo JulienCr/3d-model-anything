@@ -1,7 +1,7 @@
 """Builds the architecture scene from architecture.json, headless.
 
 blender --background --python build_scene.py -- --arch A --out-dir D [--textures T] [--scan S]
-Writes D/architecture.blend, D/architecture.glb and D/renders/{top,persp_1,persp_2}.png.
+Writes D/architecture.blend, D/architecture.glb, D/renders/{top,persp_1,persp_2,open}.png and D/blender_report.json.
 """
 import argparse
 import importlib

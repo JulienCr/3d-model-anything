@@ -331,8 +331,8 @@ def leaf_closed(maps: DepthMaps, photo: PosedPhoto, frame: FaceFrame, rect, thic
     if not inside.any():
         return True
     surface = zbuf[row[inside], col[inside]]
-    hits = photo.centre + (pts[inside] - photo.centre) * (surface / depth[inside])[:, None]
-    with np.errstate(invalid="ignore"):
+    with np.errstate(invalid="ignore"):  # no surface behind (inf) gives NaN coordinates, counted as open below
+        hits = photo.centre + (pts[inside] - photo.centre) * (surface / depth[inside])[:, None]
         delta = frame.coords(hits)[:, 2]
         closed = np.isfinite(delta) & (delta >= -(thickness + LOOSE_TOLERANCE)) & (delta <= LOOSE_TOLERANCE)
     return float(np.mean(closed)) >= CLOSED_SHARE

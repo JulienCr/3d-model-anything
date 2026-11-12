@@ -243,3 +243,21 @@ def test_edge_pick_reruns_after_a_new_anchor_and_architecture_after_new_picks(tm
     assert _run(tmp_path, "edge_pick") == 0 and calls.count("edge_pick") == 2
     os.utime(out / STAGE_OUTPUTS["edge_pick"], ns=(time.time_ns() + 2 * 10**10,) * 2)
     assert _run(tmp_path, "architecture") == 0 and calls.count("architecture") == 2
+
+
+def test_openings_and_architecture_rerun_after_a_new_model(tmp_path, monkeypatch):
+    calls = []
+    for stage in ("model", "openings", "architecture"):
+        def run(ctx, stage=stage):
+            calls.append(stage)
+            out = ctx.out / STAGE_OUTPUTS[stage]
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("{}")
+            return out
+
+        _fake_stage(monkeypatch, stage, run)
+    for stage in ("model", "openings", "architecture"):
+        assert _run(tmp_path, stage) == 0
+    os.utime(tmp_path / "out" / STAGE_OUTPUTS["model"], ns=(time.time_ns() + 10**10,) * 2)
+    assert _run(tmp_path, "openings") == 0 and _run(tmp_path, "architecture") == 0
+    assert calls.count("openings") == 2 and calls.count("architecture") == 2

@@ -26,8 +26,9 @@ STAGE_MODULES = {
 }
 
 
-STALE_AFTER = {"anchor": ("openings.json", "vision/answers.json", "overrides.json"), "edge_pick": ("anchors.json",),
-               "architecture": ("anchors.json", "edge_pick/answers.json", "vision/answers.json", "measurements.json", "overrides.json"), "textures": ("architecture.json",),
+STALE_AFTER = {"openings": ("model.json",), "anchor": ("openings.json", "vision/answers.json", "overrides.json"),
+               "edge_pick": ("anchors.json",),
+               "architecture": ("model.json", "openings.json", "anchors.json", "edge_pick/answers.json", "vision/answers.json", "measurements.json", "overrides.json"), "textures": ("architecture.json",),
                "blender": ("architecture.json", "textures/textures.json")}  # the stage reruns when one of these is newer than its output
 TAPE_FILE, OVERRIDES_FILE = "measurements.json", "overrides.json"
 

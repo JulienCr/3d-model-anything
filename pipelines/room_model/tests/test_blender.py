@@ -1849,3 +1849,13 @@ def test_the_ceilings_run_over_the_walls_and_no_sheet_is_coplanar_with_a_wall_ba
         assert facts["rays"][ray["name"]]["location"][2] == pytest.approx(floor_y - 0.001, abs=2e-4), "the rim sits 1 mm under the wall base"
     for ray in rays["inside"]:
         assert facts["rays"][ray["name"]]["location"][2] == pytest.approx(floor_y, abs=2e-4)
+
+
+def test_a_hung_blender_is_stopped_with_a_clear_error(tmp_path, monkeypatch):
+    fake = tmp_path / "blender-that-hangs"
+    fake.write_text("#!/bin/sh\necho started\nsleep 30\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("BLENDER", str(fake))
+    with pytest.raises(RuntimeError, match="still running after 1 s"):
+        blender_stage.run_blender(["--version"], tmp_path / "blender.log", timeout=1)
+    assert (tmp_path / "blender.log").exists()

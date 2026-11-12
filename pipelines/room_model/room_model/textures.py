@@ -478,6 +478,7 @@ def run(ctx: StageContext) -> Path:
     path = output_path(ctx, "textures")
     folder = path.parent
     folder.mkdir(parents=True, exist_ok=True)
+    path.unlink(missing_ok=True)  # first: an interrupted run must not leave an index naming deleted images
     for old in folder.glob("*.png"):
         old.unlink()
     fill = Fill.load(arch, folder / "fill")
