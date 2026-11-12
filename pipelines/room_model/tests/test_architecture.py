@@ -1045,3 +1045,18 @@ def test_a_leaf_is_checked_against_the_scanned_hole_not_a_narrower_llm_one(env):
     arch = env.merge(answers, anchors=_anchors(Door_1=item))
     assert "leaf_width" in _element(arch, "Door_1")["params"] and _param(arch, "Door_1", "width") == _param(env.arch, "Door_1", "width")
     assert arch["diagnostics"]["anchor"]["llm_not_applied"]["Door_1.width"] < hole - 0.1
+
+
+def test_an_override_can_prefer_the_scan_value_over_a_tape_or_llm_one(env):
+    scan = _param(env.arch, "Door_1", "width")
+    arch = env.merge(None, {"Door_1-w": scan["value"] + 0.25}, {"Door_1": {"prefer": {"width": "scan"}}})
+    width = _param(arch, "Door_1", "width")
+    assert (width["value"], width["sigma"], width["source"]) == (scan["value"], scan["sigma"], scan["source"])
+    assert _dim(arch, "Door_1-w")["value"] == scan["value"] and "user_override" in _element(arch, "Door_1")["flags"]
+    assert ("Door_1", "prefer") in {(a["element"], a["field"]) for a in _overrides(arch)["applied"]}
+
+
+@pytest.mark.parametrize("prefer", [{"width": "tape"}, {"colour": "scan"}, "scan"])
+def test_a_prefer_override_that_cannot_be_applied_is_rejected(env, prefer):
+    arch = env.merge(None, None, {"Door_1": {"prefer": prefer}})
+    assert [r["field"] for r in _overrides(arch)["rejected"]] == ["prefer"]

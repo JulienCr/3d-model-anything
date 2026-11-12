@@ -119,7 +119,7 @@ def build(model_doc: dict, openings_doc: dict, vision: dict | None = None, tape:
     if tape:
         arch["diagnostics"]["tape"] = tape_merge.apply(arch, tape)
     if overrides:
-        arch["diagnostics"]["overrides"] = user_overrides.apply(arch, overrides)
+        arch["diagnostics"]["overrides"] = user_overrides.apply(arch, overrides, {**model_doc["parameters"], **openings_doc["parameters"]})
     arch["dimensions"] += _wall_length_dimensions(arch)
     hosts, centres = {e["id"]: e for e in arch["elements"]}, {o["id"]: o["center"] for o in openings_doc["openings"]}
     for el in arch["elements"]:
