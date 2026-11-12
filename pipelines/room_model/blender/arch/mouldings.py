@@ -385,6 +385,8 @@ def _architraves(arch: dict, el: dict, hosts: dict, bodies: dict, solids: dict, 
     out = []
     for side in sides:
         (left, top, right, bottom), (s0, s1) = fitted[side].casings, fitted[side].bars
+        if not any((left, top, right, bottom)):
+            continue
         closed = bottom > 0
         path = [(s0, y0), (s0, y0 + lay.cut_h), (s1, y0 + lay.cut_h), (s1, y0)]
         normals = [(-1.0, 0.0), (0.0, 1.0), (1.0, 0.0)] + ([(0.0, -1.0)] if closed else [])

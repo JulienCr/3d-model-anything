@@ -1436,6 +1436,13 @@ def test_a_casing_stops_at_the_free_length_of_its_host_face(abutted, oid, expect
 
 
 @needs_blender
+def test_a_cut_running_into_a_partition_is_named_in_the_report(abutted):
+    ctx = abutted[0]
+    warnings = json.loads((ctx.out / "blender_report.json").read_text(encoding="utf-8"))["avertissements"]
+    assert len(warnings) == 1 and warnings[0].startswith("Door_C : la découpe empiète de 4,0 cm"), warnings
+
+
+@needs_blender
 @pytest.mark.parametrize("oid,verify", [("Door_A", False), ("Door_B", True), ("Door_C", True), ("Door_E", False)])
 def test_a_casing_clipped_below_the_minimum_is_flagged_with_its_door(abutted, oid, verify):
     _, _, facts = abutted

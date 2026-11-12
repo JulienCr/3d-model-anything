@@ -20,6 +20,7 @@ SNAP = 0.5
 SHADOW = 5.0  # x t a host is swept along a partition line to remove what sticks out behind it
 TOUCH_TOL = 0.001  # m: polygons overlapping by less than this only touch (mesh precision)
 SAME_TOP = 2.0  # sigmas: two tops measured this close, given their uncertainties, are the same height (about 95%)
+TOP_CAP = 0.05  # m: half the height of a standard skirting (about 10 cm), so a large sigma cannot erase a step a moulding would show
 
 
 def _sub(a, b):
@@ -364,11 +365,12 @@ def level_tops(arch: dict) -> dict:
     """`arch` with the tops of the walls and partitions that meet set to one height where they agree within their sigmas.
 
     Two bodies that join (consecutive walls, a partition and the host it ends on) are one height when their tops differ by
-    less than SAME_TOP combined sigmas; a group takes the inverse-variance mean, unless a member is further than SAME_TOP of
-    its own sigmas from it (a chain of small steps is not one level). A top without a sigma is never merged.
+    less than SAME_TOP combined sigmas and by no more than TOP_CAP. A group takes the inverse-variance mean; a member further
+    than SAME_TOP of its own sigmas (or TOP_CAP) from it is left at its own height and the rest is tried again. A top
+    without a sigma is never merged.
     """
-    bodies = {e["id"]: arch["parameters"][e["params"]["top"]] for e in arch["elements"] if e["kind"] in ("wall", "partition")}
     ids = {e["id"]: e["params"]["top"] for e in arch["elements"] if e["kind"] in ("wall", "partition")}
+    bodies = {k: arch["parameters"][pid] for k, pid in ids.items()}
     links = [*wall_links(arch).items(), *((pid, h) for pid, p in partition_plans(arch, wall_footprints(arch)).items() for h in p["hosts"])]
     sigma = {k: max(v.get("sigma", 0.0), 1e-6) for k, v in bodies.items()}
     group = {k: k for k in bodies}
@@ -379,14 +381,19 @@ def level_tops(arch: dict) -> dict:
         return k
 
     for a, b in links:
-        if abs(bodies[a]["value"] - bodies[b]["value"]) <= SAME_TOP * math.hypot(sigma[a], sigma[b]):
+        if abs(bodies[a]["value"] - bodies[b]["value"]) <= min(SAME_TOP * math.hypot(sigma[a], sigma[b]), TOP_CAP):
             group[root(a)] = root(b)
     parameters = dict(arch["parameters"])
     for r in {root(k) for k in bodies}:
         members = [k for k in bodies if root(k) == r]
-        weights = [1 / sigma[k] ** 2 for k in members]
-        mean = sum(w * bodies[k]["value"] for w, k in zip(weights, members)) / sum(weights)
-        if len(members) > 1 and all(abs(bodies[k]["value"] - mean) <= SAME_TOP * sigma[k] for k in members):
-            for k in members:
-                parameters[ids[k]] = {**bodies[k], "value": mean}
+        while len(members) > 1:
+            weights = [1 / sigma[k] ** 2 for k in members]
+            mean = sum(w * bodies[k]["value"] for w, k in zip(weights, members)) / sum(weights)
+            slack = {k: abs(bodies[k]["value"] - mean) / min(SAME_TOP * sigma[k], TOP_CAP) for k in members}
+            worst = max(members, key=slack.get)
+            if slack[worst] <= 1.0:
+                for k in members:
+                    parameters[ids[k]] = {**bodies[k], "value": mean}
+                break
+            members.remove(worst)
     return {**arch, "parameters": parameters}

@@ -300,13 +300,47 @@ def test_a_partition_takes_the_height_of_the_wall_it_ends_on():
     assert out["Partition_P1"] == out["W0"] and 2.50 < out["W0"] < 2.52
 
 
-def test_a_run_of_walls_whose_ends_disagree_is_not_levelled_by_chaining_neighbours():
+def test_an_outlier_is_left_out_and_the_rest_of_the_group_is_levelled():
+    arch = _ring(RECT)
+    _tops(arch, {"W0": (2.50, 0.01), "W1": (2.52, 0.01), "W2": (2.545, 0.01), "W3": (2.52, 0.01)})
+    out = _levelled(arch)
+    assert out["W0"] == out["W1"] == out["W3"] == pytest.approx((2.50 + 2.52 + 2.52) / 3) and out["W2"] == 2.545
+
+
+def test_a_run_of_small_steps_is_not_one_level():
     arch = _ring(RECT)
     _tops(arch, {"W0": (2.50, 0.015), "W1": (2.54, 0.015), "W2": (2.58, 0.015), "W3": (2.62, 0.015)})
-    assert _levelled(arch) == {"W0": 2.50, "W1": 2.54, "W2": 2.58, "W3": 2.62}
+    out = _levelled(arch)
+    assert out["W0"] == 2.50 and out["W1"] == 2.54, "the ends of a chain 12 cm apart are not neighbours' neighbours"
+    assert out["W2"] == out["W3"] == pytest.approx(2.60)
+
+
+def test_a_large_sigma_cannot_erase_a_real_step():
+    arch = _ring(RECT)
+    _tops(arch, {"W0": (2.50, 0.05), "W1": (2.62, 0.05), "W2": (2.50, 0.05), "W3": (2.62, 0.05)})
+    assert _levelled(arch) == {"W0": 2.50, "W1": 2.62, "W2": 2.50, "W3": 2.62}
 
 
 def test_tops_without_a_sigma_are_left_alone():
     arch = _ring(RECT)
     _tops(arch, {"W0": (2.50, 0.0), "W1": (2.51, 0.0)})
     assert _levelled(arch)["W0"] == 2.50 and _levelled(arch)["W1"] == 2.51
+
+
+def test_a_cut_outside_the_free_stretch_gets_no_casing_and_one_straddling_its_edge_keeps_what_fits():
+    lay = openings.Layout(cut_w=0.8, cut_h=2.0, bottom=0.0, centre=1.4, casings=(0.07, 0.07, 0.07, 0.0))
+    beyond = clip.fit(lay, (2.0, 3.0))
+    assert beyond.casings == (0.0, 0.0, 0.0, 0.0) and beyond.flags == ("to_verify",) and beyond.outside == pytest.approx(0.8)
+    straddling = clip.fit(lay, (0.0, 1.5))
+    assert straddling.casings == pytest.approx((0.07, 0.07, 0.0, 0.0)) and straddling.bars == pytest.approx((1.0, 1.5))
+    assert straddling.flags == ("to_verify",) and straddling.outside == pytest.approx(0.3)
+
+
+def test_the_overlap_of_a_cut_with_a_partition_is_measured():
+    arch, _ = _junction_case("jog_back")
+    el = {"id": "Door_X", "kind": "door", "host": "W4", "params": {k: f"Door_X.{k}" for k in ("width", "height", "sill", "center_s")}}
+    for k, v in (("width", 0.8), ("height", 2.0), ("sill", 0.0), ("center_s", 0.45)):
+        arch["parameters"][f"Door_X.{k}"] = {"value": v}
+    arch["elements"].append(el)
+    [(oid, over)] = clip.overlaps(arch)
+    assert oid == "Door_X" and over == pytest.approx(0.1 - 0.05, abs=0.006), "the cut starts 5 cm after the wall's start, the free face 10 cm"

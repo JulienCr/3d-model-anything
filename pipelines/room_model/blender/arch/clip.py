@@ -15,10 +15,12 @@ MIN_COVER = 0.001  # m: a covered run shorter than this is mesh precision
 @dataclass(frozen=True)
 class Fit:
     """What can be drawn on one face: `casings` (left, top, right, bottom) in m, `bars` the stretch (low, high) along the host
-    the top and bottom bars run over, `flags` ("to_verify" when a casing was dropped or the cut runs into another body)."""
+    the top and bottom bars run over, `outside` the length of the cut that lies beyond the free stretch, `flags` ("to_verify"
+    when a casing was dropped or the cut runs into another body)."""
     casings: tuple[float, float, float, float]
     bars: tuple[float, float]
     flags: tuple[str, ...] = ()
+    outside: float = 0.0
 
 
 def _inside(a, b, solid: list, cuts: list) -> list[tuple[float, float]]:
@@ -57,10 +59,17 @@ def free_span(host: dict, side: int, geom: dict, quad: list, solids: dict, near:
 
 
 def fit(lay: openings.Layout, free: tuple[float, float]) -> Fit:
-    """The casings of `lay` cut back to the free stretch `free`; one left narrower than CASING_MIN is dropped."""
+    """The casings of `lay` cut back to the free stretch `free`; one left narrower than CASING_MIN is dropped.
+
+    A cut with no overlap with the free stretch gets no casing at all.
+    """
     (c_lo, c_hi), (lo, hi) = lay.span, free
+    shown = min(c_hi, hi) - max(c_lo, lo)
+    outside = (c_hi - c_lo) - max(shown, 0.0)
+    flags = ["to_verify"] if outside > FACE_LIFT else []
+    if shown <= 0:
+        return Fit((0.0, 0.0, 0.0, 0.0), (c_lo, c_lo), tuple(flags), outside)
     left, top, right, bottom = lay.casings
-    flags = []
     sides = []
     for width, room in ((left, c_lo - lo), (right, hi - c_hi)):
         kept = min(width, max(room, 0.0))
@@ -68,9 +77,7 @@ def fit(lay: openings.Layout, free: tuple[float, float]) -> Fit:
             kept = 0.0
             flags.append("to_verify")
         sides.append(kept)
-    if c_lo < lo - FACE_LIFT or c_hi > hi + FACE_LIFT:
-        flags.append("to_verify")
-    return Fit((sides[0], top, sides[1], bottom), (max(c_lo, lo), min(c_hi, hi)), tuple(dict.fromkeys(flags)))
+    return Fit((sides[0], top, sides[1], bottom), (max(c_lo, lo), min(c_hi, hi)), tuple(dict.fromkeys(flags)), outside)
 
 
 def fits(arch: dict, el: dict, host: dict, sides: tuple[int, ...], bodies: dict, solids: dict) -> dict[int, Fit]:
@@ -89,3 +96,19 @@ def outer_span(lay: openings.Layout, fitted: dict[int, Fit]) -> tuple[float, flo
     """The cut out to the widest casing drawn on any face."""
     left, right = (max(one.casings[k] for one in fitted.values()) for k in (0, 2))
     return lay.span[0] - left, lay.span[1] + right
+
+
+def overlaps(arch: dict) -> list[tuple[str, float]]:
+    """(element id, m of its cut beyond the free face of its host) for every cut that runs into another body or past its host."""
+    bodies, solids = plan.built(arch)
+    hosts = {e["id"]: e for e in arch["elements"]}
+    out = []
+    for el in arch["elements"]:
+        host = hosts.get(el.get("host"))
+        if el["kind"] not in ("door", "window", "opening", "niche") or host is None or host["kind"] not in ("wall", "partition"):
+            continue
+        sides = (1, -1) if host["kind"] == "partition" else (1,)
+        worst = max(f.outside for f in fits(arch, el, host, sides, bodies, solids).values())
+        if worst > FACE_LIFT:
+            out.append((el["id"], worst))
+    return out
