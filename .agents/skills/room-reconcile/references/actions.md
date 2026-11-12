@@ -12,7 +12,7 @@ When they answer, write the value into `measurements.json` v2 and keep their not
 {"version": 2, "values": {"Door_3-h": {"value_m": 2.103, "date": "2026-11-12", "note": "remesuré"}}}
 ```
 
-- **Re-measure after a `probable_tape_error`:** keep the old value out of `values` until the new one arrives. Replace it with `{"value_m": null, "note": "à remesurer : <reason>"}`. A note without a value is kept and never applied, so the doubtful value cannot slip into the model.
+- **Re-measure after a `probable_tape_error`:** the pipeline already keeps the value out of the model (`tape_set_aside`), so leave the entry and overwrite `value_m` when the new reading arrives. `{"value_m": null, "note": "..."}` is the form for a value the user withdraws: a note without a value is kept and never applied.
 - **Wall lengths and stations:** `L-<label>` dimensions are corner to corner along the room face. Stations (`S..`) are the distance between two parallel walls at a marked spot. Remind the user which one a row is before they measure again.
 
 ## `prefer:<parameter id>:<source>`
