@@ -8,7 +8,7 @@ import math
 import bmesh
 import bpy
 
-from . import catalogue, frame, openings, plan
+from . import catalogue, clip, frame, openings, plan
 from .catalogue import FIXED, HINGED, POCKET, SLIDING
 
 FRAME_DEPTH = 0.10  # m, frame depth when the wall is thicker than this
@@ -145,7 +145,7 @@ def _rig(obj: bpy.types.Object, leaf: dict, root: bpy.types.Object) -> None:
         _driver(obj, "scale", 0, flip, root)
 
 
-def _root(arch: dict, el: dict, j: catalogue.Joinery, lay: openings.Layout, host: dict, geom: dict, collection) -> bpy.types.Object:
+def _root(arch: dict, el: dict, j: catalogue.Joinery, lay: openings.Layout, flags: tuple, host: dict, geom: dict, collection) -> bpy.types.Object:
     sill, (nx, nz) = lay.bottom, geom["n"]
     (xa, za), (xb, zb) = (frame.face_point(geom, lay.centre, side) for side in (1, -1))
     x, z = (xa + xb) / 2, (za + zb) / 2  # the middle of the built thickness
@@ -161,18 +161,18 @@ def _root(arch: dict, el: dict, j: catalogue.Joinery, lay: openings.Layout, host
             ui.update(default=default, description=text)
         else:
             ui.update(min=span[0], max=span[1], soft_min=span[0], soft_max=span[1], description=text)
-    if lay.flags:
-        root["flags"] = ",".join(lay.flags)
+    if flags:
+        root["flags"] = ",".join(flags)
     collection.objects.link(root)
     return root
 
 
-def _build(arch: dict, el: dict, host: dict, geom: dict, j: catalogue.Joinery, collection) -> list[bpy.types.Object]:
+def _build(arch: dict, el: dict, host: dict, geom: dict, j: catalogue.Joinery, flags: tuple, collection) -> list[bpy.types.Object]:
     lay = openings.resolve(arch, el)
     t = frame.value(arch, host["params"]["thickness"])
     depth = FRAME_DEPTH if t >= FRAME_DEPTH + 0.02 else t + 0.01
     bottom = 0.0 if j.kind == "door" else lay.jamb
-    root = _root(arch, el, j, lay, host, geom, collection)
+    root = _root(arch, el, j, lay, flags, host, geom, collection)
     out = [root, _object(f"{el['id']}_Frame", _frame_boxes(j.kind, lay, depth), "Menuiserie", root, collection)]
     height = lay.leaf_h
     for k, leaf in enumerate(_leaves(j, lay.leaf_w, t), start=1):
@@ -193,7 +193,7 @@ def _build(arch: dict, el: dict, host: dict, geom: dict, j: catalogue.Joinery, c
 def add(arch: dict, collections: dict, ctx: dict) -> list[bpy.types.Object]:
     """Frame, leaves and glass of every hosted door and window, in `Menuiseries`."""
     hosts = {e["id"]: e for e in arch["elements"]}
-    bodies = plan.built_bodies(arch)
+    bodies, solids = plan.built(arch)
     out = []
     for el in arch["elements"]:
         j = catalogue.resolve(el)
@@ -202,5 +202,7 @@ def add(arch: dict, collections: dict, ctx: dict) -> list[bpy.types.Object]:
             continue
         if min(frame.value(arch, el["params"]["width"]), frame.value(arch, el["params"]["height"])) < MIN_SIZE:
             continue
-        out += _build(arch, el, host, plan.host_geometry(arch, host, bodies), j, collections["Menuiseries"])
+        fitted = clip.fits(arch, el, host, (1, -1) if host["kind"] == "partition" else (1,), bodies, solids)
+        flags = tuple(dict.fromkeys((*openings.resolve(arch, el).flags, *clip.flags(fitted))))
+        out += _build(arch, el, host, plan.host_geometry(arch, host, bodies), j, flags, collections["Menuiseries"])
     return out

@@ -314,10 +314,21 @@ def partition_footprints(arch: dict, walls: dict[str, list]) -> dict[str, list]:
     return {pid: plan["face"] for pid, plan in partition_plans(arch, walls).items()}
 
 
+def built(arch: dict) -> tuple[dict[str, list], dict[str, tuple[list, list]]]:
+    """(bodies, solids) of the shell as built.
+
+    `bodies`: {wall or partition id: quad [face start, face end, back end, back start]} (mitred walls, partitions stopped on
+    their hosts). `solids`: {id: (convex polygon, polygons subtracted from it)}, the plan region the mesh really fills.
+    """
+    walls = wall_footprints(arch)
+    plans = partition_plans(arch, walls)
+    bodies = {**walls, **{pid: p["face"] for pid, p in plans.items()}}
+    return bodies, {**{wid: (quad, []) for wid, quad in walls.items()}, **{pid: (p["solid"], p["cut"]) for pid, p in plans.items()}}
+
+
 def built_bodies(arch: dict) -> dict[str, list]:
     """{wall or partition id: quad [face start, face end, back end, back start]} as built (mitred walls, trimmed partitions)."""
-    walls = wall_footprints(arch)
-    return {**walls, **partition_footprints(arch, walls)}
+    return built(arch)[0]
 
 
 def host_geometry(arch: dict, host: dict, bodies: dict) -> dict:

@@ -8,7 +8,7 @@ import math
 import bmesh
 import bpy
 
-from . import frame, openings, plan, profiles, shell
+from . import clip, frame, openings, plan, profiles, shell
 
 BITE = 0.001  # m a moulding sinks into its host, so no two faces are coplanar
 DEFAULT_PROJECTION = 0.015
@@ -294,21 +294,39 @@ def _on_face(geom: dict, side: int, path: list, normals: list, widths: list, clo
     return points, across, (geom["n"][0] * side, 0.0, geom["n"][1] * side)
 
 
+def _runs(points: list, normals: list, widths: list, closed: bool) -> list[tuple[list, list, list, bool]]:
+    """The polyline cut into runs of consecutive segments that have a width (a dropped casing leaves a gap)."""
+    n = len(normals)
+    dead = next((i for i in range(n) if not widths[i] > 0), None)
+    if dead is None:
+        return [(points, normals, widths, closed)]
+    runs, cur = [], []
+    for i in ([(dead + 1 + k) % n for k in range(n)] if closed else range(n)):
+        if widths[i] > 0:
+            cur.append(i)
+        elif cur:
+            runs.append(cur)
+            cur = []
+    runs = [*runs, cur] if cur else runs
+    return [([points[i % len(points)] for i in (*run, run[-1] + 1)], [normals[i] for i in run], [widths[i] for i in run], False) for run in runs]
+
+
 def _band(geom: dict, name: str, side: int, path: list, normals: list, widths: list, closed: bool, spec: tuple,
           collection) -> bpy.types.Object:
     """One profile swept along a rectangle (or three sides of one) drawn on a face of a host, `widths[k]` wide along segment k.
 
-    `spec` is (kind, profile name, projection, element flags).
+    A segment of width 0 is left out. `spec` is (kind, profile name, projection, element flags).
     """
     kind, profile_name, projection, flags = spec
     profile, known = profiles.resolve(kind, profile_name)
-    points, across, fixed = _on_face(geom, side, path, normals, widths, closed)
     bm = bmesh.new()
-    _sweep(bm, points, across, fixed, profile, (1.0, projection), (0.0, -BITE), closed)
+    for run in _runs(path, normals, widths, closed):
+        points, across, fixed = _on_face(geom, side, *run[:3], run[3])
+        _sweep(bm, points, across, fixed, profile, (1.0, projection), (0.0, -BITE), run[3])
     return _finish(name, bm, collection, [*flags, *([] if known else ["unknown_profile"])])
 
 
-def _architraves(arch: dict, el: dict, hosts: dict, bodies: dict, y_floor: float, collection, verify) -> list[bpy.types.Object]:
+def _architraves(arch: dict, el: dict, hosts: dict, bodies: dict, solids: dict, y_floor: float, collection, verify) -> list[bpy.types.Object]:
     host = hosts.get(el.get("host"))
     spec = el.get("frame")
     if not spec or host is None or host["kind"] not in HOST_KINDS:
@@ -317,17 +335,18 @@ def _architraves(arch: dict, el: dict, hosts: dict, bodies: dict, y_floor: float
         raise ValueError(f"{el['id']}: frame.width is missing")
     geom = plan.host_geometry(arch, host, bodies)
     lay = openings.resolve(arch, el)
-    (s0, s1), y0 = lay.span, y_floor + lay.bottom
-    left, top, right, bottom = lay.casings
-    closed = bottom > 0
-    path = [(s0, y0), (s0, y0 + lay.cut_h), (s1, y0 + lay.cut_h), (s1, y0)]
-    normals = [(-1.0, 0.0), (0.0, 1.0), (1.0, 0.0)] + ([(0.0, -1.0)] if closed else [])
-    widths = [left, top, right] + ([bottom] if closed else [])
+    y0 = y_floor + lay.bottom
     sides = _faces(arch, el, host, geom)
-    flags = [*el.get("flags", []), *(f for f in lay.flags if f == "to_verify")]
+    fitted = clip.fits(arch, el, host, sides, bodies, solids)
+    flags = [*el.get("flags", []), *(f for f in (*lay.flags, *clip.flags(fitted)) if f == "to_verify")]
     target = verify if "to_verify" in flags else collection
     out = []
     for side in sides:
+        (left, top, right, bottom), (s0, s1) = fitted[side].casings, fitted[side].bars
+        closed = bottom > 0
+        path = [(s0, y0), (s0, y0 + lay.cut_h), (s1, y0 + lay.cut_h), (s1, y0)]
+        normals = [(-1.0, 0.0), (0.0, 1.0), (1.0, 0.0)] + ([(0.0, -1.0)] if closed else [])
+        widths = [left, top, right] + ([bottom] if closed else [])
         suffix = "" if len(sides) == 1 else ("_A" if side == 1 else "_B")
         band = ("architrave", spec.get("profile"), ARCHITRAVE_PROJECTION, flags)
         out.append(_band(geom, f"{el['id']}_Architrave{suffix}", side, path, normals, widths, closed, band, target))
@@ -350,7 +369,7 @@ def add(arch: dict, collections: dict, ctx: dict) -> list[bpy.types.Object]:
     """Cornice, skirting and architraves in `Moulures`, panel frames in `À vérifier`."""
     hosts = {e["id"]: e for e in arch["elements"]}
     y_floor = frame.value(arch, "floor.level")
-    bodies = plan.built_bodies(arch)
+    bodies, solids = plan.built(arch)
     moulures, out = collections["Moulures"], []
     for el in arch["elements"]:
         kind = el["kind"]
@@ -361,5 +380,5 @@ def add(arch: dict, collections: dict, ctx: dict) -> list[bpy.types.Object]:
         elif kind == "panel_frame":
             out.append(_panel_frame(arch, el, hosts, bodies, y_floor, collections["À vérifier"]))
         elif kind in shell.CUT_KINDS:
-            out += _architraves(arch, el, hosts, bodies, y_floor, moulures, collections["À vérifier"])
+            out += _architraves(arch, el, hosts, bodies, solids, y_floor, moulures, collections["À vérifier"])
     return [o for o in out if o is not None]

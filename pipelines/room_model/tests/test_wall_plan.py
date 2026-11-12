@@ -8,7 +8,7 @@ import pytest
 import shapely
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "blender"))
-from arch import plan  # noqa: E402
+from arch import clip, openings, plan  # noqa: E402
 
 from room_model import meshes  # noqa: E402
 
@@ -229,3 +229,43 @@ def test_snap_threshold_is_half_the_thinner_thickness(fraction, snapped):
     for wall in walls.values():
         assert finals["Partition_P1"].intersection(wall).area == pytest.approx(0.0, abs=1e-9)
     assert _slots(arch, walls, finals, {"Partition_P1": (line[0], line[1], THICKNESS)}) == 0
+
+
+def _free(arch, wall_id, near, side=1):
+    bodies, solids = plan.built(arch)
+    host = next(e for e in arch["elements"] if e["id"] == wall_id)
+    return clip.free_span(host, side, plan.host_geometry(arch, host, bodies), bodies[wall_id], solids, near)
+
+
+def test_the_free_face_of_a_wall_ends_where_a_partition_stands_in_front_of_it():
+    """The jog case: the partition's face meets the lower west wall 10 cm after its start, and the upper one 1.8 m after it."""
+    arch, _ = _junction_case("jog_back")
+    lower, upper = _free(arch, "W4", 0.5), _free(arch, "W3", 0.5)
+    assert lower == pytest.approx((0.1, 2.1), abs=0.006), "the first 10 cm of the face are behind the partition"
+    assert upper[1] == pytest.approx(1.8, abs=0.006) and upper[0] < 0.2, "the partition's far face stops the upper wall"
+
+
+def test_a_mitred_corner_covers_no_face():
+    arch = _ring(RECT)
+    for wid, length in (("W0", 4.0), ("W1", 3.0)):
+        lo, hi = _free(arch, wid, length / 2)
+        assert (lo, hi) == pytest.approx((0.0, length), abs=0.21), wid
+
+
+def test_a_face_beside_an_abutting_partition_is_split_in_two():
+    arch = _ring(RECT)
+    _wall(arch, "partition", "Partition_P1", (2.0, -0.02), (2.0, 2.0), 0.1, (-1.0, 0.0))
+    assert _free(arch, "W0", 0.5)[1] == pytest.approx(2.0, abs=0.006) and _free(arch, "W0", 3.0)[0] == pytest.approx(2.1, abs=0.006)
+
+
+def _layout(centre, casings=(0.07, 0.07, 0.07, 0.0)):
+    return openings.Layout(cut_w=0.76, cut_h=2.0, bottom=0.0, centre=centre, casings=casings)
+
+
+@pytest.mark.parametrize("room,kept,flags", [(0.5, 0.07, ()), (0.04, 0.04, ()), (0.01, 0.0, ("to_verify",)), (-0.03, 0.0, ("to_verify",))])
+def test_a_casing_is_cut_back_to_the_free_stretch_and_dropped_below_the_minimum(room, kept, flags):
+    """`room` is the free length between the cut and the body on its right; the left is wide open."""
+    lay = _layout(centre=0.8)
+    result = clip.fit(lay, (0.0, lay.span[1] + room))
+    assert result.casings == pytest.approx((0.07, 0.07, kept, 0.0)) and result.flags == flags
+    assert result.bars == pytest.approx((lay.span[0], min(lay.span[1], lay.span[1] + room)))
