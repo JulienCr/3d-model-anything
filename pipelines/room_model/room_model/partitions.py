@@ -37,7 +37,7 @@ def _fit_face(samples: Samples, room: Room, wall: Wall, n: np.ndarray, centre: f
 
 
 def _face_line(wall: Wall, n: np.ndarray, fit_a: PlaneFit | None, fit_b: PlaneFit | None) -> tuple:
-    """Face A line and thickness: (normal, offset, offset sigma, azimuth sigma, thickness, thickness sigma, source, flags)."""
+    """Face A line: (normal, offset, offset sigma, azimuth sigma, thickness, thickness sigma, source, flags, a point on it)."""
     both = fit_a is not None and fit_b is not None and min(fit_a.support_m2, fit_b.support_m2) >= FACE_MIN_AREA
     if fit_a is not None:
         n_a = shell._horizontal(fit_a.normal)
@@ -45,16 +45,17 @@ def _face_line(wall: Wall, n: np.ndarray, fit_a: PlaneFit | None, fit_b: PlaneFi
         if both:
             t = float(n_a @ (fit_a.centroid - fit_b.centroid)[[0, 2]])
             if THICKNESS_RANGE[0] < t < THICKNESS_RANGE[1]:
-                return n_a, offset, sig_off, sig_az, t, float(np.hypot(sig_off, offset_sigma(fit_b))), "lidar", []
-        return n_a, offset, sig_off, sig_az, ASSUMED_THICKNESS, THICKNESS_SIGMA, "assumed", ["one_face_seen"]
+                return n_a, offset, sig_off, sig_az, t, float(np.hypot(sig_off, offset_sigma(fit_b))), "lidar", [], fit_a.centroid[[0, 2]]
+        return n_a, offset, sig_off, sig_az, ASSUMED_THICKNESS, THICKNESS_SIGMA, "assumed", ["one_face_seen"], fit_a.centroid[[0, 2]]
     if fit_b is not None:
         n_b = shell._horizontal(fit_b.normal)
         offset = float(-n_b @ fit_b.centroid[[0, 2]]) + ASSUMED_THICKNESS
         sig = float(np.hypot(offset_sigma(fit_b), THICKNESS_SIGMA))
-        return -n_b, offset, sig, azimuth_sigma(fit_b), ASSUMED_THICKNESS, THICKNESS_SIGMA, "assumed", ["one_face_seen"]
+        return (-n_b, offset, sig, azimuth_sigma(fit_b), ASSUMED_THICKNESS, THICKNESS_SIGMA, "assumed", ["one_face_seen"],
+                fit_b.centroid[[0, 2]] - ASSUMED_THICKNESS * n_b)
     offset = float(n @ wall.c[[0, 2]]) + ASSUMED_THICKNESS / 2
     return (n, offset, shell.FALLBACK_OFFSET_SIGMA, shell.FALLBACK_AZIMUTH_SIGMA, ASSUMED_THICKNESS, THICKNESS_SIGMA,
-            "assumed", ["roomplan_fallback"])
+            "assumed", ["roomplan_fallback"], wall.c[[0, 2]] + ASSUMED_THICKNESS / 2 * n)
 
 
 def _extent(wall: Wall, n: np.ndarray, offset: float, polygon: shapely.Polygon) -> tuple[np.ndarray, np.ndarray]:
@@ -83,7 +84,7 @@ def find_partitions(room: Room, samples: Samples, polygon: list, levels: list[di
         half = ASSUMED_THICKNESS / 2
         fit_a = _fit_face(samples, room, wall, n_seed, half)
         fit_b = _fit_face(samples, room, wall, -n_seed, half)
-        n, offset, sig_off, sig_az, thickness, sig_t, t_source, flags = _face_line(wall, n_seed, fit_a, fit_b)
+        n, offset, sig_off, sig_az, thickness, sig_t, t_source, flags, anchor = _face_line(wall, n_seed, fit_a, fit_b)
         start, end = _extent(wall, n, offset, floor)
         top = shell._wall_top({"n": n}, start, end, levels or [])
         key = f"partition.P{k}"
@@ -99,6 +100,7 @@ def find_partitions(room: Room, samples: Samples, polygon: list, levels: list[di
                    "start": [float(v) for v in start], "end": [float(v) for v in end], "flags": flags,
                    "params": {name: f"{key}.{name}" for name in ("azimuth", "offset", "thickness", "top")}}
         diagnostic = {"id": element["id"], "support_a_m2": None if fit_a is None else fit_a.support_m2,
-                      "support_b_m2": None if fit_b is None else fit_b.support_m2}
+                      "support_b_m2": None if fit_b is None else fit_b.support_m2,
+                      "centroid": [float(v) for v in anchor]}
         out.append({"element": element, "parameters": params, "diagnostic": diagnostic})
     return out

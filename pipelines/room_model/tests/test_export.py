@@ -106,7 +106,7 @@ def test_report_sections(scene):
     ctx, doc = scene
     text = (ctx.out / "report.md").read_text(encoding="utf-8")
     for title in ("Entrées", "Repère", "Recalage", "Murs", "Sol", "Plafonds", "Poutres", "Poteaux",
-                  "Surfaces verticales non expliquées", "Éléments horizontaux non expliqués (réseaux, luminaires ?)", "Orthogonalité", "Alertes", "Épaisseurs"):
+                  "Surfaces verticales non expliquées", "Éléments horizontaux non expliqués (réseaux, luminaires ?)", "Équerrage", "Alertes", "Épaisseurs"):
         assert f"## {title}\n" in text
     assert "non exécuté" in section(text, "Recalage")
     assert "supposées à 20 cm" in section(text, "Épaisseurs")
@@ -259,7 +259,7 @@ def test_report_wording_and_thresholds(scene):
     _, doc = scene
     text = report.render(doc)
     assert "LiDAR" in section(text, "Murs") and "lidar" not in section(text, "Murs")
-    assert "Écart à l'angle droit ou à l'alignement" in section(text, "Orthogonalité")
+    assert "Écart retenu à l'angle droit ou à l'alignement" in section(text, "Équerrage")
     doc = copy.deepcopy(doc)
     doc["diagnostics"]["ceiling_unobserved_fraction"] = 0.04
     assert "du plafond non observé" not in _alerts(doc)

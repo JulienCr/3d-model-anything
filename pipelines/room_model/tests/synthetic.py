@@ -58,6 +58,7 @@ class SyntheticOptions:
     wall_duct: bool = False
     offset_wall: str | None = None
     no_ceiling: bool = False  # the mesh has no ceiling at all
+    no_wing_ceiling: bool = False  # the wing's ceiling is missing from the mesh
     partition: bool = False  # a full-height partition inside the floor, with its RoomPlan wall
     partition_faces: str = "ab"  # faces in the mesh: a = +x face, b = -x face
     outside_roomplan_wall: bool = False  # a RoomPlan wall standing outside the floor polygon
@@ -361,7 +362,8 @@ def _build_mesh(opt: SyntheticOptions) -> _Mesh:
         holes.append(((4.6, 5.6), (1.0, 2.0)))
     if not opt.no_ceiling:
         m.rect(np.array([0, H_MAIN, 0]), X, Z, -Y, 3, (0, 6), (0, 2.5), lambda u, v: ~_in_rects(u, v, holes))
-        m.rect(np.array([0, H_WING, 0]), X, Z, -Y, 3, (0, 2.5), (2.5, 4.5))
+        if not opt.no_wing_ceiling:
+            m.rect(np.array([0, H_WING, 0]), X, Z, -Y, 3, (0, 2.5), (2.5, 4.5))
     return m
 
 

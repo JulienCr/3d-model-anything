@@ -106,9 +106,12 @@ Misplaced walls (flag `shifted_seed`): a RoomPlan wall can sit away from the rea
 
 Low-support walls (support under 0.5 m2, flag `low_support`): the azimuth of a patch that small is not trustworthy, so the wall keeps the RoomPlan azimuth (source `roomplan`, sigma 2 deg). Its offset is the LiDAR fit evaluated at the fit centroid along the RoomPlan normal (source `lidar`), with the support term above dominating the offset sigma. `diagnostics.walls[*].angle_vs_roomplan_deg` still reports the fitted angle.
 
+Squaring (model stage, `regularize.py`): the walls and partitions are turned onto the dominant orthogonal frame, the support-weighted circular mean of the wall azimuths modulo 90 degrees (found among the frames that take in the most support, so a chamfer does not drag it). A line whose azimuth is within `max(2 deg, 3 sigma_azimuth)` of its nearest axis cannot be told from fit noise: it is rotated onto the axis about the centroid of its supporting samples, which keeps the measured position where the evidence is. The measured azimuth is kept as `measured_value` on the parameter (source unchanged) and the element gets `squared`. A line further off keeps its measurement and gets `out_of_square`. Corners are recomputed with the shell's corner rule, so near-parallel jogs stay jogs and nothing is merged. `diagnostics.squaring` lists, per line, the measured and retained azimuth, the deviation and the tolerance, and per corner the measured and retained angle.
+
 ## Detection rules
 
 - Ceilings: height histogram (window 3 cm) of ceiling-facing LiDAR samples (normal pointing down) above 1.6 m; every level covering at least 0.3 m2 becomes a ceiling, so a patch the LiDAR never saw makes none. Once a level is picked, samples within 3 cm of it are removed, and a sample belongs to its nearest level only. Beams are detected on these unmerged levels. Then touching levels closer than 3 times the larger of their two sigmas merge into one support-weighted level, with a merged span of at most 4 cm: steps of about 3-4 cm or less are absorbed, larger steps stay separate.
+- Ceilings of the model (`zones.py`, built after squaring; `shell.json` keeps the scan regions): the interior polygon of the squared walls is cut along partitions, beams and the extensions of the edges meeting at each reflex corner (cuts ending within 20 cm of a wall reach it; a cut that does not run wall to wall splits nothing). Each zone takes the best supported level of the ceiling samples inside it, beams excluded. Neighbouring zones whose levels merge by the rule above form one `Ceiling_<k>` (possibly several polygons); beam footprints are cut out of the regions. A zone with no level takes the level of its largest neighbour: from 0.3 m2 up it stays a ceiling of its own with source `assumed` (sigma widened by 5 cm) and the element flag `assumed`, below it joins that neighbour. Other levels found in a zone are kept in `diagnostics.ceilings[*].other_levels`. The floor polygon is the one of the squared corners.
 - Strip-shaped lower-level components (minor side up to 80 cm, ratio at least 2) get one of five verdicts, in this order:
   - `suspended` (unexplained): ceiling samples are seen above at least 30 % of the strip's cells, so the ceiling continues over it: fixtures, trays and ducts hang below a visible ceiling, a beam hides it.
   - `too_narrow` (unexplained): under 15 cm wide.
@@ -159,12 +162,15 @@ Columns: `id`, `kind`, `label`, `value_cm`, `sigma_cm`, `source`, `elements` (id
 | | `low_support` | Support under 0.5 m2, RoomPlan azimuth kept |
 | | `seeded_from_outline` | Wall absent from RoomPlan, built from the floor outline |
 | | `near_parallel_corner` | Corner with a near-parallel neighbour, obtained by projection |
+| Wall and partition `flags` | `squared` | Azimuth turned onto the room axes (measured value in `measured_value`) |
+| | `out_of_square` | Azimuth further than its tolerance from the axes, measurement kept |
+| Ceiling `flags` | `assumed` | No LiDAR level in the zone, level taken from the largest neighbour |
 | Beam `flags` and its dimensions | `to_verify` | Probable beam whose sides are not both seen |
 | Station dimension `flags` | `obstacle_or_uneven_wall` | No clean wall section found for the station; measure with caution (`~` in `plan.svg`) |
 | `diagnostics.flags` | `floor:roomplan_fallback`, `columns:no_ceiling` | Floor level not seen; no ceiling, so no columns |
 | | `<label>:<wall flag>` | Wall flag repeated per wall, for example `M3:shifted_seed` |
 
-`plan.svg` is the dimensioned top view and `report.md` the French report: inputs, registration, per-wall table, floor, ceilings, beams, columns, unexplained surfaces, orthogonality, alerts.
+`plan.svg` is the dimensioned top view and `report.md` the French report: inputs, registration, per-wall table, floor, ceilings, beams, columns, unexplained surfaces, squaring (measured and retained corner angles), alerts.
 
 ## Comparing against a reference
 
@@ -187,7 +193,7 @@ Edge `i` runs from `polygon[i]` to `polygon[i+1]`; `edge_heights[i]` is its heig
 - A curtained or frosted window defeats the mask: it needs the pick step (the LLM picks a lettered candidate edge), or a tape value.
 - Anchoring and textures need photos; without them the scan and RoomPlan values stand.
 - The LLM can only choose within the catalogue; a fixture it lacks is typed by `overrides.json`.
-- One room per run, no networks (pipes, ducts), no squared variant, no `room.json`.
+- One room per run, no networks (pipes, ducts), no `room.json`. Columns engaged on a wall keep the position snapped before squaring.
 - Ducts or trays pressed against the ceiling hide it, so they look like beams.
 - Soffits that drop less than 14 cm below the neighbouring ceiling are not reported as beams.
 - A narrow ceiling region can be classed as an unexplained strip and lower a wall top.

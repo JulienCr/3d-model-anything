@@ -1,4 +1,4 @@
-"""Model stage: assemble model.json and derive the key dimensions with propagated sigmas."""
+"""Model stage: square the shell, assemble model.json and derive the key dimensions with propagated sigmas."""
 from __future__ import annotations
 
 import json
@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import shapely
 
-from room_model import shell
+from room_model import regularize, shell
 from room_model.capture import load_roomplan
 from room_model.context import StageContext, output_path, require
 from room_model.fmt import fr
@@ -249,6 +249,7 @@ def build(ctx: StageContext, doc: dict) -> dict:
     w2r = np.array(doc["frame"]["world_to_room"], float).reshape(4, 4).T
     room = Room(load_roomplan(ctx.capture, ctx.room), w2r)
     samples = load_samples(ctx, w2r)
+    doc = regularize.apply(doc, room.outline, samples)
     d = _Doc(doc)
     dimensions = [x for x in (_station_dimension(d, st) for st in build_stations(room, samples, d)) if x]
     dimensions += _height_dimensions(d) + _beam_dimensions(d) + _column_dimensions(d)

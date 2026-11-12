@@ -140,8 +140,8 @@ def _wall_line(line: dict, polygon: list, k: int) -> dict:
             "start": np.array(polygon[k]), "end": np.array(polygon[(k + 1) % len(polygon)])}
 
 
-def _corners(room: Room, lines: list[dict]) -> list[np.ndarray]:
-    """Plan corner k joins wall k-1 and wall k; flags the walls around a near-parallel one."""
+def _corners(outline: np.ndarray, lines: list[dict]) -> list[np.ndarray]:
+    """Plan corner k joins wall k-1 and wall k; flags the walls around a near-parallel one. `outline` is RoomPlan's (xyz)."""
     sin_limit = np.sin(np.radians(NEAR_PARALLEL_DEG))
     out = []
     for k in range(len(lines)):
@@ -150,7 +150,7 @@ def _corners(room: Room, lines: list[dict]) -> list[np.ndarray]:
         if abs(cross) > sin_limit:
             out.append(np.linalg.solve(np.stack([a["n"], b["n"]]), [a["offset"], b["offset"]]))
             continue
-        rp = room.outline[k][[0, 2]]
+        rp = outline[k][[0, 2]]
         pa = rp - (a["n"] @ rp - a["offset"]) * a["n"]
         pb = rp - (b["n"] @ rp - b["offset"]) * b["n"]
         out.append((pa + pb) / 2)
@@ -225,7 +225,7 @@ def build(ctx: StageContext) -> dict:
     room = Room(load_roomplan(ctx.capture, ctx.room), w2r)
     samples = load_samples(ctx, w2r)
     lines, parameters, walls_diag = _wall_lines(room, samples)
-    corners = _corners(room, lines)
+    corners = _corners(room.outline, lines)
     polygon = [[float(c[0]), float(c[1])] for c in corners]
     level, floor_diag, floor_flags = _floor(room, samples, polygon)
     parameters["floor.level"] = level
