@@ -1060,3 +1060,10 @@ def test_an_override_can_prefer_the_scan_value_over_a_tape_or_llm_one(env):
 def test_a_prefer_override_that_cannot_be_applied_is_rejected(env, prefer):
     arch = env.merge(None, None, {"Door_1": {"prefer": prefer}})
     assert [r["field"] for r in _overrides(arch)["rejected"]] == ["prefer"]
+
+
+
+def test_a_prefer_override_may_name_the_scan_source(env):
+    scan = _param(env.arch, "Door_1", "width")
+    arch = env.merge(None, {"Door_1-w": scan["value"] + 0.25}, {"Door_1": {"prefer": {"width": scan["source"]}}})
+    assert _param(arch, "Door_1", "width")["value"] == scan["value"] and _overrides(arch)["rejected"] == []

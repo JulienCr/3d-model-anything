@@ -15,7 +15,8 @@ REMOVABLE = (*RECT_KINDS, "panel_frame", "cornice", "skirting")
 TYPING = ("type", "hinge", "swing", "panels", "handle")
 NICHE_FIELDS = ("through", "dividers", "shelves_count")
 FIELDS = ("kind", *TYPING, "frame", *NICHE_FIELDS, "remove", "prefer")
-PREFERABLE = ("scan",)  # sources a parameter can be sent back to: the scan value the model and openings stages wrote
+# A parameter can be sent back to its scan value (the model and openings stages), named `scan` or by its own source.
+SCAN_SOURCES = ("scan", "lidar", "roomplan", "assumed")
 NICHE_ONLY = ("through", "dividers", "shelves")
 SCHEMA_OF = {**{f: "elements" for f in (*TYPING, "frame")}, **{f: "new_elements" for f in NICHE_FIELDS}}
 
@@ -28,12 +29,13 @@ def _prefer_problem(el: dict, value, scan: dict) -> str | None:
     if not isinstance(value, dict) or not value:
         return 'un objet {"<paramètre>": "scan"} est attendu'
     for name, source in value.items():
-        if source not in PREFERABLE:
-            return f"source {source!r} inconnue (attendue : {', '.join(PREFERABLE)})"
         if name not in el.get("params", {}):
             return f"{name!r} n'est pas un paramètre de cet élément ({', '.join(el.get('params', {}))})"
-        if el["params"][name] not in scan:
+        kept = scan.get(el["params"][name])
+        if kept is None:
             return f"{name} n'a pas de valeur du scan (élément déclaré par le LLM)"
+        if source not in ("scan", kept["source"]):
+            return f"aucune valeur {source!r} conservée pour {name} (possibles : scan, {kept['source']})"
     return None
 
 
@@ -108,7 +110,8 @@ def _set(arch: dict, el: dict, field: str, value, scan: dict | None = None) -> o
 def apply(arch: dict, overrides: dict, scan: dict | None = None) -> dict:
     """Applies the overrides to `arch` in place; {"applied": [{element, field, value}], "rejected": [{id, field, reason}], "removed": [ids]}.
 
-    `scan` holds the parameters as the model and openings stages wrote them, for `prefer: {"<param>": "scan"}`.
+    `scan` holds the parameters as the model and openings stages wrote them, for `prefer: {"<param>": "scan"}` (or
+    the scan's own source name: `lidar`, `roomplan`).
     """
     rep = {"applied": [], "rejected": [], "removed": []}
     for ident, fields in overrides.items():

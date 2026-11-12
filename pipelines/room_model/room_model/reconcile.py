@@ -32,7 +32,7 @@ def _dims_of_params(arch: dict) -> dict:
     elements = {e["id"]: e for e in arch["elements"]}
     out = {}
     for dim in arch["dimensions"]:
-        name = OPENING_PARAMS.get(dim["kind"])
+        name = {**OPENING_PARAMS, "ceiling_height": "level"}.get(dim["kind"])
         el = elements.get(dim["elements"][0]) if dim["elements"] else None
         if name and el is not None and name in el["params"]:
             out.setdefault(el["params"][name], []).append(dim["id"])
@@ -60,15 +60,17 @@ def parameters(layers: list[tuple[str, dict]]) -> dict:
             continue
         residuals = {s["source"]: {"delta": s["value"] - kept["value"], "z": _z(s["value"] - kept["value"], s["sigma"], kept["sigma"])}
                      for s in seen if s["source"] != kept["source"]}
-        flags = ["conflict"] if any(abs(r["z"]) > Z and src not in ("llm", "assumed") for src, r in residuals.items()) else []
+        flags = ["conflict"] if any((r["z"] is None or abs(r["z"]) > Z) and src not in ("llm", "assumed")
+                                    for src, r in residuals.items()) else []
         out[pid] = {"sources": seen, "retained": {k: kept[k] for k in ("value", "sigma", "source")}, "residuals": residuals,
                     "flags": flags}
     return out
 
 
-def _z(delta: float, *sigmas: float) -> float:
+def _z(delta: float, *sigmas: float) -> float | None:
+    """delta over the combined sigma; None when every sigma is zero (no finite answer, JSON has no Infinity)."""
     sigma = float(np.hypot(*sigmas)) if len(sigmas) > 1 else float(sigmas[0])
-    return float(delta / sigma) if sigma > 0 else (0.0 if delta == 0 else float(np.sign(delta)) * np.inf)
+    return float(delta / sigma) if sigma > 0 else (0.0 if delta == 0 else None)
 
 
 # --- geometry helpers ------------------------------------------------------------------------------------------------
@@ -82,19 +84,30 @@ def _sigma(arch: dict, pid: str) -> float:
 
 
 def _outline(arch: dict) -> list[dict] | None:
-    """The walls in outline order (each one's end is the next one's start); None when they do not close."""
+    """The walls in outline order (each one's end is the next one's start); None when they do not close once."""
     walls = [e for e in arch["elements"] if e["kind"] == "wall"]
     if not walls:
         return None
-    order, current = [walls[0]], walls[0]
+    order, current, visited = [walls[0]], walls[0], {walls[0]["id"]}
     while True:
-        nxt = next((w for w in walls if np.linalg.norm(np.subtract(w["start"], current["end"])) < SAME_POINT), None)
+        nxt = next((w for w in walls if np.linalg.norm(np.subtract(w["start"], current["end"])) < SAME_POINT
+                    and (w is walls[0] or w["id"] not in visited)), None)
         if nxt is None:
             return None
         if nxt is walls[0]:
             return order if len(order) == len(walls) else None
         order.append(nxt)
+        visited.add(nxt["id"])
         current = nxt
+
+
+def _outline_check(arch: dict) -> list[dict]:
+    """A check recording that the walls do not form one closed outline (the loops and corners are then skipped)."""
+    walls = [e["id"] for e in arch["elements"] if e["kind"] == "wall"]
+    if not walls or _outline(arch) is not None:
+        return []
+    return [{"id": "outline", "kind": "outline_closed", "verdict": "conflict", "residual": 0.0, "sigma": 0.0,
+             "elements": walls, "actions": [], "detail": "les murs ne forment pas un contour fermé"}]
 
 
 def _direction(wall: dict) -> np.ndarray:
@@ -128,8 +141,9 @@ def _loops(arch: dict) -> list[dict]:
             if a not in index or b not in index:
                 continue
             wa, wb = outline[index[a]], outline[index[b]]
-            n = np.subtract(np.add(wb["start"], wb["end"]), np.add(wa["start"], wa["end"]))
-            n = n / np.linalg.norm(n)
+            az = _value(arch, wa["params"]["azimuth"])
+            n = np.array([np.cos(az), np.sin(az)])  # the station runs along wall a's normal, oriented towards b
+            n = n if n @ np.subtract(np.add(wb["start"], wb["end"]), np.add(wa["start"], wa["end"])) > 0 else -n
             for start, stop, sign in ((index[a], index[b], -1.0), (index[b], index[a], 1.0)):
                 chain, i = [], (start + 1) % len(outline)
                 while i != stop:
@@ -153,8 +167,12 @@ def _loop_residual(loop: dict, values: dict, model: dict) -> tuple[float, float]
 
 
 def tape_checks(base: dict, tape: dict | None) -> list[dict]:
-    """Closed relations involving at least one tape value, each with its verdict; when they fail, the tape entry whose
-    removal (back to the model value) clears every failure is reported once as a probable tape error."""
+    """Closed relations involving at least one tape value, each with its verdict, then what explains the failures.
+
+    One tape entry alone in the failing relations is a disagreement with the scan (`tape_vs_scan`): the tape may well
+    be right. With two or more, the entry, or else the pair, whose removal (back to the model value) clears every
+    failure is a `probable_tape_error`; otherwise a `conflict` lists the entries ranked by failing relations.
+    """
     from room_model.tape_merge import TAPE_SIGMA, normalize
 
     raw = {k: v for k, v in normalize(tape or {}).items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
@@ -167,25 +185,49 @@ def tape_checks(base: dict, tape: dict | None) -> list[dict]:
         values = {**model, **{k: (float(raw[k]), TAPE_SIGMA) for k in keys if k in model}}
         return [(lp, *_loop_residual(lp, values, model)) for lp in loops]
 
+    def clears(removed) -> bool:
+        return not any(abs(r) > Z * s for _, r, s in evaluate([x for x in raw if x not in removed]))
+
     results = evaluate(raw)
     failing = [(lp, r, s) for lp, r, s in results if abs(r) > Z * s]
     out = [{"id": f"loop:{lp['name']}", "kind": "tape_loop", "verdict": "conflict" if abs(r) > Z * s else "ok", "residual": r,
             "sigma": s, "dims": [i for i, _ in lp["terms"] if i in raw], "actions": []} for lp, r, s in results]
-    if failing:
-        suspects = sorted({i for lp, _, _ in failing for i, _ in lp["terms"] if i in raw})
-        cleared = [k for k in suspects if not any(abs(r) > Z * s for _, r, s in evaluate([x for x in raw if x != k]))]
-        if len(cleared) == 1:
-            k = cleared[0]
-            lp, r, _ = next(f for f in failing if k in dict(f[0]["terms"]))
-            implied = float(raw[k]) - r / dict(lp["terms"])[k]
-            out.append({"id": f"tape:{k}", "kind": "tape_consistency", "verdict": "probable_tape_error", "dims": [k],
-                        "residual": float(raw[k]) - implied, "sigma": TAPE_SIGMA, "implied": implied,
-                        "actions": [f"measure:{k}"]})
-        else:
-            out.append({"id": "tape:loops", "kind": "tape_consistency", "verdict": "conflict", "dims": suspects,
-                        "residual": max(abs(r) for _, r, _ in failing), "sigma": min(s for _, _, s in failing),
-                        "actions": [f"measure:{k}" for k in suspects]})
+    if not failing:
+        return out
+    count = {}
+    for lp, _, _ in failing:
+        for i, _ in lp["terms"]:
+            if i in raw:
+                count[i] = count.get(i, 0) + 1
+    suspects = sorted(count, key=lambda k: (-count[k], k))
+    loops_of = lambda ks: [f"loop:{lp['name']}" for lp, _, _ in failing if set(ks) & set(dict(lp["terms"]))]  # noqa: E731
+    if len(suspects) == 1:
+        k = suspects[0]
+        out.append({"id": f"tape:{k}", "kind": "tape_vs_scan", "verdict": "conflict", "dims": [k], **_implied(k, raw, failing),
+                    "loops": loops_of([k]), "actions": [f"measure:{k}"]})
+        return out
+    culprits = [[k] for k in suspects if clears({k})]
+    if len(culprits) != 1:
+        pairs = [[a, b] for n, a in enumerate(suspects) for b in suspects[n + 1:] if clears({a, b})]
+        culprits = pairs if len(pairs) == 1 and not culprits else culprits
+    if len(culprits) == 1:
+        found = culprits[0]
+        out += [{"id": f"tape:{k}", "kind": "tape_consistency", "verdict": "probable_tape_error", "dims": [k],
+                 **_implied(k, raw, failing), "loops": loops_of([k]), "actions": [f"measure:{k}"]} for k in found]
+    else:
+        out.append({"id": "tape:loops", "kind": "tape_consistency", "verdict": "conflict", "dims": suspects,
+                    "residual": max(abs(r) for _, r, _ in failing), "sigma": min(s for _, _, s in failing),
+                    "loops": loops_of(suspects), "actions": [f"measure:{k}" for k in suspects]})
     return out
+
+
+def _implied(k: str, raw: dict, failing) -> dict:
+    """The value the other members of the first failing relation imply for entry `k`, and the tape's departure from it."""
+    from room_model.tape_merge import TAPE_SIGMA
+
+    lp, r, s = next(f for f in failing if k in dict(f[0]["terms"]))
+    implied = float(raw[k]) - r / dict(lp["terms"])[k]
+    return {"residual": float(raw[k]) - implied, "sigma": float(s), "implied": implied, "tape_sigma": TAPE_SIGMA}
 
 
 # --- element checks --------------------------------------------------------------------------------------------------
@@ -215,10 +257,11 @@ def element_checks(arch: dict) -> list[dict]:
         host = elements[el["host"]]
         s0, s1, y0, y1, ss, sy = _rect(arch, el)
         top = _value(arch, host["params"]["top"]) - _value(arch, "floor.level") if "top" in host["params"] else np.inf
-        over = max(0.0, -s0, s1 - _length(host), y1 - top)
-        out.append({"id": f"inside:{el['id']}", "kind": "opening_inside_host", "verdict": _verdict(over, max(ss, sy)),
-                    "residual": over, "sigma": max(ss, sy), "elements": [el["id"], host["id"]],
-                    "actions": [f"measure:{el['id']}-w"] if over > Z * max(ss, sy) else []})
+        along, up = max(0.0, -s0, s1 - _length(host)), max(0.0, y1 - top)
+        over = max(along, up)
+        actions = ([f"measure:{el['id']}-w"] if along > Z * ss else []) + ([f"measure:{el['id']}-h"] if up > Z * sy else [])
+        out.append({"id": f"inside:{el['id']}", "kind": "opening_inside_host", "verdict": "conflict" if actions else "ok",
+                    "residual": over, "sigma": max(ss, sy), "elements": [el["id"], host["id"]], "actions": actions})
     for i, a in enumerate(openings):
         for b in openings[i + 1:]:
             if a["host"] != b["host"] or a.get("face") != b.get("face"):
@@ -241,7 +284,7 @@ def element_checks(arch: dict) -> list[dict]:
             out.append({"id": f"leaf:{el['id']}:{name}", "kind": "leaf_fits", "verdict": "conflict" if excess > tol else "ok",
                         "residual": excess, "sigma": tol, "elements": [el["id"]],
                         "actions": [f"measure:{el['id']}-{suffix}", f"measure:{el['id']}-{suffix[-1]}"] if excess > tol else []})
-    out += _corners(arch) + _wall_tops(arch)
+    out += _corners(arch) + _wall_tops(arch) + _outline_check(arch)
     return out
 
 
@@ -298,34 +341,66 @@ def build(layers: list[tuple[str, dict]], tape: dict | None) -> dict:
         if "conflict" in entry["flags"]:
             doubtful = entry["retained"]["source"] == "llm" or (  # clicks, or a tape value the loops reject
                 entry["retained"]["source"] == "tape" and any(d in suspicious for d in dims_of.get(pid, [])))
-            if doubtful:
-                measured = [s for s in entry["sources"] if s["source"] not in ("tape", "llm", "assumed")]
-                best = min(measured, key=lambda s: s["sigma"], default=None)
-                actions += [f"prefer:{pid}:{best['source']}"] if best else []
+            scan = entry["sources"][0]  # the scan layer: the one an override can send the parameter back to
+            if doubtful and scan["source"] not in ("tape", "llm", "assumed", "photo") and scan["source"] != entry["retained"]["source"]:
+                actions.append(f"prefer:{pid}:{scan['source']}")
             actions += [f"measure:{d}" for d in dims_of.get(pid, [])]
         entry["actions"] = list(dict.fromkeys(actions))
     actions = list(dict.fromkeys(a for c in checks for a in c["actions"]))
     actions += [a for e in params.values() for a in e["actions"] if a not in actions]
     summary = {v: sum(c["verdict"] == v for c in checks) for v in sorted({c["verdict"] for c in checks})}
-    return {"schema": SCHEMA, "summary": summary, "checks": checks, "parameters": params, "actions": actions}
+    failing = {}
+    for c in checks:
+        if c["verdict"] not in ("ok", "square_within_noise"):
+            for el in c.get("elements") or []:
+                failing.setdefault(el, []).append(c["id"])
+    return {"schema": SCHEMA, "summary": summary, "checks": checks, "parameters": params, "elements": failing, "actions": actions}
+
+
+ACTION_WORDS = {"measure": "mesurer au mètre la cote {0}", "prefer": "revenir pour {0} à la valeur {1} (correction `prefer`)",
+                "override": "corriger l'élément {0} : champ `{1}` (corrections manuelles)"}
+
+
+def explain(action: str) -> str:
+    """A short French reading of an action id."""
+    kind, _, rest = action.partition(":")
+    if kind == "prefer":
+        param, _, source = rest.rpartition(":")
+        return ACTION_WORDS[kind].format(param, SOURCE_WORDS.get(source, source))
+    return ACTION_WORDS[kind].format(*rest.split(":")) if kind in ACTION_WORDS else action
 
 
 def markdown(doc: dict) -> str:
-    """reconcile.md: the checks that fail, the parameters in conflict and the actions, in French."""
+    """reconcile.md: the explanations of tape disagreements with their relations, the other failing checks, the
+    parameters in conflict and the actions, in French."""
     cm = lambda v: fr(v * 100)  # noqa: E731
     lines = ["# Réconciliation du relevé", "", "Bilan des contrôles : " + ", ".join(
         f"{VERDICT_WORDS.get(v, v)} : {n}" for v, n in doc["summary"].items()) + ".", ""]
-    bad = [c for c in doc["checks"] if c["verdict"] not in ("ok", "square_within_noise")]
-    lines += ["## Contrôles à revoir", ""] if bad else ["Aucun contrôle en défaut.", ""]
+    checks = {c["id"]: c for c in doc["checks"]}
+    culprits = [c for c in doc["checks"] if c["kind"] in ("tape_consistency", "tape_vs_scan")]
+    grouped = {loop for c in culprits for loop in c.get("loops", [])}
+    if culprits:
+        lines += ["## Mesures au mètre en désaccord", ""]
+    for c in culprits:
+        if c["kind"] == "tape_vs_scan":
+            lines.append(f"- **{c['dims'][0]}** : le scan implique {cm(c['implied'])} cm, le mètre donne {cm(c['implied'] + c['residual'])} cm "
+                         f"(écart {cm(c['residual'])} cm, tolérance {cm(c['sigma'])} cm). Le mètre peut avoir raison (scan masqué) : à confirmer.")
+        elif c["verdict"] == "probable_tape_error":
+            lines.append(f"- **{c['dims'][0]}** : erreur de mètre probable. Le reste du relevé implique {cm(c['implied'])} cm, "
+                         f"écart {cm(c['residual'])} cm. À remesurer avant de l'appliquer.")
+        else:
+            lines.append(f"- Relevé incohérent, mesures suspectes par ordre de probabilité : {', '.join(c['dims'])}.")
+        for loop in c.get("loops", []):
+            lc = checks[loop]
+            lines.append(f"  - relation {loop.removeprefix('loop:')} : écart {cm(lc['residual'])} cm, tolérance {cm(lc['sigma'])} cm")
+    bad = [c for c in doc["checks"] if c["verdict"] not in ("ok", "square_within_noise") and c["id"] not in grouped
+           and c["kind"] not in ("tape_consistency", "tape_vs_scan")]
     if bad:
-        lines += ["| Contrôle | Verdict | Écart (cm) | Tolérance σ (cm) | Concerne |", "|---|---|---|---|---|"]
+        lines += ["", "## Contrôles à revoir", "", "| Contrôle | Verdict | Écart (cm) | Tolérance σ (cm) | Concerne |", "|---|---|---|---|---|"]
         lines += [f"| {c['id']} | {VERDICT_WORDS.get(c['verdict'], c['verdict'])} | {cm(c['residual'])} | {cm(c['sigma'])} | "
                   f"{', '.join(c.get('dims') or c.get('elements') or [])} |" for c in bad]
-        lines.append("")
-    tape = [c for c in bad if c["verdict"] == "probable_tape_error"]
-    for c in tape:
-        lines.append(f"- La mesure **{c['dims'][0]}** ne s'accorde pas avec les autres : le reste du relevé implique "
-                     f"{cm(c['implied'])} cm, écart {cm(c['residual'])} cm. À remesurer avant de l'appliquer.")
+    elif not culprits:
+        lines.append("Aucun contrôle en défaut.")
     conflicts = {pid: e for pid, e in doc["parameters"].items() if "conflict" in e["flags"]}
     if conflicts:
         lines += ["", "## Paramètres en désaccord", "", "| Paramètre | Retenu | Autres sources |", "|---|---|---|"]
@@ -335,7 +410,7 @@ def markdown(doc: dict) -> str:
             lines.append(f"| {pid} | {cm(e['retained']['value'])} ± {cm(e['retained']['sigma'])} cm "
                          f"({SOURCE_WORDS.get(e['retained']['source'], e['retained']['source'])}) | {others} |")
     if doc["actions"]:
-        lines += ["", "## Actions proposées", ""] + [f"- `{a}`" for a in doc["actions"]]
+        lines += ["", "## Actions proposées", ""] + [f"- `{a}` : {explain(a)}" for a in doc["actions"]]
     return "\n".join(lines) + "\n"
 
 

@@ -151,3 +151,68 @@ def test_an_llm_value_against_a_measured_source_proposes_to_prefer_the_measure()
               ("llm", {"parameters": {"p.h": {"value": 2.02, "sigma": 0.01, "source": "llm"}}})]
     entry = reconcile.parameters(layers)["p.h"]
     assert "conflict" in entry["flags"] and entry["residuals"]["lidar"]["delta"] == pytest.approx(0.08)
+
+
+
+def test_a_lone_tape_value_against_the_scan_is_a_disagreement_not_a_tape_error(ctx):
+    arch = _arch(ctx)
+    station = next(d for d in arch["dimensions"] if d["kind"] in ("width", "length"))
+    doc, md = _run(ctx, {station["id"]: round(station["value"] + 0.12, 4)})
+    found = next(c for c in doc["checks"] if c["kind"] in ("tape_vs_scan", "tape_consistency"))
+    assert found["kind"] == "tape_vs_scan" and found["dims"] == [station["id"]] and found["verdict"] == "conflict"
+    assert found["implied"] == pytest.approx(station["value"], abs=0.005) and "le scan implique" in md
+    assert not [c for c in doc["checks"] if c["verdict"] == "probable_tape_error"]
+
+
+def test_two_tape_typos_are_both_named(ctx):
+    arch = _arch(ctx)
+    survey = _survey(arch)
+    doc, _ = _run(ctx, survey)
+    loops = [c for c in doc["checks"] if c["kind"] == "tape_loop" and not c["id"].startswith("loop:closure")]
+    walls = sorted({d for c in loops for d in c["dims"] if d.startswith("L-")})
+    typos = walls[:1] + [w for w in walls if w != walls[0]][-1:]
+    for k in typos:
+        survey[k] = round(survey[k] + 0.12, 4)
+    doc, md = _run(ctx, survey)
+    named = [c for c in doc["checks"] if c["kind"] == "tape_consistency"]
+    errors = sorted(d for c in named if c["verdict"] == "probable_tape_error" for d in c["dims"])
+    ranked = next((c["dims"] for c in named if c["verdict"] == "conflict"), [])
+    assert errors == sorted(typos) or set(ranked[:2]) == set(typos)
+    assert all(f"measure:{k}" in doc["actions"] for k in typos)
+
+
+def test_an_open_outline_is_reported_and_never_loops(ctx):
+    arch = _arch(ctx)
+    walls = [e for e in arch["elements"] if e["kind"] == "wall"]
+    walls[2]["start"] = list(walls[0]["start"])  # a second wall starting where the first starts: the walk must stop
+    checks = reconcile.element_checks(arch)
+    assert next(c for c in checks if c["kind"] == "outline_closed")["verdict"] == "conflict"
+    assert reconcile.tape_checks(arch, _survey(_arch(ctx))) == []
+
+
+def test_the_reconciliation_never_changes_its_inputs(ctx):
+    read = lambda name: json.loads((ctx.out / name).read_text(encoding="utf-8"))  # noqa: E731
+    arch = _arch(ctx)
+    inputs = {"model_doc": read("model.json"), "openings_doc": read("openings.json"), "vision": None, "anchors": None,
+              "picks": None, "tape": {"Door_1-w": 0.8}, "overrides": {"Door_1": {"swing": "in"}}}
+    before = json.dumps(inputs, sort_keys=True), json.dumps(arch, sort_keys=True)
+    reconcile.write(ctx, arch, inputs)
+    assert (json.dumps(inputs, sort_keys=True), json.dumps(arch, sort_keys=True)) == before
+
+
+def test_a_failing_reconciliation_is_recorded_and_the_model_still_written(ctx, monkeypatch):
+    def broken(*args, **kwargs):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(reconcile, "write", broken)
+    architecture.run(ctx)
+    assert _arch(ctx)["diagnostics"]["reconcile_error"] == "ValueError: boom"
+
+
+def test_actions_are_explained_and_failures_indexed_by_element(ctx):
+    arch = _arch(ctx)
+    width = next(d for d in arch["dimensions"] if d["id"] == "Door_1-w")
+    doc, md = _run(ctx, {"Door_1-w": round(width["value"] + 0.20, 4)})
+    assert "`measure:Door_1-w` : mesurer au mètre la cote Door_1-w" in md
+    assert "Infinity" not in json.dumps(doc) and isinstance(doc["elements"], dict)
+    assert reconcile.explain("prefer:opening.Door_1.height:lidar").startswith("revenir pour opening.Door_1.height à la valeur LiDAR")
