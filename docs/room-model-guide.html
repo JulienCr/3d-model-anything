@@ -143,7 +143,7 @@ table.trouble td:nth-child(2){width:30%}
 <body>
 <header class="top"><div class="in"><div class="plate">
 <h1>Pipeline room-model : du scan à Blender</h1>
-<p class="lede">Guide de l'opérateur. On part d'un export iPhone House Capture et on arrive à une scène Blender de l'architecture d'une pièce (murs, cloisons, portes qui s'ouvrent, fenêtres, niches, moulures, cotes), recalée sur un relevé au mètre ruban.</p>
+<p class="lede">Guide de l'opérateur, piloté par un agent Claude Code. On part d'un export iPhone House Capture et on arrive à une scène Blender de l'architecture d'une pièce (murs, cloisons, portes qui s'ouvrent, fenêtres, niches, moulures, cotes), recalée sur un relevé au mètre ruban.</p>
 <p class="meta">Branche <code>feat/room-model-architecture</code>. Références : <code>docs/room-model.md</code>, <code>docs/specs/room-model-pipeline.md</code>. Les exemples sont génériques (<code>Door_1</code>, <code>Wall_M1</code>) : aucune valeur d'une capture réelle n'apparaît ici.</p>
 </div></div></header>
 
@@ -151,18 +151,20 @@ table.trouble td:nth-child(2){width:30%}
 <nav class="toc" aria-label="Sommaire">
 <ol>
 <li><a class="part" href="#intro">Vue d'ensemble</a></li>
-<li><a class="part" href="#operer">1. Opérer</a>
-  <ol><li><a href="#prereq">Prérequis</a></li><li><a href="#pas-a-pas">Du scan à Blender</a></li><li><a href="#regarder">Regarder le résultat</a></li><li><a href="#releve">Le relevé sur place</a></li><li><a href="#appliquer">Appliquer et corriger</a></li><li><a href="#reconcile">Réconciliation</a></li></ol></li>
+<li><a class="part" href="#piloter">1. Piloter avec Claude Code</a>
+  <ol><li><a href="#skills">Les skills</a></li><li><a href="#dialogue">Chaque étape</a></li></ol></li>
 <li><a class="part" href="#fonctionne">2. Fonctionnement</a>
   <ol><li><a href="#graphe">Graphe des étapes</a></li><li><a href="#priorites">Priorité des sources</a></li><li><a href="#regles">Les règles</a></li><li><a href="#menuiserie">Vantail, huisserie, chambranle</a></li></ol></li>
 <li><a class="part" href="#depannage">3. Dépannage</a></li>
+<li><a class="part" href="#annexe">Annexe : commandes</a>
+  <ol><li><a href="#prereq">Prérequis</a></li><li><a href="#pas-a-pas">Du scan à Blender</a></li><li><a href="#regarder">Regarder le résultat</a></li><li><a href="#releve">Le relevé sur place</a></li><li><a href="#appliquer">Appliquer et corriger</a></li><li><a href="#reconcile">Réconciliation</a></li></ol></li>
 </ol>
 </nav>
 
 <main>
 <section id="intro" class="part-sec" style="padding-top:2rem">
 <h2>Vue d'ensemble</h2>
-<p class="sub">Trois gestes : lancer, regarder, mesurer sur place puis relancer.</p>
+<p class="sub">Trois gestes : lancer, regarder, mesurer sur place puis relancer. On les demande à un agent (Claude Code) plutôt que de les taper.</p>
 <figure>
 <svg class="diagram" viewBox="0 0 900 190" role="img" aria-labelledby="ov-t ov-d"><title id="ov-t">Boucle du scan au relevé</title><desc id="ov-d">Le scan iPhone alimente la pipeline, qui produit un modèle Blender et une page de relevé. Les mesures prises sur place reviennent dans la pipeline.</desc>
 <defs><marker id="ov" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-line"/></marker></defs>
@@ -182,9 +184,215 @@ table.trouble td:nth-child(2){width:30%}
 </section>
 
 <hr class="part">
-<section id="operer" class="part-sec">
-<h2>1. Comment opérer : du scan à Blender</h2>
-<p class="sub">Tout se lance depuis <code>pipelines/room_model/</code>, dans WSL.</p>
+<section id="piloter" class="part-sec">
+<h2>1. Piloter avec Claude Code</h2>
+<p class="sub">On ne tape pas de commande : on dit à l'agent ce qu'on veut, il lance la pipeline, lit les sorties et revient avec un résumé.</p>
+
+<h3 id="skills">Les skills disponibles</h3>
+<p>Claude Code charge les skills du projet depuis <code>.claude/skills/</code>. Ce dossier ne contient que des liens symboliques vers <code>.agents/skills/</code>, où les skills sont versionnées : <code>.claude/skills/room-model</code> pointe vers <code>.agents/skills/room-model</code>. Il suffit d'ouvrir Claude Code à la racine du dépôt. Les skills se déclenchent d'elles-mêmes à partir de ce que vous dites ; inutile de les nommer.</p>
+<div class="tw"><table>
+<thead><tr><th>Skill</th><th>Ce qu'elle fait</th></tr></thead>
+<tbody>
+<tr><td><code>scan-to-threejs</code></td><td>Reconstruit une pièce éditable en Three.js à partir d'un export iPhone, d'un JSON RoomPlan ou d'un GLB, puis compare les vues aux photos. Voie parallèle à la pipeline room-model.</td></tr>
+<tr><td><code>room-model</code></td><td>Fait tourner la pipeline room-model : décompresse la capture, lance les étapes, relance seulement ce qui doit l'être, vérifie les rendus et les drapeaux, applique le relevé au ruban, traduit vos demandes en corrections, dépanne.</td></tr>
+<tr><td><code>room-reconcile</code> <span class="pill soon">à venir</span></td><td>Réconciliera les mesures prises sur place avec le modèle : repérer les conflits, arbitrer, ne poser à l'humain que ce qui lui revient. En cours d'écriture ; voir <a href="#reconcile">Réconciliation</a>.</td></tr>
+</tbody></table></div>
+<p>L'agent a besoin de l'environnement décrit en <a href="#prereq">Prérequis</a> (venv, GPU, <code>BLENDER</code>, CLI <code>claude</code>). Il vérifie ces points au début de la session et vous dit ce qui manque.</p>
+
+<h3 id="dialogue">Chaque étape, en une phrase</h3>
+<ol class="steps">
+<li><h4>Donner la capture</h4>
+<dl class="kv">
+<dt>Vous dites</dt><dd>« Nouvelle capture : <code>/chemin/vers/capture.zip</code>, la pièce s'appelle <em>salon</em>. »</dd>
+<dt>L'agent fait</dt><dd>Contrôle le contenu du zip, le décompresse dans <code>data/captures-in/&lt;pièce&gt;</code>, lance <code>room_model all</code> vers <code>data/room-model/&lt;pièce&gt;</code> (quelques minutes, GPU).</dd>
+<dt>Il peut demander</dt><dd>Quelle pièce prendre si la capture en contient plusieurs ; le chemin du zip s'il manque.</dd>
+</dl></li>
+<li><h4>Regarder le résultat</h4>
+<dl class="kv">
+<dt>Vous dites</dt><dd>« Qu'est-ce que ça donne ? Qu'est-ce qui est à vérifier ? »</dd>
+<dt>L'agent fait</dt><dd>Regarde les rendus, lit les éléments marqués <code>to_verify</code> dans <code>architecture.json</code>, les alertes de <code>report.md</code> et <code>blender_report.json</code>. Résume : ce qui est solide, ce qui est douteux, ce qu'il faut mesurer.</dd>
+<dt>Il peut demander</dt><dd>De trancher ce que les photos ne permettent pas de lire (une poutre existe-t-elle, une niche est-elle une porte condamnée ?).</dd>
+</dl></li>
+<li><h4>Préparer la visite sur place</h4>
+<dl class="kv">
+<dt>Vous dites</dt><dd>« Je vais sur place avec le mètre ruban, qu'est-ce que je dois mesurer ? »</dd>
+<dt>L'agent fait</dt><dd>Vous donne le chemin de <code>measurements/index.html</code> et résume les mesures prioritaires de la page (badge de priorité). La page se remplit à la main, sur place : voir <a href="#releve">Le relevé sur place</a>.</dd>
+<dt>Il peut demander</dt><dd>Rien de particulier. Il rappelle de lier <code>measurements.json</code> dans le dossier de sortie, pour que les saisies survivent.</dd>
+</dl></li>
+<li><h4>Appliquer le relevé</h4>
+<dl class="kv">
+<dt>Vous dites</dt><dd>« J'ai fini le relevé, applique-le. »</dd>
+<dt>L'agent fait</dt><dd>Relance <code>architecture</code> puis <code>blender</code> (environ une minute), ajoute <code>textures</code> si la géométrie a bougé de plusieurs centimètres. Relit la section « Mesures au mètre » du rapport et vous donne les valeurs refusées, avec la raison.</dd>
+<dt>Il peut demander</dt><dd>Quoi faire d'une valeur qui contredit nettement le scan (faute de frappe, mauvaise face mesurée ?). Une feuille de décision à cocher s'il y en a plusieurs.</dd>
+</dl></li>
+<li><h4>Corriger un élément</h4>
+<dl class="kv">
+<dt>Vous dites</dt><dd>« La porte 2 s'ouvre vers le couloir. » « La niche est traversante. » « Supprime la niche 2. »</dd>
+<dt>L'agent fait</dt><dd>Retrouve l'élément (<code>Door_2</code>, <code>Niche_1</code>…), écrit ou complète <code>overrides.json</code>, relance <code>architecture</code> et <code>blender</code>, vérifie sur les rendus et dans « Corrections manuelles » que la correction est passée.</dd>
+<dt>Il peut demander</dt><dd>Duquel de deux éléments vous parlez, en vous montrant le rendu. Il vous dit si une demande ne s'exprime pas avec les champs disponibles.</dd>
+</dl></li>
+<li><h4>Réconcilier le modèle et le relevé <span class="pill soon">à venir</span></h4>
+<dl class="kv">
+<dt>Vous direz</dt><dd>« Réconcilie le modèle avec mes mesures. »</dd>
+<dt>L'agent fera</dt><dd>Utilisera la skill <code>room-reconcile</code>, pas encore écrite : trier les conflits, appliquer ceux qui n'ont pas d'ambiguïté, vous poser les autres.</dd>
+<dt>D'ici là</dt><dd>La skill <code>room-model</code> applique le relevé (étape 4) et signale les valeurs qui jurent avec le reste.</dd>
+</dl></li>
+<li><h4>Quand ça ne marche pas</h4>
+<dl class="kv">
+<dt>Vous dites</dt><dd>« Ça a planté. » « Je ne vois pas les cotes dans Blender. » « Pourquoi l'étape a été sautée ? »</dd>
+<dt>L'agent fait</dt><dd>Lit le message d'erreur, la fin de <code>blender.log</code> ou les alertes du rapport, applique le remède du tableau de <a href="#depannage">Dépannage</a>, vérifie que l'étape a bien écrit sa sortie.</dd>
+<dt>Il peut demander</dt><dd>De corriger quelque chose sur votre machine (chemin de Blender, pilote GPU) quand il ne peut pas le faire seul.</dd>
+</dl></li>
+</ol>
+
+<div class="note warn"><p><strong>Ce que l'agent ne fait pas.</strong> Il ne publie ni ne versionne jamais une capture : <code>data/captures-in/</code> et <code>data/room-model/</code> restent locaux. Il ne copie aucune valeur d'une vraie pièce dans le code, les tests ou les documents : tout changement de code doit marcher pour n'importe quelle capture.</p></div>
+<p>Le détail des commandes, pour vérifier ce que fait l'agent ou reprendre la main, est dans l'<a href="#annexe">Annexe : commandes</a>.</p>
+</section>
+
+<hr class="part">
+<section id="fonctionne" class="part-sec">
+<h2>2. Comment fonctionne la pipeline</h2>
+<p class="sub">Onze étapes, chacune lit des fichiers de la précédente et en écrit d'autres. Aucune géométrie n'est dessinée par le LLM.</p>
+
+<h3 id="graphe">Graphe des étapes</h3>
+<figure>
+<svg class="diagram" viewBox="0 0 1068 330" role="img" aria-labelledby="sg-t sg-d"><title id="sg-t">Graphe des étapes de la pipeline</title><desc id="sg-d">Onze étapes en deux rangées : de registration à vision, puis de anchor à blender. Les fichiers mesures et corrections entrent dans architecture.</desc>
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="fill-line"/></marker></defs>
+<line class="ln" x1="168" y1="72.0" x2="194" y2="72.0" marker-end="url(#ar)"/>
+<line class="ln" x1="344" y1="72.0" x2="370" y2="72.0" marker-end="url(#ar)"/>
+<line class="ln" x1="520" y1="72.0" x2="546" y2="72.0" marker-end="url(#ar)"/>
+<line class="ln" x1="696" y1="72.0" x2="722" y2="72.0" marker-end="url(#ar)"/>
+<line class="ln" x1="872" y1="72.0" x2="898" y2="72.0" marker-end="url(#ar)"/>
+<line class="ln" x1="168" y1="222.0" x2="194" y2="222.0" marker-end="url(#ar)"/>
+<line class="ln" x1="344" y1="222.0" x2="370" y2="222.0" marker-end="url(#ar)"/>
+<line class="ln" x1="520" y1="222.0" x2="546" y2="222.0" marker-end="url(#ar)"/>
+<line class="ln" x1="696" y1="222.0" x2="722" y2="222.0" marker-end="url(#ar)"/>
+<path class="ln" fill="none" d="M974.0 130 V156 H126.0 V186" marker-end="url(#ar)"/>
+<path class="ln dash" fill="none" d="M62.0 130 V186" marker-end="url(#ar)"/>
+<text class="fl" x="68.0" y="174">poses</text>
+<g class="inp"><rect x="366" y="300" width="76" height="24" rx="12"/><text x="404" y="316" text-anchor="middle">measurements</text></g>
+<line class="ln dash" x1="404" y1="300" x2="404" y2="256" marker-end="url(#ar)"/>
+<g class="inp"><rect x="446" y="300" width="76" height="24" rx="12"/><text x="484" y="316" text-anchor="middle">overrides</text></g>
+<line class="ln dash" x1="484" y1="300" x2="500" y2="256" marker-end="url(#ar)"/>
+<g class="node"><rect x="20" y="40" width="148" height="64" rx="6"/><text class="nm" x="94.0" y="65" text-anchor="middle">registration</text><text class="sb" x="94.0" y="83" text-anchor="middle">calcule les poses des photos</text><text class="fl" x="94.0" y="120" text-anchor="middle">registration/poses.json</text></g>
+<g class="node"><rect x="196" y="40" width="148" height="64" rx="6"/><text class="nm" x="270.0" y="65" text-anchor="middle">shell</text><text class="sb" x="270.0" y="83" text-anchor="middle">murs, sols, plafonds</text><text class="fl" x="270.0" y="120" text-anchor="middle">shell.json</text></g>
+<g class="node"><rect x="372" y="40" width="148" height="64" rx="6"/><text class="nm" x="446.0" y="65" text-anchor="middle">model</text><text class="sb" x="446.0" y="83" text-anchor="middle">cotes + sigma</text><text class="fl" x="446.0" y="120" text-anchor="middle">model.json</text></g>
+<g class="node"><rect x="548" y="40" width="148" height="64" rx="6"/><text class="nm" x="622.0" y="65" text-anchor="middle">export</text><text class="sb" x="622.0" y="83" text-anchor="middle">plan.svg, report.md</text><text class="fl" x="622.0" y="120" text-anchor="middle">model_measured.glb</text></g>
+<g class="node"><rect x="724" y="40" width="148" height="64" rx="6"/><text class="nm" x="798.0" y="65" text-anchor="middle">openings</text><text class="sb" x="798.0" y="83" text-anchor="middle">portes, fenêtres</text><text class="fl" x="798.0" y="120" text-anchor="middle">openings.json</text></g>
+<g class="node"><rect x="900" y="40" width="148" height="64" rx="6"/><text class="nm" x="974.0" y="65" text-anchor="middle">vision</text><text class="sb" x="974.0" y="83" text-anchor="middle">LLM : typage</text><text class="fl" x="974.0" y="120" text-anchor="middle">vision/answers.json</text></g>
+<g class="node hl"><rect x="20" y="190" width="148" height="64" rx="6"/><text class="nm" x="94.0" y="215" text-anchor="middle">anchor</text><text class="sb" x="94.0" y="233" text-anchor="middle">SAM 2.1 + profondeur</text><text class="fl" x="94.0" y="270" text-anchor="middle">anchors.json</text></g>
+<g class="node"><rect x="196" y="190" width="148" height="64" rx="6"/><text class="nm" x="270.0" y="215" text-anchor="middle">edge_pick</text><text class="sb" x="270.0" y="233" text-anchor="middle">LLM : choix de lettres</text><text class="fl" x="270.0" y="270" text-anchor="middle">edge_pick/answers.json</text></g>
+<g class="node hl"><rect x="372" y="190" width="148" height="64" rx="6"/><text class="nm" x="446.0" y="215" text-anchor="middle">architecture</text><text class="sb" x="446.0" y="233" text-anchor="middle">fusion des sources</text><text class="fl" x="446.0" y="270" text-anchor="middle">architecture.json</text></g>
+<g class="node"><rect x="548" y="190" width="148" height="64" rx="6"/><text class="nm" x="622.0" y="215" text-anchor="middle">textures</text><text class="sb" x="622.0" y="233" text-anchor="middle">photos projetées</text><text class="fl" x="622.0" y="270" text-anchor="middle">textures/*.png</text></g>
+<g class="node hl"><rect x="724" y="190" width="148" height="64" rx="6"/><text class="nm" x="798.0" y="215" text-anchor="middle">blender</text><text class="sb" x="798.0" y="233" text-anchor="middle">scène + glb + rendus</text><text class="fl" x="798.0" y="270" text-anchor="middle">architecture.blend</text></g>
+</svg>
+<figcaption>Rangée du haut : le scan. Rangée du bas : l'architecture. Les étapes surlignées sont celles où le résultat change le plus d'une capture à l'autre. En pointillés : les fichiers que vous éditez.</figcaption>
+</figure>
+<div class="tw"><table>
+<thead><tr><th>Étape</th><th>Lit</th><th>Écrit</th><th>Pourquoi</th></tr></thead>
+<tbody>
+<tr><td><code>registration</code></td><td>photos, poses ARKit</td><td><code>registration/poses.json</code></td><td>Affine la position des photos (points SIFT, ajustement de faisceaux) pour que les arêtes se recoupent d'une vue à l'autre.</td></tr>
+<tr><td><code>shell</code></td><td>RoomPlan, LiDAR (PLY)</td><td><code>shell.json</code></td><td>Murs ajustés sur le LiDAR, sol, niveaux de plafond, poutres, colonnes.</td></tr>
+<tr><td><code>model</code></td><td><code>shell.json</code></td><td><code>model.json</code></td><td>Ajoute les cotes (stations, hauteurs) avec leur sigma propagé.</td></tr>
+<tr><td><code>export</code></td><td><code>model.json</code></td><td><code>model_measured.glb</code>, <code>plan.svg</code>, <code>dimensions.csv</code>, <code>report.md</code></td><td>Vue du scan seul, avant toute interprétation.</td></tr>
+<tr><td><code>openings</code></td><td><code>model.json</code>, RoomPlan, LiDAR</td><td><code>openings.json</code></td><td>Portes, fenêtres et ouvertures, rattachées au mur ou à la cloison qui les porte.</td></tr>
+<tr><td><code>vision</code></td><td><code>openings.json</code>, photos</td><td><code>vision/pending/</code>, <code>vision/answers.json</code></td><td>Le LLM type chaque élément (type, charnière, sens, panneaux, moulures) sur des recadrages. Il peut déclarer ce que RoomPlan a raté (une niche traversante).</td></tr>
+<tr><td><code>anchor</code></td><td>openings, vision, poses, photos</td><td><code>anchors.json</code></td><td>Retrouve les arêtes du vantail ou de l'ouverture dans les photos (SAM 2.1) et leur profondeur.</td></tr>
+<tr><td><code>edge_pick</code></td><td><code>anchors.json</code>, photos</td><td><code>edge_pick/answers.json</code></td><td>Quand le masque échoue (rideaux, verre dépoli), le LLM choisit parmi des lignes candidates lettrées.</td></tr>
+<tr><td><code>architecture</code></td><td>model, openings, anchors, réponses LLM, <code>measurements.json</code>, <code>overrides.json</code></td><td><code>architecture.json</code>, <code>measurements/index.html</code>, rapport ruban</td><td>Fusionne toutes les sources par priorité et construit le modèle d'architecture.</td></tr>
+<tr><td><code>textures</code></td><td><code>architecture.json</code>, photos, maillage LiDAR</td><td><code>textures/*.png</code>, <code>textures.json</code></td><td>Projette les photos sur murs, sol et plafonds.</td></tr>
+<tr><td><code>blender</code></td><td><code>architecture.json</code>, textures, maillage</td><td><code>architecture.blend</code>, <code>.glb</code>, <code>renders/</code>, <code>blender_report.json</code></td><td>Construit la scène, sans rien recalculer : Blender ne lit que <code>architecture.json</code>.</td></tr>
+</tbody></table></div>
+<p>Une étape est sautée si sa sortie existe, sauf <code>--force</code>. Elle est refaite d'elle-même quand un fichier qu'elle fusionne est plus récent que sa sortie : <code>anchor</code> (openings, vision, overrides), <code>edge_pick</code> (anchors), <code>architecture</code> (anchors, edge_pick, vision, measurements, overrides), <code>textures</code> (architecture), <code>blender</code> (architecture, textures). Les étapes <code>vision</code> et <code>edge_pick</code> sont aussi refaites si leur réponse est un enregistrement d'erreur.</p>
+
+<h3 id="priorites">Priorité des sources</h3>
+<figure>
+<svg class="diagram" viewBox="0 0 900 130" role="img" aria-labelledby="pr-t pr-d"><title id="pr-t">Échelle des sources</title><desc id="pr-d">De la plus fiable à la moins fiable : ruban, photo, LLM, LiDAR, RoomPlan, supposé.</desc>
+<defs><marker id="pm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-line"/></marker></defs>
+<rect class="chip tape" x="20" y="24" width="130" height="46" rx="6"/><text class="nm" x="85" y="52" text-anchor="middle">tape</text>
+<rect class="chip" x="162" y="24" width="130" height="46" rx="6"/><text class="nm" x="227" y="52" text-anchor="middle">photo</text>
+<rect class="chip" x="304" y="24" width="130" height="46" rx="6"/><text class="nm" x="369" y="52" text-anchor="middle">llm</text>
+<rect class="chip" x="446" y="24" width="130" height="46" rx="6"/><text class="nm" x="511" y="52" text-anchor="middle">lidar</text>
+<rect class="chip" x="588" y="24" width="130" height="46" rx="6"/><text class="nm" x="653" y="52" text-anchor="middle">roomplan</text>
+<rect class="chip low" x="730" y="24" width="130" height="46" rx="6"/><text class="nm" x="795" y="52" text-anchor="middle">assumed</text>
+<line class="ln" x1="20" y1="100" x2="860" y2="100" marker-end="url(#pm)"/>
+<text class="sb" x="20" y="120">gagne</text><text class="sb" x="860" y="120" text-anchor="end">cède</text>
+</svg>
+<figcaption>Une source plus haute remplace une plus basse. Le ruban a un sigma fixe de 0,5 cm.</figcaption>
+</figure>
+<p>Chaque paramètre porte <code>value</code>, <code>sigma</code>, <code>unit</code> et <code>source</code>. Le sigma d'un plan LiDAR vient du résidu d'ajustement, de la surface vue et d'une part systématique (1 cm en position, 0,25 degré en azimut). Un mur sans assez de LiDAR garde le plan RoomPlan avec 5 cm et 2 degrés (drapeau <code>roomplan_fallback</code>). L'épaisseur d'un mur est supposée (20 cm, sigma 5 cm) tant qu'un montant n'est pas mesuré. La formule complète est dans <code>docs/room-model.md</code>.</p>
+<p>Deux nuances : pour une porte ou une fenêtre, la mesure photo va dans des paramètres propres au vantail (<code>leaf_width</code>, <code>leaf_height</code>), sans écraser l'étendue du trou ; pour une niche ou une ouverture, elle remplace les sources plus basses quand ses contrôles de qualité passent. Un désaccord photo/scan de plus de trois sigmas est marqué <code>to_verify</code>, jamais tranché en silence.</p>
+
+<h3 id="regles">Les règles principales</h3>
+<dl class="kv" style="display:block;max-width:44rem">
+<dt style="margin-top:1rem"><strong>Murs</strong></dt><dd>RoomPlan fournit la liste des murs et la topologie. Chaque mur est ajusté sur le LiDAR, en partant de la position RoomPlan. Si le plan RoomPlan est décalé, la surface réelle la plus soutenue dans 30 cm est retenue (<code>shifted_seed</code>) ; avec moins de 0,5 m² de LiDAR, l'azimut RoomPlan est gardé (<code>low_support</code>).</dd>
+<dt style="margin-top:1rem"><strong>Cloisons</strong></dt><dd>Un mur RoomPlan qui ne borde pas le sol mais traverse la pièce est une cloison : deux faces, toutes deux dans la pièce. Elle s'arrête sur la face qu'elle rencontre.</dd>
+<dt style="margin-top:1rem"><strong>Équerrage</strong> <span class="pill wip">en cours</span></dt><dd>Prévu : les murs sont ramenés dans le repère orthogonal dominant quand l'écart reste sous max(2 degrés, 3 sigmas d'azimut), sinon gardés avec le drapeau <code>out_of_square</code> ; les valeurs mesurées sont conservées. Le sol devient le polygone intérieur des faces de murs, les plafonds se découpent aux cloisons, poutres et ressauts. Ce n'est pas encore dans le code de la branche.</dd>
+<dt style="margin-top:1rem"><strong>Ouvertures</strong></dt><dd>Genres : <code>door</code>, <code>window</code>, <code>opening</code> (traversante, du sol), <code>niche</code> (appui au-dessus du sol, éventuellement traversante, avec séparations et étagères). Un catalogue court de types : portes <code>hinged_single</code>, <code>hinged_double</code>, <code>sliding</code>, <code>pocket</code>, <code>french_window</code> ; fenêtres <code>casement_single</code>, <code>casement_double</code>, <code>tilt_turn</code>, <code>sliding</code>, <code>fixed</code>. Le LLM ne sort pas de ce catalogue.</dd>
+<dt style="margin-top:1rem"><strong>Ancrage photo</strong></dt><dd>Chaque face d'hôte est redressée à partir des photos posées. SAM 2.1, invité par le rectangle du modèle, segmente l'élément ; chaque bord du masque est calé sur un pic de gradient, puis sa profondeur est triangulée sur plusieurs vues et prise en médiane. Le bas d'une porte ou d'une niche au sol est le plan du sol, par règle. Le sigma vient de l'ambiguïté de profondeur.</dd>
+<dt style="margin-top:1rem"><strong>Le LLM choisit une lettre</strong></dt><dd>Le LLM ne donne jamais de coordonnées. La géométrie propose des lignes candidates lettrées sur des bandes redressées ; il répond la lettre, ou rien si l'arête est cachée. <code>vision</code> reste le typage, avec des coins en pixels que la pipeline rétroprojette sur le mur ; toute valeur corrigée garde la valeur du scan à côté (<code>llm_corrected</code>).</dd>
+<dt style="margin-top:1rem"><strong>Textures</strong></dt><dd>2 cm par texel. Un texel est gardé quand une photo le voit de face, que sa profondeur concorde avec le maillage LiDAR et qu'il n'est dans aucune boîte d'objet RoomPlan : le mobilier n'est pas imprimé. La couleur est la médiane pondérée des meilleures vues. Les trous de couverture sont remplis par une texture CC0 teintée à la couleur mesurée, fondue dans l'observé.</dd>
+<dt style="margin-top:1rem"><strong>Générique pour toute capture</strong></dt><dd>Rien dans le code, les tests ou la documentation ne dépend d'une pièce : ni nom de mur, ni compte, ni dimension. Le comportement vient des données de la capture, du catalogue et du schéma. Les tests utilisent des scènes synthétiques.</dd>
+</dl>
+
+<h3 id="menuiserie">Vantail, huisserie, chambranle</h3>
+<figure>
+<svg class="diagram" viewBox="0 0 900 250" role="img" aria-labelledby="mn-t mn-d"><title id="mn-t">Coupe horizontale d'une porte</title><desc id="mn-d">Le vantail, deux montants d'huisserie de chaque côté, le trou dans le mur égal au vantail plus deux montants, et les chambranles qui recouvrent le mur sur les deux faces.</desc>
+<defs><marker id="mm" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--accent)"/></marker></defs>
+<rect class="wall" x="60" y="90" width="270" height="60"/><rect class="wall" x="570" y="90" width="270" height="60"/>
+<rect class="leaf" x="360" y="112" width="180" height="16"/>
+<rect class="hole" x="330" y="90" width="30" height="60" style="fill:var(--code-bg)"/><rect class="hole" x="540" y="90" width="30" height="60" style="fill:var(--code-bg)"/>
+<rect style="fill:var(--muted);stroke:none" x="318" y="82" width="12" height="8"/><rect style="fill:var(--muted);stroke:none" x="570" y="82" width="12" height="8"/>
+<rect style="fill:var(--muted);stroke:none" x="318" y="150" width="12" height="8"/><rect style="fill:var(--muted);stroke:none" x="570" y="150" width="12" height="8"/>
+<line class="dim" x1="360" y1="190" x2="540" y2="190" marker-start="url(#mm)" marker-end="url(#mm)"/><text class="dimtxt" x="450" y="210" text-anchor="middle">vantail (mesuré)</text>
+<line class="thin" x1="330" y1="150" x2="330" y2="225"/><line class="thin" x1="570" y1="150" x2="570" y2="225"/>
+<line class="thin" x1="360" y1="128" x2="360" y2="195"/><line class="thin" x1="540" y1="128" x2="540" y2="195"/>
+<line class="dim" x1="330" y1="230" x2="570" y2="230" marker-start="url(#mm)" marker-end="url(#mm)"/><text class="dimtxt" x="450" y="246" text-anchor="middle">trou dans le mur = vantail + 2 montants</text>
+<text class="sb" x="345" y="76" text-anchor="middle">montant</text><text class="sb" x="555" y="76" text-anchor="middle">montant</text>
+<text class="sb" x="290" y="72" text-anchor="end">chambranle</text><text class="sb" x="610" y="72">chambranle</text>
+<text class="sb" x="195" y="125" text-anchor="middle">mur</text><text class="sb" x="705" y="125" text-anchor="middle">mur</text>
+</svg>
+<figcaption>Vue de dessus, coupée à mi-hauteur. Les chambranles sont les garnitures plates sur les deux faces.</figcaption>
+</figure>
+<ul>
+<li><strong>Vantail</strong> : mesuré par la photo ou au ruban (<code>leaf_*</code>).</li>
+<li><strong>Montant (huisserie)</strong> : largeur visible fixée par une constante ou donnée par le LLM.</li>
+<li><strong>Trou dans le mur</strong> : vantail + 2 montants en largeur ; vantail + 1 montant en hauteur.</li>
+<li><strong>Chambranle</strong> : la largeur restante jusqu'à l'étendue extérieure du LiDAR, marquée <code>to_verify</code> hors d'une plage plausible.</li>
+<li>Un vantail plus grand que son trou est refusé : le chiffre est incohérent, on le mesure au ruban.</li>
+</ul>
+</section>
+
+<hr class="part">
+<section id="depannage" class="part-sec">
+<h2>3. Dépannage</h2>
+<p class="sub">Symptôme, cause, remède. Les lignes viennent de ce qui s'est réellement produit pendant le développement.</p>
+<table class="trouble">
+<thead><tr><th>Symptôme</th><th>Cause</th><th>Remède</th></tr></thead>
+<tbody>
+<tr><td data-l="Symptôme">Les cotes n'apparaissent pas dans Blender</td><td data-l="Cause">Les cotes sont des segments MeasureIt, cachés tant qu'on n'a pas demandé leur affichage.</td><td data-l="Remède">Barre latérale N, onglet MeasureIt, bouton <em>Show</em>. Si MeasureIt manque, <code>blender_report.json</code> indique le repli sur des objets natifs ; <code>ROOM_MODEL_NO_MEASUREIT=1</code> force ce repli.</td></tr>
+<tr><td data-l="Symptôme"><code>Blender not found: … (set BLENDER)</code></td><td data-l="Cause"><code>BLENDER</code> vide, ou chemin faux. Depuis WSL, l'exécutable Windows se trouve sous <code>/mnt/c/…</code>.</td><td data-l="Remède">Exportez le chemin entre guillemets : <code>export BLENDER="/mnt/c/…/blender.exe"</code>. <code>wslpath</code> doit exister (WSL). Dans <code>all</code> l'étape est sautée avec ce message, seule elle échoue.</td></tr>
+<tr><td data-l="Symptôme">Blender démarre mais ignore une variable d'environnement</td><td data-l="Cause">Un <code>.exe</code> Windows ne voit que les variables listées dans <code>WSLENV</code>.</td><td data-l="Remède">La pipeline complète <code>WSLENV</code> pour <code>ROOM_MODEL_NO_MEASUREIT</code> seulement. Toute autre variable destinée à Blender doit être ajoutée à <code>WSLENV</code> par vous.</td></tr>
+<tr><td data-l="Symptôme"><code>stage … exists, skipped (use --force)</code> alors que j'ai changé quelque chose</td><td data-l="Cause">Seuls certains fichiers rendent une étape périmée (liste en partie 2). Une règle compare les dates de modification : un fichier copié avec une date ancienne ne déclenche rien. Changer le code d'une étape ne la déclenche jamais.</td><td data-l="Remède"><code>--force</code> sur l'étape voulue. Pour tout refaire depuis une étape, relancez avec <code>--force</code> ; les étapes aval qui ont une règle de péremption (partie 2) se recalculent d'elles-mêmes.</td></tr>
+<tr><td data-l="Symptôme">Passe LLM échouée : <code>vision/answers.json</code> ne contient que <code>error</code></td><td data-l="Cause">Appel <code>claude -p</code> en échec (délai, code de sortie, réponse illisible). L'échec n'est pas mis en cache.</td><td data-l="Remède">Relancez l'étape sans <code>--force</code> : une réponse en erreur est toujours refaite. <code>rejected.json</code> garde la raison. Un <code>{"skipped": true}</code> vient de <code>--no-llm</code> ; relancer sans le drapeau refait l'étape. <code>claude</code> introuvable : installez-le ou posez <code>ROOM_MODEL_CLAUDE</code>.</td></tr>
+<tr><td data-l="Symptôme">Une fenêtre n'est pas mesurée (candidats seulement)</td><td data-l="Cause">Rideau, verre dépoli ou meuble : le masque échoue, puis le LLM ne voit pas l'arête et répond « rien ».</td><td data-l="Remède">C'est une vraie occlusion. Mesurez le vantail au ruban (badge « vantail » ou « deux vantaux »), ou corrigez par <code>overrides.json</code>.</td></tr>
+<tr><td data-l="Symptôme">Une porte est plus large que son trou, ou marquée <code>to_verify</code></td><td data-l="Cause">La photo et le scan s'écartent de plus de trois sigmas, ou la photo a pris la ligne du chambranle plutôt que celle du vantail.</td><td data-l="Remède">Une valeur de vantail supérieure au trou est refusée par la pipeline. Mesurez le vantail au ruban : la valeur au ruban gagne.</td></tr>
+<tr><td data-l="Symptôme">Les valeurs saisies dans la page de relevé ont « disparu »</td><td data-l="Cause">La clé de stockage du navigateur a changé une fois (intitulé de page vers identifiant de capture). Un autre navigateur ou profil a son propre stockage.</td><td data-l="Remède">Ouvrez la page : un encart propose les anciennes valeurs. Sinon « Lier le fichier de mesures » sur le <code>measurements.json</code>, ou le bouton d'import. Gardez toujours le fichier lié.</td></tr>
+<tr><td data-l="Symptôme">Textures avec du mobilier ou des plaques de remplissage</td><td data-l="Cause">Un objet collé au mur (moins de 5 à 6 cm) échappe au masque ; les texels qu'aucune photo ne couvre sont comblés par une texture générique teintée.</td><td data-l="Remède">Un meuble collé reste visible : c'est une limite connue. Les plaques de remplissage signalent un manque de couverture, voir <code>textures/textures.json</code> ; reprenez des photos de la zone. Le premier remplissage télécharge une texture CC0 (réseau).</td></tr>
+<tr><td data-l="Symptôme">Murs qui ne sont pas d'équerre <span class="pill wip">en cours</span></td><td data-l="Cause">Sans équerrage, le modèle garde les angles mesurés. Le drapeau <code>out_of_square</code> et le recalage sont prévus par la spécification, pas encore dans le code.</td><td data-l="Remède">Pour l'instant, regardez les écarts dans <code>report.md</code> (orthogonalité) et tranchez avec le ruban.</td></tr>
+<tr><td data-l="Symptôme">Murs décalés ou très courts, drapeaux <code>shifted_seed</code>, <code>low_support</code>, <code>roomplan_fallback</code></td><td data-l="Cause">Surface réelle loin du plan RoomPlan, peu de LiDAR, ou aucun ajustement possible.</td><td data-l="Remède">Lisez le tableau des murs de <code>report.md</code>. Le sigma grandit en conséquence ; une station au ruban corrige le mur au sigma le plus grand.</td></tr>
+<tr><td data-l="Symptôme">Poutre avec un « ? » sur le plan, ou élément sous <code>À vérifier</code></td><td data-l="Cause">Poutre probable dont les deux côtés ne sont pas vus, ou conduit plaqué au plafond.</td><td data-l="Remède">Vérifiez sur place. Un élément faux se retire par <code>overrides.json</code> (<code>"remove": true</code> pour les éléments qui le permettent).</td></tr>
+<tr><td data-l="Symptôme">CUDA indisponible, ou <code>anchor</code> très lente</td><td data-l="Cause"><code>torch.cuda.is_available()</code> vaut <code>False</code> : SAM retombe sur le CPU.</td><td data-l="Remède">Corrigez le pilote ou le venv (torch avec CUDA) ; le calcul sur CPU fonctionne mais bien plus lentement (non mesuré ici).</td></tr>
+<tr><td data-l="Symptôme"><code>anchor</code> échoue au premier lancement, hors ligne</td><td data-l="Cause">Le modèle <code>facebook/sam2.1-hiera-large</code> n'est pas encore en cache.</td><td data-l="Remède">Connectez-vous une fois ; le téléchargement est ensuite réutilisé.</td></tr>
+<tr><td data-l="Symptôme"><code>no photos for room N</code>, ou capture refusée</td><td data-l="Cause">Pièce sans photos, ou dossier sans <code>manifest.json</code> (zip non décompressé, mauvais niveau de dossier).</td><td data-l="Remède">Dans <code>all</code>, les étapes photo sont sautées. Pointez <code>--capture</code> sur le dossier qui contient <code>manifest.json</code>, et vérifiez <code>--room</code>.</td></tr>
+<tr><td data-l="Symptôme">La console Blender affiche des erreurs d'autres extensions</td><td data-l="Cause">Les extensions personnelles défaillantes écrivent des traces à chaque démarrage.</td><td data-l="Remède">Sans effet. Le vrai échec se lit à la fin de <code>blender.log</code> dans <code>--out</code>.</td></tr>
+</tbody></table>
+<div class="note"><p>Pour tout le reste : <code>report.md</code> (alertes et drapeaux), <code>blender.log</code>, et <code>.venv/bin/python -m pytest -q</code> dans <code>pipelines/room_model/</code> pour vérifier l'installation.</p></div>
+</section>
+<hr class="part">
+<section id="annexe" class="part-sec">
+<h2>Annexe : commandes</h2>
+<p class="sub">Ce que l'agent exécute, pour le vérifier ou reprendre la main. Tout se lance depuis <code>pipelines/room_model/</code>, dans WSL.</p>
 
 <h3 id="prereq">Prérequis</h3>
 <div class="tw"><table>
@@ -331,147 +539,6 @@ echo "$BLENDER"; command -v claude</code></pre>
 <li>Contrôles de cohérence globaux, chacun avec un verdict et un résidu chiffré : longueurs de murs contre longueurs mesurées et stations, ouvertures sans chevauchement et dans leur hôte, vantail au plus égal au trou, écarts d'équerrage justifiés par le sigma, plafonds cohérents avec le haut des murs, valeurs au ruban cohérentes entre elles. Une valeur incompatible avec tout le reste est signalée comme probable erreur de mesure, pas imposée au modèle.</li>
 <li>Une skill versionnée <code>.agents/skills/room-reconcile/</code> guidera un agent : lire <code>measurements.json</code> (valeurs et notes) et <code>reconcile.json</code>, trier les conflits (appliqués d'office, arbitrés par l'agent avec une raison chiffrée, ou posés à l'humain dans une feuille de décision), n'écrire que <code>measurements.json</code> ou <code>overrides.json</code>, relancer <code>architecture</code> et <code>blender</code>, vérifier que les résidus baissent, consigner chaque décision. Générique pour toute capture.</li>
 </ul>
-</section>
-
-<hr class="part">
-<section id="fonctionne" class="part-sec">
-<h2>2. Comment fonctionne la pipeline</h2>
-<p class="sub">Onze étapes, chacune lit des fichiers de la précédente et en écrit d'autres. Aucune géométrie n'est dessinée par le LLM.</p>
-
-<h3 id="graphe">Graphe des étapes</h3>
-<figure>
-<svg class="diagram" viewBox="0 0 1068 330" role="img" aria-labelledby="sg-t sg-d"><title id="sg-t">Graphe des étapes de la pipeline</title><desc id="sg-d">Onze étapes en deux rangées : de registration à vision, puis de anchor à blender. Les fichiers mesures et corrections entrent dans architecture.</desc>
-<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="fill-line"/></marker></defs>
-<line class="ln" x1="168" y1="72.0" x2="194" y2="72.0" marker-end="url(#ar)"/>
-<line class="ln" x1="344" y1="72.0" x2="370" y2="72.0" marker-end="url(#ar)"/>
-<line class="ln" x1="520" y1="72.0" x2="546" y2="72.0" marker-end="url(#ar)"/>
-<line class="ln" x1="696" y1="72.0" x2="722" y2="72.0" marker-end="url(#ar)"/>
-<line class="ln" x1="872" y1="72.0" x2="898" y2="72.0" marker-end="url(#ar)"/>
-<line class="ln" x1="168" y1="222.0" x2="194" y2="222.0" marker-end="url(#ar)"/>
-<line class="ln" x1="344" y1="222.0" x2="370" y2="222.0" marker-end="url(#ar)"/>
-<line class="ln" x1="520" y1="222.0" x2="546" y2="222.0" marker-end="url(#ar)"/>
-<line class="ln" x1="696" y1="222.0" x2="722" y2="222.0" marker-end="url(#ar)"/>
-<path class="ln" fill="none" d="M974.0 130 V156 H126.0 V186" marker-end="url(#ar)"/>
-<path class="ln dash" fill="none" d="M62.0 130 V186" marker-end="url(#ar)"/>
-<text class="fl" x="68.0" y="174">poses</text>
-<g class="inp"><rect x="366" y="300" width="76" height="24" rx="12"/><text x="404" y="316" text-anchor="middle">measurements</text></g>
-<line class="ln dash" x1="404" y1="300" x2="404" y2="256" marker-end="url(#ar)"/>
-<g class="inp"><rect x="446" y="300" width="76" height="24" rx="12"/><text x="484" y="316" text-anchor="middle">overrides</text></g>
-<line class="ln dash" x1="484" y1="300" x2="500" y2="256" marker-end="url(#ar)"/>
-<g class="node"><rect x="20" y="40" width="148" height="64" rx="6"/><text class="nm" x="94.0" y="65" text-anchor="middle">registration</text><text class="sb" x="94.0" y="83" text-anchor="middle">calcule les poses des photos</text><text class="fl" x="94.0" y="120" text-anchor="middle">registration/poses.json</text></g>
-<g class="node"><rect x="196" y="40" width="148" height="64" rx="6"/><text class="nm" x="270.0" y="65" text-anchor="middle">shell</text><text class="sb" x="270.0" y="83" text-anchor="middle">murs, sols, plafonds</text><text class="fl" x="270.0" y="120" text-anchor="middle">shell.json</text></g>
-<g class="node"><rect x="372" y="40" width="148" height="64" rx="6"/><text class="nm" x="446.0" y="65" text-anchor="middle">model</text><text class="sb" x="446.0" y="83" text-anchor="middle">cotes + sigma</text><text class="fl" x="446.0" y="120" text-anchor="middle">model.json</text></g>
-<g class="node"><rect x="548" y="40" width="148" height="64" rx="6"/><text class="nm" x="622.0" y="65" text-anchor="middle">export</text><text class="sb" x="622.0" y="83" text-anchor="middle">plan.svg, report.md</text><text class="fl" x="622.0" y="120" text-anchor="middle">model_measured.glb</text></g>
-<g class="node"><rect x="724" y="40" width="148" height="64" rx="6"/><text class="nm" x="798.0" y="65" text-anchor="middle">openings</text><text class="sb" x="798.0" y="83" text-anchor="middle">portes, fenêtres</text><text class="fl" x="798.0" y="120" text-anchor="middle">openings.json</text></g>
-<g class="node"><rect x="900" y="40" width="148" height="64" rx="6"/><text class="nm" x="974.0" y="65" text-anchor="middle">vision</text><text class="sb" x="974.0" y="83" text-anchor="middle">LLM : typage</text><text class="fl" x="974.0" y="120" text-anchor="middle">vision/answers.json</text></g>
-<g class="node hl"><rect x="20" y="190" width="148" height="64" rx="6"/><text class="nm" x="94.0" y="215" text-anchor="middle">anchor</text><text class="sb" x="94.0" y="233" text-anchor="middle">SAM 2.1 + profondeur</text><text class="fl" x="94.0" y="270" text-anchor="middle">anchors.json</text></g>
-<g class="node"><rect x="196" y="190" width="148" height="64" rx="6"/><text class="nm" x="270.0" y="215" text-anchor="middle">edge_pick</text><text class="sb" x="270.0" y="233" text-anchor="middle">LLM : choix de lettres</text><text class="fl" x="270.0" y="270" text-anchor="middle">edge_pick/answers.json</text></g>
-<g class="node hl"><rect x="372" y="190" width="148" height="64" rx="6"/><text class="nm" x="446.0" y="215" text-anchor="middle">architecture</text><text class="sb" x="446.0" y="233" text-anchor="middle">fusion des sources</text><text class="fl" x="446.0" y="270" text-anchor="middle">architecture.json</text></g>
-<g class="node"><rect x="548" y="190" width="148" height="64" rx="6"/><text class="nm" x="622.0" y="215" text-anchor="middle">textures</text><text class="sb" x="622.0" y="233" text-anchor="middle">photos projetées</text><text class="fl" x="622.0" y="270" text-anchor="middle">textures/*.png</text></g>
-<g class="node hl"><rect x="724" y="190" width="148" height="64" rx="6"/><text class="nm" x="798.0" y="215" text-anchor="middle">blender</text><text class="sb" x="798.0" y="233" text-anchor="middle">scène + glb + rendus</text><text class="fl" x="798.0" y="270" text-anchor="middle">architecture.blend</text></g>
-</svg>
-<figcaption>Rangée du haut : le scan. Rangée du bas : l'architecture. Les étapes surlignées sont celles où le résultat change le plus d'une capture à l'autre. En pointillés : les fichiers que vous éditez.</figcaption>
-</figure>
-<div class="tw"><table>
-<thead><tr><th>Étape</th><th>Lit</th><th>Écrit</th><th>Pourquoi</th></tr></thead>
-<tbody>
-<tr><td><code>registration</code></td><td>photos, poses ARKit</td><td><code>registration/poses.json</code></td><td>Affine la position des photos (points SIFT, ajustement de faisceaux) pour que les arêtes se recoupent d'une vue à l'autre.</td></tr>
-<tr><td><code>shell</code></td><td>RoomPlan, LiDAR (PLY)</td><td><code>shell.json</code></td><td>Murs ajustés sur le LiDAR, sol, niveaux de plafond, poutres, colonnes.</td></tr>
-<tr><td><code>model</code></td><td><code>shell.json</code></td><td><code>model.json</code></td><td>Ajoute les cotes (stations, hauteurs) avec leur sigma propagé.</td></tr>
-<tr><td><code>export</code></td><td><code>model.json</code></td><td><code>model_measured.glb</code>, <code>plan.svg</code>, <code>dimensions.csv</code>, <code>report.md</code></td><td>Vue du scan seul, avant toute interprétation.</td></tr>
-<tr><td><code>openings</code></td><td><code>model.json</code>, RoomPlan, LiDAR</td><td><code>openings.json</code></td><td>Portes, fenêtres et ouvertures, rattachées au mur ou à la cloison qui les porte.</td></tr>
-<tr><td><code>vision</code></td><td><code>openings.json</code>, photos</td><td><code>vision/pending/</code>, <code>vision/answers.json</code></td><td>Le LLM type chaque élément (type, charnière, sens, panneaux, moulures) sur des recadrages. Il peut déclarer ce que RoomPlan a raté (une niche traversante).</td></tr>
-<tr><td><code>anchor</code></td><td>openings, vision, poses, photos</td><td><code>anchors.json</code></td><td>Retrouve les arêtes du vantail ou de l'ouverture dans les photos (SAM 2.1) et leur profondeur.</td></tr>
-<tr><td><code>edge_pick</code></td><td><code>anchors.json</code>, photos</td><td><code>edge_pick/answers.json</code></td><td>Quand le masque échoue (rideaux, verre dépoli), le LLM choisit parmi des lignes candidates lettrées.</td></tr>
-<tr><td><code>architecture</code></td><td>model, openings, anchors, réponses LLM, <code>measurements.json</code>, <code>overrides.json</code></td><td><code>architecture.json</code>, <code>measurements/index.html</code>, rapport ruban</td><td>Fusionne toutes les sources par priorité et construit le modèle d'architecture.</td></tr>
-<tr><td><code>textures</code></td><td><code>architecture.json</code>, photos, maillage LiDAR</td><td><code>textures/*.png</code>, <code>textures.json</code></td><td>Projette les photos sur murs, sol et plafonds.</td></tr>
-<tr><td><code>blender</code></td><td><code>architecture.json</code>, textures, maillage</td><td><code>architecture.blend</code>, <code>.glb</code>, <code>renders/</code>, <code>blender_report.json</code></td><td>Construit la scène, sans rien recalculer : Blender ne lit que <code>architecture.json</code>.</td></tr>
-</tbody></table></div>
-<p>Une étape est sautée si sa sortie existe, sauf <code>--force</code>. Elle est refaite d'elle-même quand un fichier qu'elle fusionne est plus récent que sa sortie : <code>anchor</code> (openings, vision, overrides), <code>edge_pick</code> (anchors), <code>architecture</code> (anchors, edge_pick, vision, measurements, overrides), <code>textures</code> (architecture), <code>blender</code> (architecture, textures). Les étapes <code>vision</code> et <code>edge_pick</code> sont aussi refaites si leur réponse est un enregistrement d'erreur.</p>
-
-<h3 id="priorites">Priorité des sources</h3>
-<figure>
-<svg class="diagram" viewBox="0 0 900 130" role="img" aria-labelledby="pr-t pr-d"><title id="pr-t">Échelle des sources</title><desc id="pr-d">De la plus fiable à la moins fiable : ruban, photo, LLM, LiDAR, RoomPlan, supposé.</desc>
-<defs><marker id="pm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-line"/></marker></defs>
-<rect class="chip tape" x="20" y="24" width="130" height="46" rx="6"/><text class="nm" x="85" y="52" text-anchor="middle">tape</text>
-<rect class="chip" x="162" y="24" width="130" height="46" rx="6"/><text class="nm" x="227" y="52" text-anchor="middle">photo</text>
-<rect class="chip" x="304" y="24" width="130" height="46" rx="6"/><text class="nm" x="369" y="52" text-anchor="middle">llm</text>
-<rect class="chip" x="446" y="24" width="130" height="46" rx="6"/><text class="nm" x="511" y="52" text-anchor="middle">lidar</text>
-<rect class="chip" x="588" y="24" width="130" height="46" rx="6"/><text class="nm" x="653" y="52" text-anchor="middle">roomplan</text>
-<rect class="chip low" x="730" y="24" width="130" height="46" rx="6"/><text class="nm" x="795" y="52" text-anchor="middle">assumed</text>
-<line class="ln" x1="20" y1="100" x2="860" y2="100" marker-end="url(#pm)"/>
-<text class="sb" x="20" y="120">gagne</text><text class="sb" x="860" y="120" text-anchor="end">cède</text>
-</svg>
-<figcaption>Une source plus haute remplace une plus basse. Le ruban a un sigma fixe de 0,5 cm.</figcaption>
-</figure>
-<p>Chaque paramètre porte <code>value</code>, <code>sigma</code>, <code>unit</code> et <code>source</code>. Le sigma d'un plan LiDAR vient du résidu d'ajustement, de la surface vue et d'une part systématique (1 cm en position, 0,25 degré en azimut). Un mur sans assez de LiDAR garde le plan RoomPlan avec 5 cm et 2 degrés (drapeau <code>roomplan_fallback</code>). L'épaisseur d'un mur est supposée (20 cm, sigma 5 cm) tant qu'un montant n'est pas mesuré. La formule complète est dans <code>docs/room-model.md</code>.</p>
-<p>Deux nuances : pour une porte ou une fenêtre, la mesure photo va dans des paramètres propres au vantail (<code>leaf_width</code>, <code>leaf_height</code>), sans écraser l'étendue du trou ; pour une niche ou une ouverture, elle remplace les sources plus basses quand ses contrôles de qualité passent. Un désaccord photo/scan de plus de trois sigmas est marqué <code>to_verify</code>, jamais tranché en silence.</p>
-
-<h3 id="regles">Les règles principales</h3>
-<dl class="kv" style="display:block;max-width:44rem">
-<dt style="margin-top:1rem"><strong>Murs</strong></dt><dd>RoomPlan fournit la liste des murs et la topologie. Chaque mur est ajusté sur le LiDAR, en partant de la position RoomPlan. Si le plan RoomPlan est décalé, la surface réelle la plus soutenue dans 30 cm est retenue (<code>shifted_seed</code>) ; avec moins de 0,5 m² de LiDAR, l'azimut RoomPlan est gardé (<code>low_support</code>).</dd>
-<dt style="margin-top:1rem"><strong>Cloisons</strong></dt><dd>Un mur RoomPlan qui ne borde pas le sol mais traverse la pièce est une cloison : deux faces, toutes deux dans la pièce. Elle s'arrête sur la face qu'elle rencontre.</dd>
-<dt style="margin-top:1rem"><strong>Équerrage</strong> <span class="pill wip">en cours</span></dt><dd>Prévu : les murs sont ramenés dans le repère orthogonal dominant quand l'écart reste sous max(2 degrés, 3 sigmas d'azimut), sinon gardés avec le drapeau <code>out_of_square</code> ; les valeurs mesurées sont conservées. Le sol devient le polygone intérieur des faces de murs, les plafonds se découpent aux cloisons, poutres et ressauts. Ce n'est pas encore dans le code de la branche.</dd>
-<dt style="margin-top:1rem"><strong>Ouvertures</strong></dt><dd>Genres : <code>door</code>, <code>window</code>, <code>opening</code> (traversante, du sol), <code>niche</code> (appui au-dessus du sol, éventuellement traversante, avec séparations et étagères). Un catalogue court de types : portes <code>hinged_single</code>, <code>hinged_double</code>, <code>sliding</code>, <code>pocket</code>, <code>french_window</code> ; fenêtres <code>casement_single</code>, <code>casement_double</code>, <code>tilt_turn</code>, <code>sliding</code>, <code>fixed</code>. Le LLM ne sort pas de ce catalogue.</dd>
-<dt style="margin-top:1rem"><strong>Ancrage photo</strong></dt><dd>Chaque face d'hôte est redressée à partir des photos posées. SAM 2.1, invité par le rectangle du modèle, segmente l'élément ; chaque bord du masque est calé sur un pic de gradient, puis sa profondeur est triangulée sur plusieurs vues et prise en médiane. Le bas d'une porte ou d'une niche au sol est le plan du sol, par règle. Le sigma vient de l'ambiguïté de profondeur.</dd>
-<dt style="margin-top:1rem"><strong>Le LLM choisit une lettre</strong></dt><dd>Le LLM ne donne jamais de coordonnées. La géométrie propose des lignes candidates lettrées sur des bandes redressées ; il répond la lettre, ou rien si l'arête est cachée. <code>vision</code> reste le typage, avec des coins en pixels que la pipeline rétroprojette sur le mur ; toute valeur corrigée garde la valeur du scan à côté (<code>llm_corrected</code>).</dd>
-<dt style="margin-top:1rem"><strong>Textures</strong></dt><dd>2 cm par texel. Un texel est gardé quand une photo le voit de face, que sa profondeur concorde avec le maillage LiDAR et qu'il n'est dans aucune boîte d'objet RoomPlan : le mobilier n'est pas imprimé. La couleur est la médiane pondérée des meilleures vues. Les trous de couverture sont remplis par une texture CC0 teintée à la couleur mesurée, fondue dans l'observé.</dd>
-<dt style="margin-top:1rem"><strong>Générique pour toute capture</strong></dt><dd>Rien dans le code, les tests ou la documentation ne dépend d'une pièce : ni nom de mur, ni compte, ni dimension. Le comportement vient des données de la capture, du catalogue et du schéma. Les tests utilisent des scènes synthétiques.</dd>
-</dl>
-
-<h3 id="menuiserie">Vantail, huisserie, chambranle</h3>
-<figure>
-<svg class="diagram" viewBox="0 0 900 250" role="img" aria-labelledby="mn-t mn-d"><title id="mn-t">Coupe horizontale d'une porte</title><desc id="mn-d">Le vantail, deux montants d'huisserie de chaque côté, le trou dans le mur égal au vantail plus deux montants, et les chambranles qui recouvrent le mur sur les deux faces.</desc>
-<defs><marker id="mm" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--accent)"/></marker></defs>
-<rect class="wall" x="60" y="90" width="270" height="60"/><rect class="wall" x="570" y="90" width="270" height="60"/>
-<rect class="leaf" x="360" y="112" width="180" height="16"/>
-<rect class="hole" x="330" y="90" width="30" height="60" style="fill:var(--code-bg)"/><rect class="hole" x="540" y="90" width="30" height="60" style="fill:var(--code-bg)"/>
-<rect style="fill:var(--muted);stroke:none" x="318" y="82" width="12" height="8"/><rect style="fill:var(--muted);stroke:none" x="570" y="82" width="12" height="8"/>
-<rect style="fill:var(--muted);stroke:none" x="318" y="150" width="12" height="8"/><rect style="fill:var(--muted);stroke:none" x="570" y="150" width="12" height="8"/>
-<line class="dim" x1="360" y1="190" x2="540" y2="190" marker-start="url(#mm)" marker-end="url(#mm)"/><text class="dimtxt" x="450" y="210" text-anchor="middle">vantail (mesuré)</text>
-<line class="thin" x1="330" y1="150" x2="330" y2="225"/><line class="thin" x1="570" y1="150" x2="570" y2="225"/>
-<line class="thin" x1="360" y1="128" x2="360" y2="195"/><line class="thin" x1="540" y1="128" x2="540" y2="195"/>
-<line class="dim" x1="330" y1="230" x2="570" y2="230" marker-start="url(#mm)" marker-end="url(#mm)"/><text class="dimtxt" x="450" y="246" text-anchor="middle">trou dans le mur = vantail + 2 montants</text>
-<text class="sb" x="345" y="76" text-anchor="middle">montant</text><text class="sb" x="555" y="76" text-anchor="middle">montant</text>
-<text class="sb" x="290" y="72" text-anchor="end">chambranle</text><text class="sb" x="610" y="72">chambranle</text>
-<text class="sb" x="195" y="125" text-anchor="middle">mur</text><text class="sb" x="705" y="125" text-anchor="middle">mur</text>
-</svg>
-<figcaption>Vue de dessus, coupée à mi-hauteur. Les chambranles sont les garnitures plates sur les deux faces.</figcaption>
-</figure>
-<ul>
-<li><strong>Vantail</strong> : mesuré par la photo ou au ruban (<code>leaf_*</code>).</li>
-<li><strong>Montant (huisserie)</strong> : largeur visible fixée par une constante ou donnée par le LLM.</li>
-<li><strong>Trou dans le mur</strong> : vantail + 2 montants en largeur ; vantail + 1 montant en hauteur.</li>
-<li><strong>Chambranle</strong> : la largeur restante jusqu'à l'étendue extérieure du LiDAR, marquée <code>to_verify</code> hors d'une plage plausible.</li>
-<li>Un vantail plus grand que son trou est refusé : le chiffre est incohérent, on le mesure au ruban.</li>
-</ul>
-</section>
-
-<hr class="part">
-<section id="depannage" class="part-sec">
-<h2>3. Dépannage</h2>
-<p class="sub">Symptôme, cause, remède. Les lignes viennent de ce qui s'est réellement produit pendant le développement.</p>
-<table class="trouble">
-<thead><tr><th>Symptôme</th><th>Cause</th><th>Remède</th></tr></thead>
-<tbody>
-<tr><td data-l="Symptôme">Les cotes n'apparaissent pas dans Blender</td><td data-l="Cause">Les cotes sont des segments MeasureIt, cachés tant qu'on n'a pas demandé leur affichage.</td><td data-l="Remède">Barre latérale N, onglet MeasureIt, bouton <em>Show</em>. Si MeasureIt manque, <code>blender_report.json</code> indique le repli sur des objets natifs ; <code>ROOM_MODEL_NO_MEASUREIT=1</code> force ce repli.</td></tr>
-<tr><td data-l="Symptôme"><code>Blender not found: … (set BLENDER)</code></td><td data-l="Cause"><code>BLENDER</code> vide, ou chemin faux. Depuis WSL, l'exécutable Windows se trouve sous <code>/mnt/c/…</code>.</td><td data-l="Remède">Exportez le chemin entre guillemets : <code>export BLENDER="/mnt/c/…/blender.exe"</code>. <code>wslpath</code> doit exister (WSL). Dans <code>all</code> l'étape est sautée avec ce message, seule elle échoue.</td></tr>
-<tr><td data-l="Symptôme">Blender démarre mais ignore une variable d'environnement</td><td data-l="Cause">Un <code>.exe</code> Windows ne voit que les variables listées dans <code>WSLENV</code>.</td><td data-l="Remède">La pipeline complète <code>WSLENV</code> pour <code>ROOM_MODEL_NO_MEASUREIT</code> seulement. Toute autre variable destinée à Blender doit être ajoutée à <code>WSLENV</code> par vous.</td></tr>
-<tr><td data-l="Symptôme"><code>stage … exists, skipped (use --force)</code> alors que j'ai changé quelque chose</td><td data-l="Cause">Seuls certains fichiers rendent une étape périmée (liste en partie 2). Une règle compare les dates de modification : un fichier copié avec une date ancienne ne déclenche rien. Changer le code d'une étape ne la déclenche jamais.</td><td data-l="Remède"><code>--force</code> sur l'étape voulue. Pour tout refaire depuis une étape, relancez avec <code>--force</code> ; les étapes aval qui ont une règle de péremption (partie 2) se recalculent d'elles-mêmes.</td></tr>
-<tr><td data-l="Symptôme">Passe LLM échouée : <code>vision/answers.json</code> ne contient que <code>error</code></td><td data-l="Cause">Appel <code>claude -p</code> en échec (délai, code de sortie, réponse illisible). L'échec n'est pas mis en cache.</td><td data-l="Remède">Relancez l'étape sans <code>--force</code> : une réponse en erreur est toujours refaite. <code>rejected.json</code> garde la raison. Un <code>{"skipped": true}</code> vient de <code>--no-llm</code> ; relancer sans le drapeau refait l'étape. <code>claude</code> introuvable : installez-le ou posez <code>ROOM_MODEL_CLAUDE</code>.</td></tr>
-<tr><td data-l="Symptôme">Une fenêtre n'est pas mesurée (candidats seulement)</td><td data-l="Cause">Rideau, verre dépoli ou meuble : le masque échoue, puis le LLM ne voit pas l'arête et répond « rien ».</td><td data-l="Remède">C'est une vraie occlusion. Mesurez le vantail au ruban (badge « vantail » ou « deux vantaux »), ou corrigez par <code>overrides.json</code>.</td></tr>
-<tr><td data-l="Symptôme">Une porte est plus large que son trou, ou marquée <code>to_verify</code></td><td data-l="Cause">La photo et le scan s'écartent de plus de trois sigmas, ou la photo a pris la ligne du chambranle plutôt que celle du vantail.</td><td data-l="Remède">Une valeur de vantail supérieure au trou est refusée par la pipeline. Mesurez le vantail au ruban : la valeur au ruban gagne.</td></tr>
-<tr><td data-l="Symptôme">Les valeurs saisies dans la page de relevé ont « disparu »</td><td data-l="Cause">La clé de stockage du navigateur a changé une fois (intitulé de page vers identifiant de capture). Un autre navigateur ou profil a son propre stockage.</td><td data-l="Remède">Ouvrez la page : un encart propose les anciennes valeurs. Sinon « Lier le fichier de mesures » sur le <code>measurements.json</code>, ou le bouton d'import. Gardez toujours le fichier lié.</td></tr>
-<tr><td data-l="Symptôme">Textures avec du mobilier ou des plaques de remplissage</td><td data-l="Cause">Un objet collé au mur (moins de 5 à 6 cm) échappe au masque ; les texels qu'aucune photo ne couvre sont comblés par une texture générique teintée.</td><td data-l="Remède">Un meuble collé reste visible : c'est une limite connue. Les plaques de remplissage signalent un manque de couverture, voir <code>textures/textures.json</code> ; reprenez des photos de la zone. Le premier remplissage télécharge une texture CC0 (réseau).</td></tr>
-<tr><td data-l="Symptôme">Murs qui ne sont pas d'équerre <span class="pill wip">en cours</span></td><td data-l="Cause">Sans équerrage, le modèle garde les angles mesurés. Le drapeau <code>out_of_square</code> et le recalage sont prévus par la spécification, pas encore dans le code.</td><td data-l="Remède">Pour l'instant, regardez les écarts dans <code>report.md</code> (orthogonalité) et tranchez avec le ruban.</td></tr>
-<tr><td data-l="Symptôme">Murs décalés ou très courts, drapeaux <code>shifted_seed</code>, <code>low_support</code>, <code>roomplan_fallback</code></td><td data-l="Cause">Surface réelle loin du plan RoomPlan, peu de LiDAR, ou aucun ajustement possible.</td><td data-l="Remède">Lisez le tableau des murs de <code>report.md</code>. Le sigma grandit en conséquence ; une station au ruban corrige le mur au sigma le plus grand.</td></tr>
-<tr><td data-l="Symptôme">Poutre avec un « ? » sur le plan, ou élément sous <code>À vérifier</code></td><td data-l="Cause">Poutre probable dont les deux côtés ne sont pas vus, ou conduit plaqué au plafond.</td><td data-l="Remède">Vérifiez sur place. Un élément faux se retire par <code>overrides.json</code> (<code>"remove": true</code> pour les éléments qui le permettent).</td></tr>
-<tr><td data-l="Symptôme">CUDA indisponible, ou <code>anchor</code> très lente</td><td data-l="Cause"><code>torch.cuda.is_available()</code> vaut <code>False</code> : SAM retombe sur le CPU.</td><td data-l="Remède">Corrigez le pilote ou le venv (torch avec CUDA) ; le calcul sur CPU fonctionne mais bien plus lentement (non mesuré ici).</td></tr>
-<tr><td data-l="Symptôme"><code>anchor</code> échoue au premier lancement, hors ligne</td><td data-l="Cause">Le modèle <code>facebook/sam2.1-hiera-large</code> n'est pas encore en cache.</td><td data-l="Remède">Connectez-vous une fois ; le téléchargement est ensuite réutilisé.</td></tr>
-<tr><td data-l="Symptôme"><code>no photos for room N</code>, ou capture refusée</td><td data-l="Cause">Pièce sans photos, ou dossier sans <code>manifest.json</code> (zip non décompressé, mauvais niveau de dossier).</td><td data-l="Remède">Dans <code>all</code>, les étapes photo sont sautées. Pointez <code>--capture</code> sur le dossier qui contient <code>manifest.json</code>, et vérifiez <code>--room</code>.</td></tr>
-<tr><td data-l="Symptôme">La console Blender affiche des erreurs d'autres extensions</td><td data-l="Cause">Les extensions personnelles défaillantes écrivent des traces à chaque démarrage.</td><td data-l="Remède">Sans effet. Le vrai échec se lit à la fin de <code>blender.log</code> dans <code>--out</code>.</td></tr>
-</tbody></table>
-<div class="note"><p>Pour tout le reste : <code>report.md</code> (alertes et drapeaux), <code>blender.log</code>, et <code>.venv/bin/python -m pytest -q</code> dans <code>pipelines/room_model/</code> pour vérifier l'installation.</p></div>
 </section>
 </main>
 </div>
