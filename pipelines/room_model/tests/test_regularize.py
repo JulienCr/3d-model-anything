@@ -170,11 +170,23 @@ def test_a_beam_splits_the_zones_and_is_cut_out_of_the_ceilings():
 
 def test_zones_at_the_same_level_on_both_sides_of_a_beam_are_one_ceiling():
     doc, outline = hand_shell([(0, 0), (6, 0), (6, 3), (0, 3)], [0.0] * 4)
-    add_hand_beam(doc, [(3.0, 0.0), (3.0, 3.0)], width=0.3)
+    add_hand_beam(doc, [(2.99, 0.0), (3.01, 3.0)], width=0.3)  # not exactly square to the walls it spans
     out = regularize.apply(doc, outline, ceiling_samples([(0.1, 2.7, 0.1, 2.9, 2.5), (3.3, 5.9, 0.1, 2.9, 2.5)]))
     (ceiling,) = _ceilings(out).values()
-    assert len(ceiling["region"]) == 2
-    assert _region(ceiling).area == pytest.approx(18 - 0.9, abs=1e-6)
+    assert len(ceiling["region"]) == 2 and _region(ceiling).is_valid
+    assert _region(ceiling).area == pytest.approx(18 - 0.9, abs=0.01)
+
+
+def test_a_beam_square_to_the_room_axes_but_not_to_the_walls_still_splits_the_ceiling_in_two_parts():
+    th = np.radians(0.4)
+    turn = np.array([[np.cos(th), -np.sin(th)], [np.sin(th), np.cos(th)]])
+    doc, outline = hand_shell([tuple(turn @ p) for p in [(0, 0), (6, 0), (6, 3), (0, 3)]], [0.0] * 4)
+    floor = shapely.Polygon(next(e for e in doc["elements"] if e["kind"] == "floor")["polygon"])
+    axis = list(floor.intersection(shapely.LineString([(3, -5), (3, 8)])).coords)
+    add_hand_beam(doc, axis, width=0.3)
+    out = regularize.apply(doc, outline, ceiling_samples([(0.1, 2.7, 0.3, 2.7, 2.5), (3.3, 5.9, 0.3, 2.7, 2.5)]))
+    (ceiling,) = _ceilings(out).values()
+    assert len(ceiling["region"]) == 2 and _region(ceiling).is_valid
 
 
 def test_no_ceiling_samples_at_all_leaves_no_ceiling():

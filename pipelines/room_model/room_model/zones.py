@@ -9,6 +9,7 @@ from room_model import ceilings, shell
 CUT_REACH = shell.THICKNESS  # m: a cut ending this close to the boundary reaches it (RoomPlan ends stop inside the wall)
 MIN_SHARED_EDGE = 1e-3  # m of common boundary that makes two zones neighbours; a shared corner point does not
 GRID = 1e-9  # m, precision at which cuts and walls are noded
+MIN_FEATURE = 1e-3  # m: the LiDAR does not resolve a ceiling feature thinner than 2 mm
 FAR = 1e3  # m, length of the ray drawn from a reflex vertex before it is clipped to the polygon
 
 
@@ -97,6 +98,11 @@ def _merge_measured(groups: list[dict]) -> list[dict]:
         groups = [g for g in groups if g is not a and g is not b] + [merged]
 
 
+def _opened(geom: shapely.Geometry) -> shapely.Geometry:
+    """Without the necks and spikes thinner than 2 * MIN_FEATURE that a beam's flat end leaves along a slanted wall."""
+    return geom.buffer(-MIN_FEATURE, join_style="mitre").buffer(MIN_FEATURE, join_style="mitre").simplify(GRID * 1e3)
+
+
 def _merge_assumed(groups: list[dict]) -> list[dict]:
     """Neighbouring assumed zones that took the same level are one ceiling."""
     merged = True
@@ -148,7 +154,7 @@ def build(polygon: shapely.Polygon, cells: list[shapely.Polygon], points: np.nda
     groups = _merge_assumed(groups)
     out = []
     for g in groups:
-        region = ceilings._as_multipolygon(g["geom"].difference(beams).simplify(GRID * 1e3))
+        region = ceilings._as_multipolygon(_opened(g["geom"].difference(beams)))
         region = shapely.MultiPolygon([p for p in region.geoms if p.area >= ceilings.MIN_COMPONENT_AREA])
         if not region.is_empty:
             out.append({k: g[k] for k in ("level", "sigma", "support_m2", "assumed", "others")} | {"region": region})

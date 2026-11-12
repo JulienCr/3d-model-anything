@@ -103,6 +103,14 @@ def _refit(start, end, old_ring: shapely.LinearRing, polygon: shapely.Polygon) -
     return [float(v) for v in coords[0]], [float(v) for v in coords[-1]]
 
 
+def _footprint(axis: list, width: float, polygon: shapely.Polygon) -> shapely.Geometry:
+    """Plan footprint of a beam, an end on the wall running past it so that the flat end leaves no sliver along the wall."""
+    a, b = np.array(axis, float)
+    d = (b - a) / np.linalg.norm(b - a)
+    reach = [zones.CUT_REACH if polygon.exterior.distance(shapely.Point(p)) < ON_BOUNDARY else 0.0 for p in (a, b)]
+    return ceilings.beam_footprint({"axis": [a - reach[0] * d, b + reach[1] * d], "width": width}, polygon)
+
+
 def _set_param(params: dict, pid: str, level: dict, assumed: bool) -> None:
     params[pid] = {"value": float(level["level"]), "sigma": float(level["sigma"]), "unit": "m",
                    "source": "assumed" if assumed else "lidar"}
@@ -189,7 +197,7 @@ def apply(doc: dict, outline: np.ndarray, samples: Samples) -> dict:
     for el in (e for e in out["elements"] if e["kind"] == "beam"):
         el["axis"] = list(_refit(*el["axis"], old_ring, new))
         segments.append(tuple(el["axis"]))
-        beam_shapes.append(ceilings.beam_footprint({"axis": el["axis"], "width": params[el["params"]["width"]]["value"]}, new))
+        beam_shapes.append(_footprint(el["axis"], params[el["params"]["width"]]["value"], new))
     beams = shapely.union_all(beam_shapes) if beam_shapes else shapely.Polygon()
     levels = _rebuild_ceilings(out, new, samples, segments, beams)
 
