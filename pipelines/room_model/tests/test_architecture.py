@@ -1034,3 +1034,14 @@ def test_door_hole_keeps_its_scan_extent_once_the_photo_measured_the_leaf(env):
     noted = arch["diagnostics"]["anchor"]["llm_not_applied"]
     assert noted["Door_1.width"] == pytest.approx(_param(env.merge(answers), "Door_1", "width")["value"])
     assert "llm_corrected" not in _element(arch, "Door_1")["flags"]
+
+
+def test_a_leaf_is_checked_against_the_scanned_hole_not_a_narrower_llm_one(env):
+    rect = _opening_rect(env.arch, "Door_1", widen=-0.15)  # corners clicked on the leaf: a hole narrower than the leaf + jambs
+    answers = _answers(env, elements=[{"id": "Door_1", "corners": _corners(env, ["Door_1-a", "Door_1-b"], rect)}])
+    hole = _param(env.arch, "Door_1", "width")["value"]
+    item = _door(env, width=hole - 2 * anchor.JAMB_VISIBLE)
+    item["edges"]["top"].update(views=1)  # the corners are therefore not superseded
+    arch = env.merge(answers, anchors=_anchors(Door_1=item))
+    assert "leaf_width" in _element(arch, "Door_1")["params"] and _param(arch, "Door_1", "width") == _param(env.arch, "Door_1", "width")
+    assert arch["diagnostics"]["anchor"]["llm_not_applied"]["Door_1.width"] < hole - 0.1

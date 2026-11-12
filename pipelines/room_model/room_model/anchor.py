@@ -453,14 +453,15 @@ def _param_doc(m: dict) -> dict:
     return {"value": float(m["value"]), "sigma": float(m["sigma"]), "unit": "m", "source": "photo"}
 
 
-def _leaf_too_large(arch: dict, el: dict, names, item: dict) -> str | None:
+def _leaf_too_large(arch: dict, el: dict, names, item: dict, scan: dict) -> str | None:
     """Why the leaf cannot fit its hole, or None: the leaf plus its visible jambs (one at the head of a door, which
     has none at the floor) must stay within the outer extent plus that extent's sigma and the leaf's own."""
     name = "width" if "width" in names else "height"
     jambs = 2 if name == "width" or el["kind"] != "door" else 1
     pid = el["params"].get("jamb_width")
     jamb = arch["parameters"][pid]["value"] if pid else JAMB_VISIBLE
-    leaf, hole = item["measures"][name], arch["parameters"][el["params"][name]]
+    pid = el["params"][name]
+    leaf, hole = item["measures"][name], scan.get(pid, arch["parameters"][pid])  # the scanned extent, not an LLM click
     if leaf["value"] + jambs * jamb > hole["value"] + hole["sigma"] + leaf["sigma"]:
         return (f"leaf {name} {leaf['value']:.3f} m + {jambs} jamb(s) {jamb:.3f} m exceeds the hole "
                 f"{hole['value']:.3f} +- {hole['sigma']:.3f} m")
@@ -522,14 +523,15 @@ def fully_applied(item: dict, pose_angle: float) -> bool:
     return item.get("status") == "anchored" and all(_edge_ok(item["edges"].get(side), pose_angle) for sides in PAIRS for side in sides)
 
 
-def apply(arch: dict, doc: dict) -> dict:
+def apply(arch: dict, doc: dict, scan: dict | None = None) -> dict:
     """Anchored elements take their photo measures, side pair by side pair (PAIRS), when every edge of the pair passes
     `_edge_ok` (MIN_EDGE_VIEWS, `max_rms`, PLAUSIBLE_SIGMA; a floor-ruled bottom always does).
 
     Doors and windows get leaf_* parameters and `leaf_edges` depths, the hole's width and height stay; niches and
     openings get their own parameters replaced (below tape) and `edges` depths. A disagreement beyond DISAGREE
     sigmas with a measured source flags the element `to_verify`; so does a leaf that cannot fit its hole
-    (`_leaf_too_large`), whose pair is then kept out with its reason under `reasons`.
+    (`_leaf_too_large`, against the `scan` parameters before any LLM corner), whose pair is then kept out with its
+    reason under `reasons`.
     """
     elements, pose_angle = {e["id"]: e for e in arch["elements"]}, pose_angle_of(doc)
     report = {"anchored": [], "candidates": [], "open": [], "no_view": [], "no_host": [], "unknown": [], "kept": [],
@@ -547,7 +549,7 @@ def apply(arch: dict, doc: dict) -> dict:
             if not all(_edge_ok(item["edges"].get(side), pose_angle) for side in sides):
                 report["kept"] += [f"{ident}.{name}" for name in names if name in el["params"]]
                 continue
-            reason = _leaf_too_large(arch, el, names, item) if leaf else None
+            reason = _leaf_too_large(arch, el, names, item, scan or {}) if leaf else None
             if reason:
                 report["kept"] += [f"{ident}.leaf_{name}" for name in names]
                 report["reasons"].update({f"{ident}.leaf_{name}": reason for name in names})

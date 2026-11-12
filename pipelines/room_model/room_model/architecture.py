@@ -113,7 +113,7 @@ def build(model_doc: dict, openings_doc: dict, vision: dict | None = None, tape:
         anchored = {i for i, item in (anchors or {}).get("elements", {}).items() if anchor.fully_applied(item, angle)}
         arch["diagnostics"]["vision"] = llm_merge.apply(arch, vision, ctx, frozenset(anchored))
     if anchors:
-        arch["diagnostics"]["anchor"] = anchor.apply(arch, anchors)
+        arch["diagnostics"]["anchor"] = anchor.apply(arch, anchors, scan)
         arch["diagnostics"]["anchor"]["llm_not_applied"] = anchor.keep_hole_from_scan(arch, scan)
     arch["dimensions"] = copy.deepcopy(model_doc["dimensions"])
     if tape:
