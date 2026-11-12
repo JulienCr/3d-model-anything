@@ -3,6 +3,7 @@
 A chain is `{"points": plan points, "normals": one inward normal per segment, "tops": top of the host at each point,
 "closed": bool}`: consecutive wall faces, then each face of a partition.
 """
+import itertools
 import math
 
 import bmesh
@@ -17,6 +18,7 @@ LEDGE_MIN = 0.001  # m: the faces of two joined walls are this far apart where t
 MIN_PIECE = 0.01  # m
 MAX_MITRE = 4.0  # floor of 1 / (1 + cos) so a near fold-back does not shoot off
 EPS = 1e-9
+JOIN_EPS = 1e-4  # m: chain ends this close are the same point (a tenth of the mesh precision)
 ARCHITRAVE_PROJECTION = 0.015
 PANEL_WIDTH, PANEL_PROJECTION = 0.03, 0.015
 HOST_KINDS = ("wall", "partition")
@@ -236,22 +238,60 @@ def _faces(arch: dict, el: dict, host: dict, geom: dict) -> tuple[int, ...]:
     return (1, -1) if shell.recess_depth(arch, geom, el) is None else (frame.side(host, el.get("face")),)
 
 
-def _floor_cuts(arch: dict, hosts: dict, bodies: dict, height: float) -> list[list]:
-    """Plan quads of the cuts that reach into the skirting band, as wide as the casings around them.
-
-    The skirting stops wherever one crosses a face at floor level, whatever wall hosts it: a cut is geometry,
-    not a host's property, and a niche recessed from one face leaves the other face alone.
-    """
+def _floor_cuts(arch: dict, hosts: dict, bodies: dict, solids: dict, height: float) -> list[tuple]:
+    """(element, host, geometry, fits) of the cuts that reach into the skirting band, on any wall: a cut is geometry,
+    not a host's property, and a niche recessed from one face leaves the other face alone."""
     out = []
     for el in arch["elements"]:
         host = hosts.get(el.get("host"))
         if el["kind"] not in shell.CUT_KINDS or host is None or host["kind"] not in HOST_KINDS:
             continue
-        lay = openings.resolve(arch, el)
-        if lay.lowest >= height:
+        if openings.resolve(arch, el).lowest >= height:
             continue
-        out.append(shell.cut_quad(arch, plan.host_geometry(arch, host, bodies), el, host, *lay.outer_span)[0])
+        geom = plan.host_geometry(arch, host, bodies)
+        out.append((el, host, geom, clip.fits(arch, el, host, _faces(arch, el, host, geom), bodies, solids)))
     return out
+
+
+def _gaps(arch: dict, floor_cuts: list[tuple]) -> list[list]:
+    """Plan quads the skirting stops at: each cut out to the widest casing drawn on any face."""
+    return [shell.cut_quad(arch, geom, el, host, *clip.outer_span(openings.resolve(arch, el), fitted))[0]
+            for el, host, geom, fitted in floor_cuts]
+
+
+def _reveals(arch: dict, floor_cuts: list[tuple]) -> list[dict]:
+    """A chain across the thickness along each jamb of a passage (an opening, or a niche that goes through): its skirting
+    returns into the cut, a door keeps its gap."""
+    out = []
+    for el, host, geom, _ in floor_cuts:
+        if el["kind"] == "opening" or (el["kind"] == "niche" and shell.recess_depth(arch, geom, el) is None):
+            for s, toward in zip(openings.resolve(arch, el).span, (1.0, -1.0)):
+                points = [frame.face_point(geom, s, side) for side in (1, -1)]
+                out.append({"points": points, "normals": [(geom["u"][0] * toward, geom["u"][1] * toward)], "closed": False})
+    return out
+
+
+def _turned(chain: dict) -> dict:
+    return {**chain, "points": chain["points"][::-1], "normals": chain["normals"][::-1]}
+
+
+def _join(chains: list[dict]) -> list[dict]:
+    """The open chains whose ends meet merged into one, so the mitre at the meeting point is swept."""
+    chains = list(chains)
+    while True:
+        for i, j in itertools.permutations(range(len(chains)), 2):
+            if chains[i]["closed"] or chains[j]["closed"]:
+                continue
+            for a, b in itertools.product((chains[i], _turned(chains[i])), (chains[j], _turned(chains[j]))):
+                if math.dist(a["points"][-1], b["points"][0]) < JOIN_EPS:
+                    chains[i] = {"points": a["points"] + b["points"][1:], "normals": a["normals"] + b["normals"], "closed": False}
+                    del chains[j]
+                    break
+            else:
+                continue
+            break
+        else:
+            return chains
 
 
 def _cornice(arch: dict, el: dict, collection) -> bpy.types.Object | None:
@@ -266,13 +306,15 @@ def _cornice(arch: dict, el: dict, collection) -> bpy.types.Object | None:
     return _finish(el["id"], bm, collection, _flags(el, known))
 
 
-def _skirting(arch: dict, el: dict, hosts: dict, bodies: dict, collection) -> bpy.types.Object | None:
+def _skirting(arch: dict, el: dict, hosts: dict, bodies: dict, solids: dict, collection) -> bpy.types.Object | None:
     height, projection = _spec(arch, el)
     profile, known = profiles.resolve("skirting", el.get("profile"))
-    cuts = _floor_cuts(arch, hosts, bodies, height)
+    floor_cuts = _floor_cuts(arch, hosts, bodies, solids, height)
+    gaps = _gaps(arch, floor_cuts)
+    runs = [piece for chain in _face_chains(arch, None) for piece in _cut(chain, gaps)]
     bm = bmesh.new()
-    for chain in _face_chains(arch, None):
-        _horizontal(bm, _cut(chain, cuts), frame.value(arch, "floor.level"), profile, projection, height)
+    for chain in _join([*runs, *_reveals(arch, floor_cuts)]):
+        _horizontal(bm, [chain], frame.value(arch, "floor.level"), profile, projection, height)
     if not bm.faces:
         bm.free()
         return None
@@ -376,7 +418,7 @@ def add(arch: dict, collections: dict, ctx: dict) -> list[bpy.types.Object]:
         if kind == "cornice":
             out.append(_cornice(arch, el, moulures))
         elif kind == "skirting":
-            out.append(_skirting(arch, el, hosts, bodies, moulures))
+            out.append(_skirting(arch, el, hosts, bodies, solids, moulures))
         elif kind == "panel_frame":
             out.append(_panel_frame(arch, el, hosts, bodies, y_floor, collections["À vérifier"]))
         elif kind in shell.CUT_KINDS:

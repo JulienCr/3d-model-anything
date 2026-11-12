@@ -18,6 +18,7 @@ from helpers import make_case
 PROBE = Path(__file__).with_name("blender_probe.py")
 BLENDER_DIR = Path(__file__).resolve().parents[1] / "blender"
 sys.path.insert(0, str(BLENDER_DIR))  # the pure-Python modules of blender/arch are importable as `arch.*`
+from arch import frame as wall_frame  # noqa: E402
 from arch import plan as wall_plan  # noqa: E402
 OPEN_RATIO = 0.6
 needs_blender = pytest.mark.skipif(shutil.which(blender_stage.blender_executable()) is None, reason="Blender is not installed")
@@ -1149,12 +1150,14 @@ def test_the_top_is_continuous_where_bodies_meet_within_the_noise_of_their_heigh
 SKIRT_ELEMENTS = [  # (kind, id, host, face, centre along the host, width, sill, height, frame, extra fields)
     ("opening", "Opening_3", "Partition_P1", "A", 0.9, 0.7, 0.0, 2.0, {"profile": "flat", "width": 0.05}, {}),
     ("niche", "Niche_3", "Partition_P1", "B", 1.6, 0.5, 0.0, 1.6, None, {"through": False, "dividers": 0, "shelves": [], "depth": 0.08}),
-    ("niche", "Niche_4", "Partition_P1", "A", 2.2, 0.4, 0.8, 0.8, None, {"through": False, "dividers": 0, "shelves": [], "depth": 0.08}),
+    ("niche", "Niche_4", "Wall_M2", None, 2.1, 0.3, 0.8, 0.8, None, {"through": False, "dividers": 0, "shelves": [], "depth": 0.08}),
     ("door", "Door_13", "Wall_M2", None, 0.2, 0.3, 0.0, 2.0, None, {}),  # 5 cm from the corner it shares with Wall_M1
+    ("opening", "Opening_4", "Partition_P1", "A", 2.2, 0.5, 0.0, 2.0, None, {}),  # a passage with no casing
+    ("niche", "Niche_5", "Wall_M5", None, 1.0, 0.4, 0.0, 1.2, None, {"through": True, "dividers": 0, "shelves": []}),  # goes through, to the floor
 ]
 # (host, side) -> (centre, half width the skirting stops at): the cuts that reach the floor, on the face they open on
-SKIRT_GAPS = {("Partition_P1", 1): [(0.9, 0.35 + 0.05)], ("Partition_P1", -1): [(0.9, 0.35 + 0.05), (1.6, 0.25)],
-              ("Wall_M2", 1): [(1.25, 0.45), (0.2, 0.15)]}
+SKIRT_GAPS = {("Partition_P1", 1): [(0.9, 0.35 + 0.05), (2.2, 0.25)], ("Partition_P1", -1): [(0.9, 0.35 + 0.05), (1.6, 0.25), (2.2, 0.25)],
+              ("Wall_M2", 1): [(1.25, 0.45), (0.2, 0.15)], ("Wall_M5", 1): [(1.0, 0.2)]}
 SKIRT_STEP, SKIRT_END, SKIRT_EDGE = 0.025, 0.15, 0.04  # m: ray spacing, margin kept from the ends of a face, margin around a gap
 
 
@@ -1213,6 +1216,34 @@ def _casing_rays(arch, oid, host_id, on_casing, beside):
     return rays
 
 
+REVEAL_INSET = 0.006  # m: the rays go down this far inside the passage from the jamb plane
+REVEAL_DEPTHS = (0.15, 0.5, 0.85)  # fractions of the thickness of the host
+
+
+def _reveal_rays(arch, oid):
+    """Rays coming down on the skirting of the reveals of a cut: {name: ray}, at three depths of each jamb, and in the corner
+    squares just inside the passage and just in front of each face."""
+    el = _element(arch, oid)
+    host = _element(arch, el["host"])
+    bodies, _ = wall_plan.built(arch)
+    geom = wall_plan.host_geometry(arch, host, bodies)
+    centre, width = (_value(arch, el["params"][k]) for k in ("center_s", "width"))
+    floor, top = _value(arch, "floor.level"), _value(arch, "skirting.height")
+    u, n = np.array(geom["u"]), np.array(geom["n"])
+    rays = {}
+
+    def down(name, p):
+        rays[name] = {"name": name, "object": "Skirting", "distance": 3.0, "origin": _blender_point(p[0], floor + top + 1.0, p[1]),
+                      "direction": [0.0, 0.0, -1.0]}
+    for jamb, s, inward in (("lo", centre - width / 2, 1.0), ("hi", centre + width / 2, -1.0)):
+        a, b = (np.array(wall_frame.face_point(geom, s, side)) for side in (1, -1))
+        for k, f in enumerate(REVEAL_DEPTHS):
+            down(f"reveal-{oid}-{jamb}-{k}", a + (b - a) * f + inward * u * REVEAL_INSET)
+        for side, face in ((1, a), (-1, b)):
+            down(f"corner-{oid}-{jamb}-{side}", face + inward * u * 0.004 + n * side * 0.004)
+    return rays
+
+
 @pytest.fixture(scope="module")
 def skirted(tmp_path_factory):
     ctx, _ = make_case(tmp_path_factory.mktemp("skirted"), "skirted", window=True, partition=True)
@@ -1235,6 +1266,7 @@ def skirted(tmp_path_factory):
     rays.append(_ray(arch, "Opening_3", "opening-through", 0.0, 1.0, target="Partition_P1"))
     rays.append(_ray(arch, "Opening_3", "opening-through-near-end", -0.3, 1.0, target="Partition_P1"))
     rays += _casing_rays(arch, "Opening_3", "Partition_P1", 0.525, 0.485)
+    rays += [r for oid in ("Opening_3", "Opening_4", "Niche_5", "Door_13") for r in _reveal_rays(arch, oid).values()]
     return ctx, arch, _probe(ctx, arch_path, rays), samples, partition
 
 
@@ -1249,6 +1281,28 @@ def test_skirting_stops_only_at_floor_cuts_on_its_own_face(skirted):
                 continue
             inside = any(lo < s < hi for lo, hi in gaps)
             assert facts["rays"][ray["name"]]["hit"] == (not inside), f"{host} side {side} at s={s:.2f}: {'gap missing' if inside else 'skirting missing'}"
+
+
+@needs_blender
+@pytest.mark.parametrize("oid", ["Opening_3", "Opening_4", "Niche_5"])
+def test_skirting_continues_along_both_reveals_of_a_passage(skirted, oid):
+    _, arch, facts, _, _ = skirted
+    for name in (n for n in _reveal_rays(arch, oid) if n.startswith("reveal-")):
+        assert facts["rays"][name]["hit"], f"{name}: no skirting on the reveal"
+
+
+@needs_blender
+def test_the_return_is_joined_to_the_face_runs_at_the_corner(skirted):
+    _, arch, facts, _, _ = skirted
+    for name in (n for n in _reveal_rays(arch, "Opening_4") if n.startswith("corner-")):
+        assert facts["rays"][name]["hit"], f"{name}: the face run and the reveal do not meet at the corner"
+
+
+@needs_blender
+def test_a_door_keeps_the_gap_in_the_skirting(skirted):
+    _, arch, facts, _, _ = skirted
+    for name in (n for n in _reveal_rays(arch, "Door_13") if n.startswith("reveal-")):
+        assert not facts["rays"][name]["hit"], f"{name}: skirting on the reveal of a door"
 
 
 @needs_blender
