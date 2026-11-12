@@ -29,12 +29,12 @@ def _prism(name: str, poly: list, y0: float, y1: float) -> bpy.types.Object:
     return _object(name, bm, solid=True)
 
 
-def _sheet(name: str, regions: list[tuple[list, list]], y: float, up: bool) -> bpy.types.Object:
-    """Flat triangulated polygons (exterior, holes) at height y; the faces point up or down."""
+def _sheet(name: str, regions: list[tuple], y: float, up: bool) -> bpy.types.Object:
+    """Flat triangulated polygons (exterior, holes[, drop]) at height y, a drop m lower; the faces point up or down."""
     bm = bmesh.new()
-    for exterior, holes in regions:
+    for exterior, holes, *drop in regions:
         rings = [r[:-1] if len(r) > 1 and r[0] == r[-1] else r for r in (exterior, *holes)]
-        verts = [bm.verts.new(frame.to_blender(x, y, z)) for ring in rings for x, z in ring]
+        verts = [bm.verts.new(frame.to_blender(x, y - (drop[0] if drop else 0.0), z)) for ring in rings for x, z in ring]
         flat = [[Vector((x, -z, 0.0)) for x, z in ring] for ring in rings]
         for tri in geometry.tessellate_polygon(flat):
             a, b, c = (verts[i] for i in tri)
@@ -168,9 +168,9 @@ def build(arch: dict, collections: dict, materials: dict) -> list[bpy.types.Obje
             for trim in trims:
                 _remove(trim)
         elif kind == "floor":
-            obj, material = _sheet(el["id"], [(el.get("extent", el["polygon"]), [])], frame.value(arch, el["params"]["level"]), up=True), "Sol"
+            obj, material = _sheet(el["id"], [(r["exterior"], r["holes"], r["drop"]) for r in el["extent"]] if "extent" in el else [(el["polygon"], [])], frame.value(arch, el["params"]["level"]), up=True), "Sol"
         elif kind == "ceiling":
-            regions = [(r["exterior"], r["holes"]) for r in el.get("extent", el["region"])]
+            regions = [(r["exterior"], r["holes"], r.get("drop", 0.0)) for r in el.get("extent", el["region"])]
             obj, material = _sheet(el["id"], regions, frame.value(arch, el["params"]["level"]), up=False), "Plafond"
         elif kind == "beam":
             obj, material = _beam(arch, el), "Mur"

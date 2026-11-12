@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from room_model import export, model, plan_svg, report, shell
+from room_model import export, model, plan_svg, regularize, report, shell
 from room_model.context import output_path
 from helpers import make_case
 
@@ -68,8 +68,23 @@ def test_glb_geometry_matches_model(scene):
         if el["kind"] == "wall":
             assert accessor(gltf, el["id"])["max"][1] == pytest.approx(value(el["params"]["top"]), abs=1e-3)
     floor = accessor(gltf, "Floor")
-    assert floor["min"][1] == floor["max"][1] == pytest.approx(value("floor.level"), abs=1e-3)
-    assert accessor(gltf, "Ceiling_1")["min"][1] == pytest.approx(value("ceiling.1.level"), abs=1e-3)
+    assert floor["max"][1] == pytest.approx(value("floor.level"), abs=1e-6)
+    assert floor["min"][1] == pytest.approx(value("floor.level") - regularize.HIDDEN_DROP, abs=1e-6)
+    ceiling = accessor(gltf, "Ceiling_1")
+    assert ceiling["max"][1] == pytest.approx(value("ceiling.1.level"), abs=1e-6)
+    assert ceiling["min"][1] == pytest.approx(value("ceiling.1.level") - regularize.HIDDEN_DROP, abs=1e-6)
+
+
+def test_glb_floor_and_ceilings_are_drawn_from_their_extent(scene):
+    ctx, doc = scene
+    gltf = read_glb(ctx.out / "model_measured.glb")
+    for el in doc["elements"]:
+        if el["kind"] in ("floor", "ceiling"):
+            xs, zs = zip(*(p for part in el["extent"] for p in part["exterior"]))
+            box = accessor(gltf, el["id"])
+            assert [box["min"][0], box["max"][0], box["min"][2], box["max"][2]] == pytest.approx([min(xs), max(xs), min(zs), max(zs)], abs=1e-6)
+    interior = [p for p in next(e for e in doc["elements"] if e["kind"] == "floor")["polygon"]]
+    assert accessor(gltf, "Floor")["min"][0] < min(p[0] for p in interior) - 0.05  # the extent runs under the walls
 
 
 def test_export_is_deterministic(scene):

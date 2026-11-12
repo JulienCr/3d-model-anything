@@ -26,6 +26,7 @@ def _material(name: str, image: bpy.types.Image) -> bpy.types.Material:
     bsdf = next(n for n in nodes if n.type == "BSDF_PRINCIPLED")
     tex = nodes.new("ShaderNodeTexImage")
     tex.image = image
+    tex.extension = "EXTEND"  # a sheet runs past the surface under the walls: clamp to the edge texel, do not tile
     mat.node_tree.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
     bsdf.inputs["Roughness"].default_value = 0.9
     nodes.active = tex  # the Workbench "Texture" colour reads the active image node

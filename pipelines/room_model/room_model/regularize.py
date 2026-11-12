@@ -15,6 +15,7 @@ FRAME_PASSES = 4
 FRAME_STEP_DEG = 0.05  # resolution of the frame scan, far below the squaring tolerance
 QUARTER = np.pi / 2
 FLOOR_SILL = 0.03  # m: an opening whose sill is this low (the parameters' own sigma is of that order) is cut down to the floor
+HIDDEN_DROP = 0.001  # m, see `underlay`
 ON_BOUNDARY = 1e-6  # m: a segment end this close to the old floor boundary touched a wall
 
 
@@ -150,9 +151,9 @@ def _rings(region: shapely.MultiPolygon) -> list[dict]:
              "holes": [[[float(x), float(z)] for x, z in h.coords[:-1]] for h in g.interiors]} for g in region.geoms]
 
 
-def _thresholds(doc: dict) -> list[shapely.Polygon]:
+def _thresholds(doc: dict, outer: shapely.Polygon, notes: list[dict]) -> list[shapely.Polygon]:
     """Plan strip of each floor-based cut (a door, a passage, a through niche down to the floor) in a wall, from the
-    interior face to the outer face: the threshold is floor too."""
+    interior face to the outer face: the threshold is floor too. A strip that is degenerate or off the walls is noted."""
     params, by_id, out = doc["parameters"], {e["id"]: e for e in doc["elements"]}, []
     for el in doc["elements"]:
         host = by_id.get(el.get("host"))
@@ -167,35 +168,52 @@ def _thresholds(doc: dict) -> list[shapely.Polygon]:
         centre, half = params[el["params"]["center_s"]]["value"], params[el["params"]["width"]]["value"] / 2
         a, b = (start + u * (centre + s * half) for s in (-1.0, 1.0))
         a, b = (q + n * (params[host["params"]["offset"]]["value"] - n @ q) for q in (a, b))
-        out.append(shapely.Polygon([a, b, b - n * thickness, a - n * thickness]).buffer(0))
+        strip = shapely.Polygon([a, b, b - n * thickness, a - n * thickness]).buffer(0)
+        if strip.is_empty or not strip.intersects(outer):
+            notes.append({"reason": "threshold_dropped", "element": el["id"]})
+        else:
+            out.append(strip)
     return out
 
 
-def underlay(doc: dict) -> None:
-    """Give the floor and each ceiling an `extent`: the polygon or region pushed under (over) the walls to their
-    mid-thickness, so that its edge is hidden inside the bodies; the floor also runs to the outer face through floor-based cuts.
+def _parts(geom: shapely.Geometry, drop: float) -> list[dict]:
+    """Rings of the polygons of `geom` as `{"exterior", "holes", "drop"}`; builders draw a part `drop` m below its level."""
+    return [{**r, "drop": drop} for r in _rings(ceilings._as_multipolygon(geom))]
 
-    The walls' lines are moved outward by half their thickness and joined by the shell's corner rule. `polygon` and
-    `region` stay the interior; builders draw `extent` when it is there. No extent is written when the outer lines do
-    not close into a valid polygon.
+
+def underlay(doc: dict) -> None:
+    """Give the floor and each ceiling an `extent`, a list of parts `{"exterior", "holes", "drop"}`.
+
+    The interior (`polygon`, `region`) is drawn at its level. Pushed under (over) the walls to their mid-thickness, so
+    that its edge is hidden inside the bodies, the rim is drawn HIDDEN_DROP lower: a rim at the very height of a wall base
+    or top would have a face coplanar with it and facing the other way. The floor also runs at its level to the outer face
+    through floor-based cuts. The walls' lines move outward by half their thickness and are joined by the shell's corner
+    rule. No extent is written, and `diagnostics.underlay_notes` says so, when the outer lines do not close.
     """
-    floor = next(e for e in doc["elements"] if e["kind"] == "floor")
+    notes: list[dict] = []
+    doc["diagnostics"]["underlay_notes"] = notes
+    elements = doc["elements"]
+    floor = next(e for e in elements if e["kind"] == "floor")
     inner = shapely.Polygon(floor["polygon"])
+    walls = [e for e in elements if e["kind"] == "wall"]
     lines = [{"n": w["normal"], "offset": w["offset"] - doc["parameters"][el["params"]["thickness"]]["value"] / 2, "flags": []}
-             for w, el in zip(shell.wall_lines(doc), (e for e in doc["elements"] if e["kind"] == "wall"))]
-    outline = np.array([[x, 0.0, z] for x, z in floor["polygon"]])
-    outer = shapely.Polygon(shell._corners(outline, lines))
+             for w, el in zip(shell.wall_lines(doc), walls)]
+    outer = shapely.Polygon(shell._corners(np.array([[x, 0.0, z] for x, z in floor["polygon"]]), lines))
     if not outer.is_valid or not outer.contains(inner):
+        notes.append({"reason": "no_extent"})
+        for el in elements:
+            el.pop("extent", None)
         return
-    joined = shapely.union_all([outer, *_thresholds(doc)])
-    floor["extent"] = [[float(x), float(z)] for x, z in (joined if joined.geom_type == "Polygon" else outer).exterior.coords[:-1]]
+    sills = zones._opened(shapely.union_all([inner, *_thresholds(doc, outer, notes)])).difference(inner)
+    floor["extent"] = (_parts(inner, 0.0) + _parts(sills, 0.0)
+                       + _parts(zones._opened(outer.difference(shapely.union_all([inner, sills]))), HIDDEN_DROP))
     band = outer.difference(inner)
-    reach = max(doc["parameters"][e["params"]["thickness"]]["value"] for e in doc["elements"] if e["kind"] == "wall") / 2 + zones.MIN_FEATURE
-    for el in (e for e in doc["elements"] if e["kind"] == "ceiling"):
+    reach = max(doc["parameters"][w["params"]["thickness"]]["value"] for w in walls) / 2 + zones.MIN_FEATURE
+    for el in (e for e in elements if e["kind"] == "ceiling"):
         region = shapely.MultiPolygon([shapely.Polygon(r["exterior"], r["holes"]) for r in el["region"]])
         grown = shapely.union_all([region, region.buffer(reach, join_style="mitre").intersection(band)])
-        closed = grown.buffer(2 * zones.MIN_FEATURE, join_style="mitre").buffer(-2 * zones.MIN_FEATURE, join_style="mitre")  # slivers along the wall line
-        el["extent"] = _rings(ceilings._as_multipolygon(zones._opened(closed)))
+        closed = grown.buffer(2 * zones.MIN_FEATURE, join_style="mitre").buffer(-2 * zones.MIN_FEATURE, join_style="mitre")
+        el["extent"] = _parts(region, 0.0) + _parts(zones._opened(closed.difference(region)), HIDDEN_DROP)
 
 
 def _rebuild_ceilings(out: dict, polygon: shapely.Polygon, samples: Samples, segments: list, beams: shapely.Geometry) -> list[dict]:

@@ -1787,10 +1787,11 @@ def floored(tmp_path_factory):
     inside = shapely.Polygon(floor["polygon"])
     y = _value(arch, "floor.level")
     down = _blender_point(0.0, -1.0, 0.0)
-    rays = {"inside": [], "threshold": [], "under-wall": [], "outside": []}
+    rays = {"inside": [], "threshold": [], "under-wall": [], "outside": [], "ceiling": []}
+    tops = {}
 
-    def add(group, x, z):
-        rays[group].append({"name": f"{group}-{len(rays[group])}", "object": "Floor", "origin": _blender_point(x, y + 3.0, z), "direction": down})
+    def add(group, x, z, target="Floor"):
+        rays[group].append({"name": f"{group}-{len(rays[group])}", "object": target, "origin": _blender_point(x, y + 3.0, z), "direction": down})
 
     x0, z0, x1, z1 = inside.bounds
     for x in np.arange(x0, x1, 0.3):
@@ -1808,17 +1809,19 @@ def floored(tmp_path_factory):
     for host in (e for e in arch["elements"] if e["kind"] == "wall"):
         thickness = _value(arch, host["params"]["thickness"])
         n = np.array([math.cos(_value(arch, host["params"]["azimuth"])), math.sin(_value(arch, host["params"]["azimuth"]))])
-        mid = (np.array(host["start"]) + np.array(host["end"])) / 2
+        mid = np.array(host["start"]) + (np.array(host["end"]) - np.array(host["start"])) * 0.2  # clear of the door and the openings
         mid = mid + n * (_value(arch, host["params"]["offset"]) - n @ mid)
         add("under-wall", *(mid - n * thickness * 0.4))
+        add("ceiling", *(mid - n * thickness * 0.4), target=["Ceiling_1", "Ceiling_2"])
+        tops[rays["ceiling"][-1]["name"]] = _value(arch, host["params"]["top"])
         add("outside", *(mid - n * (thickness + 0.03)))
     flat = [r for group in rays.values() for r in group]
-    return _probe(ctx, arch_path, flat), rays
+    return _probe(ctx, arch_path, flat), rays, (y, tops)
 
 
 @needs_blender
 def test_the_floor_meets_the_walls_and_runs_through_the_door_threshold(floored):
-    facts, rays = floored
+    facts, rays, _ = floored
     for group in ("inside", "threshold", "under-wall"):
         assert rays[group]
         missed = [r["name"] for r in rays[group] if not facts["rays"][r["name"]]["hit"]]
@@ -1827,6 +1830,22 @@ def test_the_floor_meets_the_walls_and_runs_through_the_door_threshold(floored):
 
 @needs_blender
 def test_the_floor_does_not_leave_the_outer_faces_of_the_walls(floored):
-    facts, rays = floored
+    facts, rays, _ = floored
     assert rays["outside"]
     assert not [r["name"] for r in rays["outside"] if facts["rays"][r["name"]]["hit"]]
+
+
+@needs_blender
+def test_the_ceilings_run_over_the_walls_and_no_sheet_is_coplanar_with_a_wall_base_or_top(floored):
+    facts, rays, (floor_y, tops) = floored
+    assert rays["ceiling"]
+    for ray in rays["ceiling"]:
+        hit = facts["rays"][ray["name"]]
+        assert hit["hit"], f"{ray['name']}: no ceiling over the wall"
+        assert hit["location"][2] <= tops[ray["name"]] - 0.0009, "the rim is below the wall top, never coplanar with it"
+    flush = [r for r in rays["ceiling"] if facts["rays"][r["name"]]["location"][2] == pytest.approx(tops[r["name"]] - 0.001, abs=2e-4)]
+    assert flush, "a wall that rises to its own ceiling has the rim 1 mm inside its top"
+    for ray in rays["under-wall"]:
+        assert facts["rays"][ray["name"]]["location"][2] == pytest.approx(floor_y - 0.001, abs=2e-4), "the rim sits 1 mm under the wall base"
+    for ray in rays["inside"]:
+        assert facts["rays"][ray["name"]]["location"][2] == pytest.approx(floor_y, abs=2e-4)

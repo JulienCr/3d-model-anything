@@ -101,6 +101,9 @@ def _merge_measured(groups: list[dict]) -> list[dict]:
 
 def _opened(geom: shapely.Geometry) -> shapely.Geometry:
     """Without the necks and spikes thinner than 2 * MIN_FEATURE that a beam's flat end leaves along a slanted wall."""
+    if geom.is_empty:
+        return geom
+    geom = shapely.set_precision(geom, GRID)  # float noise on a ring of the polygon would make the mitre buffer divide by zero
     return geom.buffer(-MIN_FEATURE, join_style="mitre").buffer(MIN_FEATURE, join_style="mitre").simplify(GRID * 1e3)
 
 

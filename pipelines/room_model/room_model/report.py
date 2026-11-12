@@ -236,6 +236,8 @@ class _Report:
         out += [f"- Plafond : un second niveau à {fr((n['level'] - self.floor_y) * 100, 0)} cm du sol ({fr(n['support_m2'])} m² d'appui) près de "
                 f"[{fr(n['at'][0], 2)} ; {fr(n['at'][1], 2)}] n'a pas pu être découpé proprement, la zone garde un seul niveau"
                 for n in self.diag.get("ceiling_notes", [])]
+        out += [("- Sol et plafonds : contour extérieur des murs invalide, pas de prolongement sous les murs" if n["reason"] == "no_extent"
+                 else f"- Seuil de {n['element']} : hors des murs, sol non prolongé") for n in self.diag.get("underlay_notes", [])]
         if (frac := self.diag.get("ceiling_unobserved_fraction")) and frac > UNOBSERVED_ALERT:
             out.append(f"- {fr(frac * 100)} % du plafond non observé par le LiDAR")
         out += [f"- Station {d['id']} : {STATION_FLAG}" for d in self.doc["dimensions"]

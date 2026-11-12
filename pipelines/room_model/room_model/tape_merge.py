@@ -120,8 +120,6 @@ def _move_wall(arch: dict, wall: dict, delta: float) -> None:
             for region in el["region"]:
                 region["exterior"] = [[float(c) for c in _remap(v, before, after, moved)] for v in region["exterior"]]
                 region["holes"] = [[[float(c) for c in _remap(v, before, after, moved)] for v in hole] for hole in region["holes"]]
-    if any("extent" in el for el in arch["elements"]):
-        regularize.underlay(arch)
     hosts = _elements(arch)
     for host_id, shift in moves:
         for el in arch["elements"]:
@@ -135,6 +133,8 @@ def _move_wall(arch: dict, wall: dict, delta: float) -> None:
         if "center" in el and el.get("host") in hosts:
             x, z = _face_point(arch, hosts[el["host"]], el.get("face"), arch["parameters"][el["params"]["center_s"]]["value"])
             el["center"] = [float(x), float(z)]
+    if any("extent" in el for el in arch["elements"]):
+        regularize.underlay(arch)  # last: the thresholds follow the shifted openings
 
 
 def _refresh_stations(arch: dict, anchors: dict, changed: dict) -> None:

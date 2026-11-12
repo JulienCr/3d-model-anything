@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import shapely
 
-from room_model import model, regularize, report, shell
+from room_model import architecture, model, openings, regularize, report, shell, tape_merge
 from room_model.context import output_path
 from helpers import add_hand_beam, add_hand_column, add_hand_partition, ceiling_samples, hand_shell, make_case, wall_labels
 
@@ -30,6 +30,12 @@ def _corner_angles(doc):
 
 def _ceilings(doc):
     return {e["id"]: e for e in doc["elements"] if e["kind"] == "ceiling"}
+
+
+def _extent(el, drop=None):
+    """Union of the parts of an element's extent (all of them, or those with the given drop)."""
+    parts = [p for p in el["extent"] if drop is None or p["drop"] == drop]
+    return shapely.unary_union([shapely.Polygon(p["exterior"], p["holes"]) for p in parts])
 
 
 def _region(el):
@@ -250,11 +256,11 @@ def test_floor_and_ceilings_extend_under_the_walls_to_their_mid_thickness():
     out = regularize.apply(doc, outline, ceiling_samples([(0.1, 0.9, 0.1, 4.4, 2.3), (1.1, 5.9, 0.1, 2.4, 2.5), (1.1, 2.4, 2.6, 4.4, 2.5)]))
     inner = shapely.Polygon(next(e for e in out["elements"] if e["kind"] == "floor")["polygon"])
     floor = next(e for e in out["elements"] if e["kind"] == "floor")
-    assert shapely.Polygon(floor["extent"]).symmetric_difference(inner.buffer(0.1, join_style="mitre")).area < 1e-6
+    assert _extent(floor).symmetric_difference(inner.buffer(0.1, join_style="mitre")).area < 1e-6
     assert shapely.Polygon(floor["polygon"]).symmetric_difference(shapely.Polygon(LSHAPE)).area < 1e-9  # the interior is untouched
     for el in _ceilings(out).values():
-        extent = shapely.MultiPolygon([shapely.Polygon(r["exterior"], r["holes"]) for r in el["extent"]])
-        assert extent.contains(_region(el).buffer(-1e-6)) and shapely.Polygon(floor["extent"]).buffer(1e-6).contains(extent)
+        extent = _extent(el)
+        assert extent.contains(_region(el).buffer(-1e-6)) and _extent(floor).buffer(1e-6).contains(extent)
         assert extent.intersection(inner.buffer(-1e-6)).symmetric_difference(_region(el)).area < 1e-3
     assert sum(c["area_m2"] for c in out["diagnostics"]["ceilings"]) == pytest.approx(inner.area, abs=1e-6)
 
@@ -271,10 +277,38 @@ def test_the_floor_runs_through_the_whole_thickness_of_a_floor_based_cut():
         arch["elements"].append({"id": "X", "kind": kind, "host": wall["id"], "through": through,
                                  "params": {n: f"x.{n}" for n in ("center_s", "width", "sill")}})
         regularize.underlay(arch)
-        extent = shapely.Polygon(next(e for e in arch["elements"] if e["kind"] == "floor")["extent"])
+        extent = _extent(next(e for e in arch["elements"] if e["kind"] == "floor"))
         reached = extent.contains(shapely.Point(2.0, -0.18)) and not extent.contains(shapely.Point(2.0, -0.23))
         assert reached == expected, (kind, sill, through)
         assert not extent.contains(shapely.Point(3.0, -0.18))  # beside the cut the extent stops at mid-thickness
+
+
+def test_only_the_rim_under_the_walls_is_lowered_so_that_no_face_is_coplanar_with_a_wall_base_or_top():
+    doc, outline = hand_shell(LSHAPE, [0.0] * 6)
+    out = regularize.apply(doc, outline, ceiling_samples([(0.1, 5.9, 0.1, 2.4, 2.5), (0.1, 2.4, 2.6, 4.4, 2.5)]))
+    inner = shapely.Polygon(next(e for e in out["elements"] if e["kind"] == "floor")["polygon"])
+    ceiling, floor = next(e for e in out["elements"] if e["kind"] == "ceiling"), next(e for e in out["elements"] if e["kind"] == "floor")
+    for el in (ceiling, floor):
+        assert _extent(el, 0.0).symmetric_difference(inner if el is floor else _region(el)).area < 1e-9
+        rim = _extent(el, regularize.HIDDEN_DROP)
+        assert rim.area > 1.0 and rim.intersection(inner.buffer(-1e-6)).area < 1e-9
+        assert {p["drop"] for p in el["extent"]} == {0.0, regularize.HIDDEN_DROP}
+
+
+def test_an_extent_that_cannot_be_drawn_is_noted_and_dropped_thresholds_are_listed():
+    doc, outline = hand_shell(RECT, [0.0] * 4)
+    out = regularize.apply(doc, outline, NO_SAMPLES)
+    assert out["diagnostics"]["underlay_notes"] == []
+    wall = _walls(out)["M1"]
+    for name, v in (("center_s", 40.0), ("width", 0.9), ("sill", 0.0)):  # a door 40 m along a 5 m wall
+        out["parameters"][f"x.{name}"] = {"value": v, "sigma": 0.01, "unit": "m", "source": "lidar"}
+    out["elements"].append({"id": "X", "kind": "door", "host": wall["id"], "params": {n: f"x.{n}" for n in ("center_s", "width", "sill")}})
+    regularize.underlay(out)
+    assert out["diagnostics"]["underlay_notes"] == [{"reason": "threshold_dropped", "element": "X"}]
+    out["parameters"]["wall.M1.thickness"]["value"] = -1.0  # outer lines that cross the interior
+    regularize.underlay(out)
+    assert out["diagnostics"]["underlay_notes"] == [{"reason": "no_extent"}]
+    assert not any("extent" in e for e in out["elements"])
 
 
 def test_a_squaring_beyond_three_sigma_is_recorded_as_imposed():
@@ -374,5 +408,32 @@ def test_report_alerts_name_the_wall_out_of_square_and_the_assumed_ceiling(defau
     noted = copy.deepcopy(default[0])
     noted["diagnostics"]["ceiling_notes"] = [{"reason": "unsplit_level", "level": 2.4, "support_m2": 1.2, "at": [1.0, 2.0]}]
     assert "n'a pas pu être découpé proprement" in _section(report.render(noted), "Alertes")
+    dropped = copy.deepcopy(default[0])
+    dropped["diagnostics"]["underlay_notes"] = [{"reason": "threshold_dropped", "element": "Door_1"}, {"reason": "no_extent"}]
+    alerts = _section(report.render(dropped), "Alertes")
+    assert "Seuil de Door_1 : hors des murs" in alerts and "pas de prolongement sous les murs" in alerts
     assumed, _ = _model(tmp_path_factory.mktemp("regularize-report"), "wing", no_wing_ceiling=True)
     assert "Plafond 2 : niveau supposé" in _section(report.render(assumed), "Alertes")
+
+
+def test_a_tape_move_of_a_wall_carries_the_thresholds_with_the_door(tmp_path_factory):
+    ctx, _ = make_case(tmp_path_factory.mktemp("regularize-tape"), "tape")
+    for stage in (shell, model, openings):
+        stage.run(ctx)
+    load = lambda name: json.loads(output_path(ctx, name).read_text(encoding="utf-8"))  # noqa: E731
+    model_doc = load("model")
+    model_doc["parameters"]["wall.M1.offset"]["sigma"] = 1.0  # the south wall is the one a tape value moves; the door is on the next wall
+    arch = architecture.build(model_doc, load("openings"), None, None, ctx)
+    door = next(e for e in arch["elements"] if e["id"] == "Door_1")
+    for station in (d for d in arch["dimensions"] if d["kind"] in ("width", "length")):
+        moved = copy.deepcopy(arch)
+        tape_merge.apply(moved, {station["id"]: station["value"] + 0.05})
+        if abs(moved["parameters"][door["params"]["center_s"]]["value"] - arch["parameters"][door["params"]["center_s"]]["value"]) > 1e-3:
+            break
+    else:
+        pytest.fail("no station moves the wall of the door")
+    fresh = copy.deepcopy(moved)
+    regularize.underlay(fresh)
+    floor = lambda d: _extent(next(e for e in d["elements"] if e["kind"] == "floor"))  # noqa: E731
+    assert floor(moved).symmetric_difference(floor(fresh)).area < 1e-9
+    assert floor(moved).symmetric_difference(floor(arch)).area > 1e-4  # the strip did move
