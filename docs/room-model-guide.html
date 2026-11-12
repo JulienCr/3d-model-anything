@@ -195,7 +195,7 @@ table.trouble td:nth-child(2){width:30%}
 <tbody>
 <tr><td><code>scan-to-threejs</code></td><td>Reconstruit une pièce éditable en Three.js à partir d'un export iPhone, d'un JSON RoomPlan ou d'un GLB, puis compare les vues aux photos. Voie parallèle à la pipeline room-model.</td></tr>
 <tr><td><code>room-model</code></td><td>Fait tourner la pipeline room-model : décompresse la capture, lance les étapes, relance seulement ce qui doit l'être, vérifie les rendus et les drapeaux, applique le relevé au ruban, traduit vos demandes en corrections, dépanne.</td></tr>
-<tr><td><code>room-reconcile</code> <span class="pill soon">à venir</span></td><td>Réconciliera les mesures prises sur place avec le modèle : repérer les conflits, arbitrer, ne poser à l'humain que ce qui lui revient. En cours d'écriture ; voir <a href="#reconcile">Réconciliation</a>.</td></tr>
+<tr><td><code>room-reconcile</code></td><td>Réconcilie les mesures prises sur place avec le modèle : lit <code>measurements.json</code> et <code>reconcile.json</code>, applique ce qui s'accorde, arbitre ce que les chiffres tranchent (raison écrite dans <code>reconcile-log.md</code>), ne vous pose que le reste ; voir <a href="#reconcile">Réconciliation</a>.</td></tr>
 </tbody></table></div>
 <p>L'agent a besoin de l'environnement décrit en <a href="#prereq">Prérequis</a> (venv, GPU, <code>BLENDER</code>, CLI <code>claude</code>). Il vérifie ces points au début de la session et vous dit ce qui manque.</p>
 
@@ -231,11 +231,11 @@ table.trouble td:nth-child(2){width:30%}
 <dt>L'agent fait</dt><dd>Retrouve l'élément (<code>Door_2</code>, <code>Niche_1</code>…), écrit ou complète <code>overrides.json</code>, relance <code>architecture</code> et <code>blender</code>, vérifie sur les rendus et dans « Corrections manuelles » que la correction est passée.</dd>
 <dt>Il peut demander</dt><dd>Duquel de deux éléments vous parlez, en vous montrant le rendu. Il vous dit si une demande ne s'exprime pas avec les champs disponibles.</dd>
 </dl></li>
-<li><h4>Réconcilier le modèle et le relevé <span class="pill soon">à venir</span></h4>
+<li><h4>Réconcilier le modèle et le relevé</h4>
 <dl class="kv">
-<dt>Vous direz</dt><dd>« Réconcilie le modèle avec mes mesures. »</dd>
-<dt>L'agent fera</dt><dd>Utilisera la skill <code>room-reconcile</code>, pas encore écrite : trier les conflits, appliquer ceux qui n'ont pas d'ambiguïté, vous poser les autres.</dd>
-<dt>D'ici là</dt><dd>La skill <code>room-model</code> applique le relevé (étape 4) et signale les valeurs qui jurent avec le reste.</dd>
+<dt>Vous dites</dt><dd>« J'ai fini le relevé. » « Réconcilie le modèle avec mes mesures. »</dd>
+<dt>L'agent fait</dt><dd>Utilise la skill <code>room-reconcile</code> : applique le relevé, lit <code>reconcile.json</code>, garde ce qui s'accorde, arbitre ce que les chiffres tranchent, met de côté une valeur qui contredit tout le reste (erreur de mètre probable) sans jamais l'imposer, relance <code>architecture</code> et <code>blender</code>, vérifie que les écarts baissent et note chaque décision dans <code>reconcile-log.md</code>.</dd>
+<dt>Il peut demander</dt><dd>De remesurer une cote, de choisir entre le mètre et le scan quand les deux sont fiables, si un mur est vraiment hors d'équerre.</dd>
 </dl></li>
 <li><h4>Quand ça ne marche pas</h4>
 <dl class="kv">
@@ -532,12 +532,13 @@ echo "$BLENDER"; command -v claude</code></pre>
 <p><code>architecture</code> puis <code>blender</code>. Éditer <code>measurements.json</code> ou <code>overrides.json</code> rend <code>architecture</code> périmée d'elle-même, même sans <code>--force</code> ; <code>all</code> enchaîne donc aussi les textures et Blender.</p></li>
 </ol>
 
-<h3 id="reconcile">Réconciliation avec le relevé <span class="pill soon">à venir</span></h3>
-<p>Cette étape n'existe pas encore dans le code (ni <code>reconcile.json</code>, ni la skill <code>room-reconcile</code>). Voici ce que prévoit la spécification.</p>
+<h3 id="reconcile">Réconciliation avec le relevé</h3>
+<p>L'étape <code>architecture</code> écrit <code>reconcile.json</code> et <code>reconcile.md</code> à côté du modèle ; la skill <code>room-reconcile</code> s'en sert après le relevé.</p>
 <ul>
-<li>La pipeline écrira <code>reconcile.json</code> et un <code>reconcile.md</code> en français : pour chaque paramètre, toutes les sources (roomplan, lidar, llm, photo, tape, override) avec valeur et sigma, la valeur retenue, les résidus, et des actions proposées (mesurer X, choisir la source Y, poser un override) ; pour chaque élément, les invariants qu'il viole.</li>
-<li>Contrôles de cohérence globaux, chacun avec un verdict et un résidu chiffré : longueurs de murs contre longueurs mesurées et stations, ouvertures sans chevauchement et dans leur hôte, vantail au plus égal au trou, écarts d'équerrage justifiés par le sigma, plafonds cohérents avec le haut des murs, valeurs au ruban cohérentes entre elles. Une valeur incompatible avec tout le reste est signalée comme probable erreur de mesure, pas imposée au modèle.</li>
-<li>Une skill versionnée <code>.agents/skills/room-reconcile/</code> guidera un agent : lire <code>measurements.json</code> (valeurs et notes) et <code>reconcile.json</code>, trier les conflits (appliqués d'office, arbitrés par l'agent avec une raison chiffrée, ou posés à l'humain dans une feuille de décision), n'écrire que <code>measurements.json</code> ou <code>overrides.json</code>, relancer <code>architecture</code> et <code>blender</code>, vérifier que les résidus baissent, consigner chaque décision. Générique pour toute capture.</li>
+<li>La pipeline écrit <code>reconcile.json</code> et un <code>reconcile.md</code> en français : pour chaque paramètre, toutes les sources (roomplan, lidar, llm, photo, tape, override) avec valeur et sigma, la valeur retenue, les résidus, et des actions proposées ; pour chaque élément, les contrôles qu'il ne passe pas.</li>
+<li>Contrôles de cohérence globaux, chacun avec un verdict et un résidu chiffré : longueurs de murs contre longueurs mesurées et stations, ouvertures sans chevauchement et dans leur hôte, vantail au plus égal au trou, écarts d'équerrage justifiés par le sigma, plafonds cohérents avec le haut des murs, valeurs au ruban cohérentes entre elles. Une valeur incompatible avec les autres mesures est signalée comme erreur de mètre probable, pas imposée au modèle.</li>
+<li>Une valeur au mètre seule contre le scan est signalée comme un désaccord (« le scan implique … ») : le mètre peut avoir raison quand le scan était masqué. Les actions proposées ont toutes une forme exécutable : <code>measure:</code> (une ligne du relevé), <code>prefer:</code> (correction <code>{"prefer": {"&lt;paramètre&gt;": "scan"}}</code> dans <code>overrides.json</code>), <code>override:</code>.</li>
+<li>La skill versionnée <code>.agents/skills/room-reconcile/</code> guide un agent : lire <code>measurements.json</code> (valeurs et notes) et <code>reconcile.json</code>, trier les conflits (appliqués d'office, arbitrés par l'agent avec une raison chiffrée, ou posés à l'humain dans une feuille de décision), n'écrire que <code>measurements.json</code> ou <code>overrides.json</code>, relancer <code>architecture</code> et <code>blender</code>, vérifier que les résidus baissent, consigner chaque décision dans <code>reconcile-log.md</code>. Générique pour toute capture.</li>
 </ul>
 </section>
 </main>
