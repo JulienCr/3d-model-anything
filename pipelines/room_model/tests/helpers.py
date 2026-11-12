@@ -128,6 +128,18 @@ def add_hand_beam(doc, axis, width=0.3, underside=2.2, top=2.5):
     return f"Beam_{k}"
 
 
+def add_hand_column(doc, x0, z0, size=0.5, engaged="M1"):
+    """Adds `Column_<k>` with its lower-z face at `z0` (a face flush with the wall it is engaged on), `size` square."""
+    k = 1 + sum(e["kind"] == "column" for e in doc["elements"])
+    values = {"center_x": x0 + size / 2, "center_z": z0 + size / 2, "size_x": size, "size_z": size, "top": 2.5}
+    for name, v in values.items():
+        doc["parameters"][f"column.{k}.{name}"] = {"value": v, "sigma": 0.01, "unit": "m", "source": "lidar"}
+    doc["elements"].append({"id": f"Column_{k}", "kind": "column", "engaged_wall": engaged,
+                            "params": {n: f"column.{k}.{n}" for n in values}})
+    doc["diagnostics"]["columns"].append({"id": f"Column_{k}", "engaged_walls": [engaged]})
+    return f"Column_{k}"
+
+
 def ceiling_samples(zones, spacing=0.0158, noise=0.003, seed=0):
     """Ceiling-facing samples (about 4000 per m2): `zones` is a list of (x0, x1, z0, z1, level) rectangles."""
     from room_model.lidar import Samples

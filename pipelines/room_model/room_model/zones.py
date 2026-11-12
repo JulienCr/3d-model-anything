@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 import shapely
+from scipy import ndimage
 
 from room_model import ceilings, shell
 
@@ -119,26 +120,93 @@ def _merge_assumed(groups: list[dict]) -> list[dict]:
     return groups
 
 
-def build(polygon: shapely.Polygon, cells: list[shapely.Polygon], points: np.ndarray, beams: shapely.Geometry) -> list[dict]:
-    """Ceilings of the zones `cells`, highest first: `{"level", "sigma", "support_m2", "region", "assumed", "others"}`.
+def _minority_regions(cell: shapely.Polygon, pts: np.ndarray, best: dict, other: dict) -> list[shapely.Polygon]:
+    """Plan regions of the samples that sit on `other` rather than on the zone's level `best`, as clean polygons.
 
-    A zone takes the dominant level of the ceiling `points` over it (beams excluded). Neighbouring zones whose levels
-    merge by the rule of `ceilings` form one ceiling. A zone no point supports takes the level of its largest
-    neighbour and stays a ceiling of its own, `assumed`, unless that neighbour is itself assumed.
+    The occupied cells are closed like the scan regions, their strips (ducts, light tubes) are left out, holes are
+    filled, and an edge that stops short of the zone boundary by the sampling margin is carried onto it.
     """
+    dy_other, dy_best = np.abs(pts[:, 1] - other["level"]), np.abs(pts[:, 1] - best["level"])
+    grid = ceilings._Grid(cell)
+    labels, count = ndimage.label(grid.occupancy(pts[(dy_other < dy_best) & (dy_other < ceilings.LEVEL_WINDOW)][:, [0, 2]]),
+                                  structure=np.ones((3, 3)))
+    reach = ceilings.POLYGON_MARGIN + 2 * ceilings.GRID
+    out = []
+    for comp in range(1, count + 1):
+        mask = labels == comp
+        if mask.sum() * ceilings.GRID**2 < ceilings.MIN_COMPONENT_AREA or ceilings._is_strip(ceilings._component_frame(grid.centres(mask))):
+            continue
+        biggest = max(ceilings._as_multipolygon(grid.polygon(mask)).geoms, key=lambda g: g.area)
+        poly = shapely.Polygon(biggest.exterior).simplify(ceilings.SIMPLIFY)
+        poly = poly.union(poly.buffer(reach).intersection(cell.exterior.buffer(reach)))
+        poly = ceilings._as_multipolygon(_opened(poly.intersection(cell)))
+        out += [g for g in poly.geoms if g.area >= ceilings.MIN_COMPONENT_AREA and not g.interiors]
+    return out
+
+
+def _split_zone(cell: shapely.Polygon, pts: np.ndarray, best: dict, others: list[dict], notes: list[dict]) -> list[shapely.Polygon]:
+    """The zone cut along each other level that is a ceiling of its own (MIN_LEVEL_AREA of support, beyond
+    MAX_MERGE_SPAN of the zone level); a level that cannot be made a clean region is noted and the zone keeps one level."""
+    pieces = [cell]
+    for other in others:
+        if other["support_m2"] < ceilings.MIN_LEVEL_AREA or abs(other["level"] - best["level"]) <= ceilings.MAX_MERGE_SPAN:
+            continue
+        regions = _minority_regions(cell, pts, best, other)
+        if not regions:
+            notes.append({"reason": "unsplit_level", "level": other["level"], "support_m2": other["support_m2"],
+                          "at": [float(v) for v in cell.representative_point().coords[0]]})
+            continue
+        cut = shapely.union_all(regions)
+        pieces = [g for piece in pieces for g in shapely.get_parts(piece.difference(cut)) if g.geom_type == "Polygon"] + regions
+    return pieces
+
+
+def _distinct(others: list[dict], level: float) -> list[dict]:
+    """Other levels seen in a ceiling's zones, those within LEVEL_WINDOW of each other (or of the ceiling) counted once."""
+    kept: list[dict] = []
+    for o in sorted(others, key=lambda o: -o["support_m2"]):
+        if abs(o["level"] - level) > ceilings.LEVEL_WINDOW and all(abs(o["level"] - k["level"]) > ceilings.LEVEL_WINDOW for k in kept):
+            kept.append(o)
+    return kept
+
+
+def build(polygon: shapely.Polygon, cells: list[shapely.Polygon], points: np.ndarray, beams: shapely.Geometry) -> tuple[list[dict], list[dict]]:
+    """(ceilings, notes). Ceilings, highest first: `{"level", "sigma", "support_m2", "region", "assumed", "others"}`.
+
+    A zone takes the dominant level of the ceiling `points` over it (beams excluded); another level with a ceiling's worth
+    of support is cut out of it as a zone of its own. The sigma of a level is that of its fit over the whole room, so the
+    merge rule of `ceilings` gives the same verdict however the room is cut: neighbouring zones that merge form one ceiling.
+    A zone no point supports takes the level of its largest neighbour and stays a ceiling of its own, `assumed`, unless
+    that neighbour is itself assumed. `notes` lists the levels that could not be cut out.
+    """
+    room = ceilings.level_fits(points)
+    notes: list[dict] = []
     sampled = beams.buffer(ceilings.POLYGON_MARGIN)
+
+    def measure(region):
+        pts = points[shapely.contains_xy(region, points[:, 0], points[:, 2])]
+        best, others = _dominant(pts)
+        if best is not None and room:
+            seen = min(room, key=lambda f: abs(f["level"] - best["level"]))
+            if abs(seen["level"] - best["level"]) < ceilings.LEVEL_WINDOW:
+                best = {**best, "sigma": seen["sigma"]}
+        return best, others, pts
+
     groups, unsupported = [], []
     for cell in _absorb_small(cells):
-        region = cell.difference(sampled)
-        inside = shapely.contains_xy(region, points[:, 0], points[:, 2])
-        best, others = _dominant(points[inside])
+        best, others, pts = measure(cell.difference(sampled))
         if best is None:
             unsupported.append(cell)
-        else:
-            groups.append({**best, "geom": cell, "assumed": False, "others": others})
+            continue
+        for piece in _split_zone(cell, pts, best, others, notes):
+            level, rest, _ = measure(piece.difference(sampled))
+            if level is None:
+                unsupported.append(piece)
+            else:
+                groups.append({**level, "geom": piece, "assumed": False, "others": rest})
     groups = _merge_measured(groups)
     if not groups:
-        return []
+        return [], notes
     while unsupported:
         known = [(i, c) for i, c in enumerate(unsupported) if any(_neighbours(c, g["geom"]) for g in groups)]
         if not known:
@@ -157,5 +225,5 @@ def build(polygon: shapely.Polygon, cells: list[shapely.Polygon], points: np.nda
         region = ceilings._as_multipolygon(_opened(g["geom"].difference(beams)))
         region = shapely.MultiPolygon([p for p in region.geoms if p.area >= ceilings.MIN_COMPONENT_AREA])
         if not region.is_empty:
-            out.append({k: g[k] for k in ("level", "sigma", "support_m2", "assumed", "others")} | {"region": region})
-    return sorted(out, key=lambda c: (-c["level"], c["assumed"], c["region"].bounds))
+            out.append({k: g[k] for k in ("level", "sigma", "support_m2", "assumed")} | {"region": region, "others": _distinct(g["others"], g["level"])})
+    return sorted(out, key=lambda c: (-c["level"], c["assumed"], c["region"].bounds)), notes

@@ -196,14 +196,20 @@ class _Report:
         rows = []
         for c in sq["corners"]:
             a, b = c["between"]
-            states = {sq["walls"].get(w, {}).get("state") for w in (a, b)}
             dev = min(abs(c["retained_deg"] - ref) for ref in (0.0, 90.0, 180.0))
+            seen = {w: sq["walls"].get(w, {}) for w in (a, b)}
+            notes = [f"{w} hors équerre" for w, e in seen.items() if e.get("state") == "out_of_square"]
+            notes += [f"{w} équerre imposée" for w, e in seen.items() if e.get("forced")]
+            squared = any(e.get("state") == "squared" for e in seen.values())
             rows.append([f"{a} → {b}", fr(c["measured_deg"]) + "°", fr(c["retained_deg"]) + "°", fr(dev) + "°",
-                         SQUARING_STATE["out_of_square"] if "out_of_square" in states else (SQUARING_STATE["squared"] if "squared" in states else DASH)])
+                         ", ".join(notes) or (SQUARING_STATE["squared"] if squared else DASH)])
         out = _table(["Murs consécutifs", "Angle mesuré entre normales", "Angle retenu", "Écart retenu à l'angle droit ou à l'alignement", "État"], rows)
         if "frame_deg" in sq:
             out += ["", f"- Axes de la pièce : {fr(sq['frame_deg'], 2)}° par rapport au repère pièce ; un mur est équerré quand son écart à l'axe ne dépasse "
                         f"pas max({fr(sq['floor_deg'], 0)}°, {fr(sq['sigmas'], 0)} σ de son azimut)"]
+        forced = [(f"Mur {k}", e) for k, e in sq["walls"].items()] + [(f"Cloison {k}", e) for k, e in sq["partitions"].items()]
+        out += [f"- {name} : équerre imposée, écart de {fr(e['deviation_deg'])}° soit {fr(e['deviation_deg'] / e['sigma_deg'])} σ (σ = {fr(e['sigma_deg'], 2)}°), "
+                "au-delà de l'incertitude mais sous la tolérance d'équerrage" for name, e in forced if e.get("forced")]
         out += [f"- Cloison {label} : azimut mesuré {fr(p['measured_deg'])}°, écart {fr(p['deviation_deg'])}° à l'axe, {SQUARING_STATE[p['state']]}"
                 for label, p in sq["partitions"].items()]
         return out
@@ -227,6 +233,9 @@ class _Report:
         out += [f"- Poutre {e['id'].split('_')[1]} : {TO_VERIFY}" for e in self.els["beam"] if "to_verify" in e.get("flags", [])]
         out += [f"- Mur RoomPlan hors du contour du sol (cloison ?), ignoré : {i}" for i in self.diag["off_outline_walls"]]
         out += [f"- Porte rattachée à un mur hors contour, ignorée : {i}" for i in self.diag.get("orphan_doors", [])]
+        out += [f"- Plafond : un second niveau à {fr((n['level'] - self.floor_y) * 100, 0)} cm du sol ({fr(n['support_m2'])} m² d'appui) près de "
+                f"[{fr(n['at'][0], 2)} ; {fr(n['at'][1], 2)}] n'a pas pu être découpé proprement, la zone garde un seul niveau"
+                for n in self.diag.get("ceiling_notes", [])]
         if (frac := self.diag.get("ceiling_unobserved_fraction")) and frac > UNOBSERVED_ALERT:
             out.append(f"- {fr(frac * 100)} % du plafond non observé par le LiDAR")
         out += [f"- Station {d['id']} : {STATION_FLAG}" for d in self.doc["dimensions"]

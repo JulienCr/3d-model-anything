@@ -13,7 +13,7 @@ import re
 
 import numpy as np
 
-from room_model import shell
+from room_model import regularize, shell
 from room_model.architecture import _face_point
 from room_model.llm_merge import RECT_KINDS, _elements, _flag
 
@@ -120,6 +120,8 @@ def _move_wall(arch: dict, wall: dict, delta: float) -> None:
             for region in el["region"]:
                 region["exterior"] = [[float(c) for c in _remap(v, before, after, moved)] for v in region["exterior"]]
                 region["holes"] = [[[float(c) for c in _remap(v, before, after, moved)] for v in hole] for hole in region["holes"]]
+    if any("extent" in el for el in arch["elements"]):
+        regularize.underlay(arch)
     hosts = _elements(arch)
     for host_id, shift in moves:
         for el in arch["elements"]:

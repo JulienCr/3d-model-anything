@@ -168,9 +168,9 @@ def build(arch: dict, collections: dict, materials: dict) -> list[bpy.types.Obje
             for trim in trims:
                 _remove(trim)
         elif kind == "floor":
-            obj, material = _sheet(el["id"], [(el["polygon"], [])], frame.value(arch, el["params"]["level"]), up=True), "Sol"
+            obj, material = _sheet(el["id"], [(el.get("extent", el["polygon"]), [])], frame.value(arch, el["params"]["level"]), up=True), "Sol"
         elif kind == "ceiling":
-            regions = [(r["exterior"], r["holes"]) for r in el["region"]]
+            regions = [(r["exterior"], r["holes"]) for r in el.get("extent", el["region"])]
             obj, material = _sheet(el["id"], regions, frame.value(arch, el["params"]["level"]), up=False), "Plafond"
         elif kind == "beam":
             obj, material = _beam(arch, el), "Mur"

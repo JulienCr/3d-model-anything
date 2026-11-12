@@ -28,9 +28,9 @@ def build_nodes(doc: dict) -> list[GltfNode]:
     for el in sorted(doc["elements"], key=lambda e: KIND_ORDER.index(e["kind"])):
         p, kind = el["params"], el["kind"]
         if kind == "floor":
-            mesh = meshes.floor_mesh(el["polygon"], y0)
+            mesh = meshes.floor_mesh(el.get("extent", el["polygon"]), y0)
         elif kind == "ceiling":
-            mesh = meshes.ceiling_mesh(el["region"], value(p["level"]))
+            mesh = meshes.ceiling_mesh(el.get("extent", el["region"]), value(p["level"]))
         elif kind in ("wall", "partition"):
             az = value(p["azimuth"])
             normal = (math.cos(az), math.sin(az))

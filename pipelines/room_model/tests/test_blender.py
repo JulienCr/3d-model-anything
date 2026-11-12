@@ -1772,3 +1772,59 @@ def test_stage_without_blender_says_so(tmp_path, monkeypatch):
     architecture.run(ctx)
     with pytest.raises(BlenderMissing, match="no-such-blender"):
         blender_stage.run(ctx)
+
+
+@pytest.fixture(scope="module")
+def floored(tmp_path_factory):
+    """The synthetic L room with its door and a partition, and vertical rays cast from above onto the floor."""
+    ctx, _ = make_case(tmp_path_factory.mktemp("floored"), "floored", partition=True)
+    for stage in (shell, model, openings, architecture):
+        stage.run(ctx)
+    arch_path = output_path(ctx, "architecture")
+    arch = json.loads(arch_path.read_text(encoding="utf-8"))
+    blender_stage.run(ctx)
+    floor = _element(arch, "Floor")
+    inside = shapely.Polygon(floor["polygon"])
+    y = _value(arch, "floor.level")
+    down = _blender_point(0.0, -1.0, 0.0)
+    rays = {"inside": [], "threshold": [], "under-wall": [], "outside": []}
+
+    def add(group, x, z):
+        rays[group].append({"name": f"{group}-{len(rays[group])}", "object": "Floor", "origin": _blender_point(x, y + 3.0, z), "direction": down})
+
+    x0, z0, x1, z1 = inside.bounds
+    for x in np.arange(x0, x1, 0.3):
+        for z in np.arange(z0, z1, 0.3):
+            if inside.buffer(-0.02).contains(shapely.Point(x, z)):
+                add("inside", x, z)
+    door = _element(arch, "Door_1")
+    width = _value(arch, door["params"]["width"])
+    for along in (-width / 2 + 0.1, 0.0, width / 2 - 0.1):
+        _, p, n = _on_face(arch, door, along)
+        for depth in (0.03, 0.08):
+            add("threshold", *(p - n * depth))
+    for host in (e for e in arch["elements"] if e["kind"] == "wall"):
+        thickness = _value(arch, host["params"]["thickness"])
+        n = np.array([math.cos(_value(arch, host["params"]["azimuth"])), math.sin(_value(arch, host["params"]["azimuth"]))])
+        mid = (np.array(host["start"]) + np.array(host["end"])) / 2
+        mid = mid + n * (_value(arch, host["params"]["offset"]) - n @ mid)
+        add("under-wall", *(mid - n * thickness * 0.4))
+        add("outside", *(mid - n * (thickness + 0.03)))
+    flat = [r for group in rays.values() for r in group]
+    return _probe(ctx, arch_path, flat), rays
+
+
+@needs_blender
+def test_the_floor_meets_the_walls_and_runs_through_the_door_threshold(floored):
+    facts, rays = floored
+    for group in ("inside", "threshold", "under-wall"):
+        assert rays[group]
+        missed = [r["name"] for r in rays[group] if not facts["rays"][r["name"]]["hit"]]
+        assert not missed, f"{group}: no floor under {missed}"
+
+
+@needs_blender
+def test_the_floor_does_not_leave_the_outer_faces_of_the_walls(floored):
+    facts, rays = floored
+    assert rays["outside"]
+    assert not [r["name"] for r in rays["outside"] if facts["rays"][r["name"]]["hit"]]

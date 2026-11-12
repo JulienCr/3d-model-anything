@@ -6,10 +6,10 @@ import copy
 import numpy as np
 import shapely
 
-from room_model import ceilings, shell, zones
+from room_model import ceilings, columns, shell, zones
 from room_model.lidar import Samples
 
-SQUARING_FLOOR_DEG = 2.0  # squaring tolerance never drops below this, however tight a sigma claims to be
+SQUARING_FLOOR_DEG = 2.0  # user requirement: an architectural model is drawn square unless the scan proves more than 2 deg of deviation
 SQUARING_SIGMAS = 3.0  # a deviation within 3 sigma_azimuth cannot be told from the fit noise
 FRAME_PASSES = 4
 FRAME_STEP_DEG = 0.05  # resolution of the frame scan, far below the squaring tolerance
@@ -111,6 +111,26 @@ def _footprint(axis: list, width: float, polygon: shapely.Polygon) -> shapely.Ge
     return ceilings.beam_footprint({"axis": [a - reach[0] * d, b + reach[1] * d], "width": width}, polygon)
 
 
+def _snap_columns(out: dict, walls: list[dict]) -> None:
+    """Move the engaged side of each column onto its squared wall, the opposite side staying where it was measured."""
+    params, lines = out["parameters"], {w["label"]: w for w in walls}
+    engaged = {c["id"]: c["engaged_walls"] for c in out["diagnostics"].get("columns", [])}
+    for el in (e for e in out["elements"] if e["kind"] == "column"):
+        p = {k: params[v] for k, v in el["params"].items()}
+        for label in engaged.get(el["id"], [el["engaged_wall"]] if el.get("engaged_wall") else []):
+            n, off = _normal(lines[label]["azimuth"]), lines[label]["offset"]
+            axis = 0 if abs(n[0]) > abs(n[1]) else 1
+            name = "xz"[axis]
+            centre, size, other = p[f"center_{name}"], p[f"size_{name}"], p[f"center_{'zx'[axis]}"]["value"]
+            wall = (off - n[1 - axis] * other) / n[axis]
+            faces = [centre["value"] - size["value"] / 2, centre["value"] + size["value"] / 2]
+            side = int(np.argmin([abs(f - wall) for f in faces]))
+            new = faces[:]
+            new[side] = float(wall)
+            if new[1] - new[0] >= columns.SIZE_RANGE[0]:
+                centre["value"], size["value"] = (new[0] + new[1]) / 2, new[1] - new[0]
+
+
 def _set_param(params: dict, pid: str, level: dict, assumed: bool) -> None:
     params[pid] = {"value": float(level["level"]), "sigma": float(level["sigma"]), "unit": "m",
                    "source": "assumed" if assumed else "lidar"}
@@ -124,18 +144,48 @@ def _follow(params: dict, pid: str, levels: list[dict]) -> None:
         _set_param(params, pid, near, near["assumed"])
 
 
+def _rings(region: shapely.MultiPolygon) -> list[dict]:
+    return [{"exterior": [[float(x), float(z)] for x, z in g.exterior.coords[:-1]],
+             "holes": [[[float(x), float(z)] for x, z in h.coords[:-1]] for h in g.interiors]} for g in region.geoms]
+
+
+def underlay(doc: dict) -> None:
+    """Give the floor and each ceiling an `extent`: the polygon or region pushed under (over) the walls to their
+    mid-thickness, so that its edge is hidden inside the bodies and it runs through door thresholds.
+
+    The walls' lines are moved outward by half their thickness and joined by the shell's corner rule. `polygon` and
+    `region` stay the interior; builders draw `extent` when it is there. No extent is written when the outer lines do
+    not close into a valid polygon.
+    """
+    floor = next(e for e in doc["elements"] if e["kind"] == "floor")
+    inner = shapely.Polygon(floor["polygon"])
+    lines = [{"n": w["normal"], "offset": w["offset"] - doc["parameters"][el["params"]["thickness"]]["value"] / 2, "flags": []}
+             for w, el in zip(shell.wall_lines(doc), (e for e in doc["elements"] if e["kind"] == "wall"))]
+    outline = np.array([[x, 0.0, z] for x, z in floor["polygon"]])
+    outer = shapely.Polygon(shell._corners(outline, lines))
+    if not outer.is_valid or not outer.contains(inner):
+        return
+    floor["extent"] = [[float(x), float(z)] for x, z in outer.exterior.coords[:-1]]
+    band = outer.difference(inner)
+    reach = max(doc["parameters"][e["params"]["thickness"]]["value"] for e in doc["elements"] if e["kind"] == "wall") / 2 + zones.MIN_FEATURE
+    for el in (e for e in doc["elements"] if e["kind"] == "ceiling"):
+        region = shapely.MultiPolygon([shapely.Polygon(r["exterior"], r["holes"]) for r in el["region"]])
+        grown = shapely.union_all([region, region.buffer(reach, join_style="mitre").intersection(band)])
+        closed = grown.buffer(2 * zones.MIN_FEATURE, join_style="mitre").buffer(-2 * zones.MIN_FEATURE, join_style="mitre")  # slivers along the wall line
+        el["extent"] = _rings(ceilings._as_multipolygon(zones._opened(closed)))
+
+
 def _rebuild_ceilings(out: dict, polygon: shapely.Polygon, samples: Samples, segments: list, beams: shapely.Geometry) -> list[dict]:
     params = out["parameters"]
     cand = ceilings.ceiling_points(samples, polygon, params["floor.level"]["value"])
-    found = zones.build(polygon, zones.split(polygon, segments), cand, beams)
+    found, notes = zones.build(polygon, zones.split(polygon, segments), cand, beams)
+    out["diagnostics"]["ceiling_notes"] = notes
     for pid in [p for p in params if p.startswith("ceiling.")]:
         del params[pid]
     elements, diag = [], []
     for k, lv in enumerate(found, 1):
         _set_param(params, f"ceiling.{k}.level", lv, lv["assumed"])
-        rings = [{"exterior": [[float(x), float(z)] for x, z in g.exterior.coords[:-1]],
-                  "holes": [[[float(x), float(z)] for x, z in h.coords[:-1]] for h in g.interiors]} for g in lv["region"].geoms]
-        elements.append({"id": f"Ceiling_{k}", "kind": "ceiling", "params": {"level": f"ceiling.{k}.level"}, "region": rings,
+        elements.append({"id": f"Ceiling_{k}", "kind": "ceiling", "params": {"level": f"ceiling.{k}.level"}, "region": _rings(lv["region"]),
                          "flags": ["assumed"] if lv["assumed"] else []})
         diag.append({"id": f"Ceiling_{k}", "support_m2": None if lv["assumed"] else lv["support_m2"], "area_m2": float(lv["region"].area),
                      "other_levels": [{"level": o["level"], "support_m2": o["support_m2"]} for o in lv["others"]]})
@@ -199,6 +249,7 @@ def apply(doc: dict, outline: np.ndarray, samples: Samples) -> dict:
         segments.append(tuple(el["axis"]))
         beam_shapes.append(_footprint(el["axis"], params[el["params"]["width"]]["value"], new))
     beams = shapely.union_all(beam_shapes) if beam_shapes else shapely.Polygon()
+    _snap_columns(out, walls)
     levels = _rebuild_ceilings(out, new, samples, segments, beams)
 
     if levels:
@@ -212,13 +263,16 @@ def apply(doc: dict, outline: np.ndarray, samples: Samples) -> dict:
                 _follow(params, el["params"]["top"], levels)
 
     diag["squaring"] = _report(walls, parts, frame)
+    underlay(out)
     return out
 
 
 def _report(walls: list[dict], parts: list[dict], frame: float) -> dict:
     def entry(ln):
         return {"measured_deg": float(np.degrees(ln["az"]["value"])), "retained_deg": float(np.degrees(ln["azimuth"])),
-                "deviation_deg": float(np.degrees(ln["deviation"])), "tolerance_deg": float(np.degrees(ln["tol"])), "state": ln["state"]}
+                "deviation_deg": float(np.degrees(ln["deviation"])), "tolerance_deg": float(np.degrees(ln["tol"])), "state": ln["state"],
+                "sigma_deg": float(np.degrees(ln["az"]["sigma"])),
+                "forced": ln["state"] == "squared" and ln["deviation"] > SQUARING_SIGMAS * ln["az"]["sigma"]}
 
     def angle(a, b):
         return float(np.degrees(np.arccos(np.clip(_normal(a) @ _normal(b), -1.0, 1.0))))

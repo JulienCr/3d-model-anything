@@ -7,7 +7,7 @@ import shapely
 
 from room_model import model, regularize, report, shell
 from room_model.context import output_path
-from helpers import add_hand_beam, add_hand_partition, ceiling_samples, hand_shell, make_case, wall_labels
+from helpers import add_hand_beam, add_hand_column, add_hand_partition, ceiling_samples, hand_shell, make_case, wall_labels
 
 RECT = [(0, 0), (5, 0), (5, 4), (0, 4)]
 LSHAPE = [(0, 0), (6, 0), (6, 2.5), (2.5, 2.5), (2.5, 4.5), (0, 4.5)]
@@ -189,6 +189,83 @@ def test_a_beam_square_to_the_room_axes_but_not_to_the_walls_still_splits_the_ce
     assert len(ceiling["region"]) == 2 and _region(ceiling).is_valid
 
 
+def test_a_lower_area_in_mid_room_is_a_ceiling_of_its_own():
+    doc, outline = hand_shell([(0, 0), (6, 0), (6, 4), (0, 4)], [0.0] * 4)
+    around = [(0.1, 5.9, 0.1, 1.5, 2.5), (0.1, 5.9, 2.5, 3.9, 2.5), (0.1, 2.0, 1.5, 2.5, 2.5), (4.0, 5.9, 1.5, 2.5, 2.5)]
+    out = regularize.apply(doc, outline, ceiling_samples(around + [(2.0, 4.0, 1.5, 2.5, 2.4)]))
+    ceilings = _ceilings(out)
+    assert sorted(ceilings) == ["Ceiling_1", "Ceiling_2"]
+    assert [out["parameters"][e["params"]["level"]]["value"] for e in ceilings.values()] == pytest.approx([2.5, 2.4], abs=0.01)
+    assert _region(ceilings["Ceiling_2"]).symmetric_difference(shapely.box(2, 1.5, 4, 2.5)).area < 0.2
+    assert _region(ceilings["Ceiling_1"]).area == pytest.approx(24.0 - 2.0, abs=0.2) and len(ceilings["Ceiling_1"]["region"][0]["holes"]) == 1
+    assert not out["diagnostics"]["ceiling_notes"]
+
+
+def test_a_lower_strip_is_not_cut_out_but_is_noted_once_per_zone():
+    doc, outline = hand_shell([(0, 0), (6, 0), (6, 4), (0, 4)], [0.0] * 4)
+    add_hand_partition(doc, (3.0, 4.0), (3.0, 0.0))
+    duct = [(0.5, 2.5, 3.0, 3.4, 2.35), (3.5, 5.5, 3.0, 3.4, 2.35)]  # two ducts, one in each zone
+    samples = ceiling_samples([(0.1, 5.9, 0.1, 2.9, 2.5), (0.1, 5.9, 3.4, 3.9, 2.5), (0.1, 0.5, 3.0, 3.4, 2.5), (2.5, 3.5, 3.0, 3.4, 2.5),
+                               (5.5, 5.9, 3.0, 3.4, 2.5)] + duct)
+    out = regularize.apply(doc, outline, samples)
+    (ceiling,) = _ceilings(out).values()
+    assert len(out["diagnostics"]["ceiling_notes"]) == 2 and out["diagnostics"]["ceiling_notes"][0]["reason"] == "unsplit_level"
+    assert len(out["diagnostics"]["ceilings"][0]["other_levels"]) == 1
+    assert _region(ceiling).area == pytest.approx(24.0, abs=1e-6)
+
+
+@pytest.mark.parametrize("cuts", [[4.5], [4.5, 4.7]])
+def test_the_same_step_gets_the_same_verdict_however_the_room_is_cut(cuts):
+    doc, outline = hand_shell([(0, 0), (6, 0), (6, 3), (0, 3)], [0.0] * 4)
+    for x in cuts:
+        add_hand_partition(doc, (x, 3.0), (x, 0.0))
+    out = regularize.apply(doc, outline, ceiling_samples([(0.1, 4.45, 0.1, 2.9, 2.5), (4.55, 5.9, 0.1, 2.9, 2.4615)]))
+    ceilings = _ceilings(out)
+    assert sorted(ceilings) == ["Ceiling_1", "Ceiling_2"]
+    assert _region(ceilings["Ceiling_2"]).symmetric_difference(shapely.box(4.5, 0, 6, 3)).area < 1e-6
+
+
+def test_an_engaged_column_follows_its_wall_when_the_wall_is_squared():
+    doc, outline = hand_shell([(0, 0), (8, 0), (8, 4), (0, 4)], [1.5, 0.0, 0.0, 0.0])
+    old = shell.wall_lines(doc)[0]
+    z0 = (old["offset"] - old["normal"][0] * 6.75) / old["normal"][1]  # a face flush with the measured wall, 2.75 m from its centroid
+    cid = add_hand_column(doc, 6.5, z0, engaged="M1")
+    out = regularize.apply(doc, outline, NO_SAMPLES)
+    new = shell.wall_lines(out)[0]
+    column = next(e for e in out["elements"] if e["id"] == cid)
+
+    def face_gap(d, line):
+        v = lambda name: d["parameters"][column["params"][name]]["value"]
+        point = np.array([v("center_x"), v("center_z") - v("size_z") / 2])
+        return abs(line["normal"] @ point - line["offset"])
+
+    assert face_gap(doc, old) < 1e-9 and abs(old["normal"] @ [6.75, z0] - new["normal"] @ [6.75, z0]) > 0.03
+    assert face_gap(out, new) < 0.01
+    assert out["parameters"][column["params"]["size_z"]]["value"] == pytest.approx(0.5, abs=0.1)
+
+
+def test_floor_and_ceilings_extend_under_the_walls_to_their_mid_thickness():
+    doc, outline = hand_shell(LSHAPE, [0.0] * 6)
+    add_hand_partition(doc, (1.0, 4.5), (1.0, 0.0))
+    out = regularize.apply(doc, outline, ceiling_samples([(0.1, 0.9, 0.1, 4.4, 2.3), (1.1, 5.9, 0.1, 2.4, 2.5), (1.1, 2.4, 2.6, 4.4, 2.5)]))
+    inner = shapely.Polygon(next(e for e in out["elements"] if e["kind"] == "floor")["polygon"])
+    floor = next(e for e in out["elements"] if e["kind"] == "floor")
+    assert shapely.Polygon(floor["extent"]).symmetric_difference(inner.buffer(0.1, join_style="mitre")).area < 1e-6
+    assert shapely.Polygon(floor["polygon"]).symmetric_difference(shapely.Polygon(LSHAPE)).area < 1e-9  # the interior is untouched
+    for el in _ceilings(out).values():
+        extent = shapely.MultiPolygon([shapely.Polygon(r["exterior"], r["holes"]) for r in el["extent"]])
+        assert extent.contains(_region(el).buffer(-1e-6)) and shapely.Polygon(floor["extent"]).buffer(1e-6).contains(extent)
+        assert extent.intersection(inner.buffer(-1e-6)).symmetric_difference(_region(el)).area < 1e-3
+    assert sum(c["area_m2"] for c in out["diagnostics"]["ceilings"]) == pytest.approx(inner.area, abs=1e-6)
+
+
+def test_a_squaring_beyond_three_sigma_is_recorded_as_imposed():
+    doc, outline = hand_shell(RECT, [1.5, 0.0, 0.0, 0.0], sigma_deg=0.2)
+    walls = regularize.apply(doc, outline, NO_SAMPLES)["diagnostics"]["squaring"]["walls"]
+    assert walls["M1"]["state"] == "squared" and walls["M1"]["forced"] and walls["M1"]["sigma_deg"] == pytest.approx(0.2)
+    assert not walls["M2"]["forced"]
+
+
 def test_no_ceiling_samples_at_all_leaves_no_ceiling():
     doc, outline = hand_shell(RECT, [0.0] * 4)
     assert not _ceilings(regularize.apply(doc, outline, NO_SAMPLES))
@@ -271,5 +348,13 @@ def test_report_alerts_name_the_wall_out_of_square_and_the_assumed_ceiling(defau
     doc["diagnostics"]["squaring"]["walls"][wall["label"]].update(state="out_of_square", deviation_deg=4.2, tolerance_deg=2.0)
     alerts = _section(report.render(doc), "Alertes")
     assert f"Mur {wall['label']} : hors équerre" in alerts and "4,2°" in alerts and "2,0°" in alerts
+    assert f"{wall['label']} hors équerre" in _section(report.render(doc), "Équerrage")
+    forced = copy.deepcopy(default[0])
+    forced["diagnostics"]["squaring"]["walls"]["M2"].update(forced=True, deviation_deg=0.9, sigma_deg=0.25)
+    squaring = _section(report.render(forced), "Équerrage")
+    assert "M2 équerre imposée" in squaring and "Mur M2 : équerre imposée, écart de 0,9° soit 3,6 σ" in squaring
+    noted = copy.deepcopy(default[0])
+    noted["diagnostics"]["ceiling_notes"] = [{"reason": "unsplit_level", "level": 2.4, "support_m2": 1.2, "at": [1.0, 2.0]}]
+    assert "n'a pas pu être découpé proprement" in _section(report.render(noted), "Alertes")
     assumed, _ = _model(tmp_path_factory.mktemp("regularize-report"), "wing", no_wing_ceiling=True)
     assert "Plafond 2 : niveau supposé" in _section(report.render(assumed), "Alertes")
