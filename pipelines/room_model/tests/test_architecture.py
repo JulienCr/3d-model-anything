@@ -15,7 +15,7 @@ from synthetic import DOOR, WINDOW
 @pytest.fixture(scope="module")
 def full(tmp_path_factory):
     root = tmp_path_factory.mktemp("architecture")
-    ctx, truth = make_case(root, "full", window=True, partition=True, partition_opening=True, photos=8)
+    ctx, truth = make_case(root, "full", window=True, partition=True, partition_opening=True, photos=10, photo_scale=3)
     shell.run(ctx)
     model.run(ctx)
     openings.run(ctx)
@@ -175,6 +175,19 @@ def test_survey_alternatives(full):
     assert "swap" in html and "http" not in html and "<script src" not in html
 
 
+@pytest.mark.parametrize("angle, kept", [(65, True), (80, False)])
+def test_survey_photo_must_face_the_span_up_to_70_degrees(tmp_path, angle, kept):
+    a = np.radians(angle)
+    pose = ((3.0 + 2.5 * np.sin(a), 1.4, 2.5 * np.cos(a)), (3.0, 1.4, 0.0), 90.0)
+    ctx, _ = make_case(tmp_path, "cap", window=True, photos=1, photo_poses=(pose,))
+    for stage in (shell, model, openings, architecture):
+        stage.run(ctx)
+    _, rows = _sections((ctx.out / "measurements" / "index.html").read_text(encoding="utf-8"))
+    numbers = json.loads((ctx.out / "measurements" / "plan_numbers.json").read_text(encoding="utf-8"))
+    row = rows[int(next(n for n, d in numbers.items() if d == "Window_1-w"))]
+    assert ("data:image/jpeg;base64," in row) is kept
+
+
 def test_survey_masked_note(full):
     _, _, arch = full
     rows = survey_page.numbered_rows(arch)[:2]
@@ -284,8 +297,10 @@ def test_llm_correction_of_an_elevated_opening_moves_its_sill(env):
 
 
 def test_llm_correction_uses_the_plane_of_the_partition_face(env):
+    borrowed = {**env.crops["Partition_P1-A-ov"], "kind": "element", "target": "Opening_1"}  # no photo shows Opening_1: borrow a crop
+    env = dataclasses.replace(env, crops={**env.crops, "Opening_1-a": borrowed})
     rect = _opening_rect(env.arch, "Opening_1", widen=0.04)
-    arch = env.merge(_answers(env, elements=[{"id": "Opening_1", "corners": _corners(env, ["Opening_1-a", "Opening_1-b"], rect)}]))
+    arch = env.merge(_answers(env, elements=[{"id": "Opening_1", "corners": _corners(env, ["Opening_1-a"], rect)}]))
     assert _param(arch, "Opening_1", "width")["value"] == pytest.approx(_param(env.arch, "Opening_1", "width")["value"] + 0.04, abs=0.002)
     assert _param(arch, "Opening_1", "center_s")["value"] == pytest.approx(_param(env.arch, "Opening_1", "center_s")["value"], abs=0.002)
 
@@ -306,6 +321,65 @@ def test_llm_two_crops_out_of_three_agree(env):
     arch = env.merge(_answers(env, elements=[{"id": "Door_1", "corners": corners}]))
     assert _param(arch, "Door_1", "width")["value"] == pytest.approx(_param(env.arch, "Door_1", "width")["value"] + 0.04, abs=0.002)
     assert "llm_corrected" in _element(arch, "Door_1")["flags"]
+
+
+def _keep(corners, indices):
+    """The same corner entries with every point but `indices` (TL, TR, BR, BL) set to null."""
+    return [{**c, "uv": [p if i in indices else None for i, p in enumerate(c["uv"])]} for c in corners]
+
+
+def test_corners_split_across_two_crops_rebuild_the_rectangle(env):
+    rect = [[x, y + 0.05, z] for x, y, z in _opening_rect(env.arch, "Window_1", widen=0.04)]
+    corners = [*_keep(_corners(env, ["Window_1-a"], rect), {0, 1}), *_keep(_corners(env, ["Window_1-b"], rect), {2, 3})]  # top, then bottom
+    arch = env.merge(_answers(env, elements=[{"id": "Window_1", "corners": corners}]))
+    scan = {n: _param(env.arch, "Window_1", n)["value"] for n in ("width", "height", "sill", "center_s")}
+    got = {n: _param(arch, "Window_1", n)["value"] for n in scan}
+    assert got["width"] == pytest.approx(scan["width"] + 0.04, abs=0.002) and got["center_s"] == pytest.approx(scan["center_s"], abs=0.002)
+    assert got["sill"] == pytest.approx(scan["sill"] + 0.05, abs=0.002) and got["height"] == pytest.approx(scan["height"], abs=0.002)
+    assert "llm_single_view" in _element(arch, "Window_1")["flags"] and _vision(arch)["not_applied"] == []  # each corner has one crop
+
+
+def test_a_parameter_whose_corners_are_missing_keeps_the_scan_value(env):
+    rect = [[x, y + 0.05, z] for x, y, z in _opening_rect(env.arch, "Window_1", widen=0.04)]
+    corners = [*_keep(_corners(env, ["Window_1-a"], rect), {0, 3}), *_keep(_corners(env, ["Window_1-b"], rect), {0, 3})]  # the left side twice
+    arch = env.merge(_answers(env, elements=[{"id": "Window_1", "corners": corners}]))
+    assert _param(arch, "Window_1", "width") == _param(env.arch, "Window_1", "width")
+    assert _param(arch, "Window_1", "center_s") == _param(env.arch, "Window_1", "center_s")
+    assert _param(arch, "Window_1", "sill")["value"] == pytest.approx(_param(env.arch, "Window_1", "sill")["value"] + 0.05, abs=0.002)
+    refused = [n["reason"] for n in _vision(arch)["not_applied"] if n["id"] == "Window_1"]
+    assert len(refused) == 2 and all("scan" in r for r in refused) and any("largeur" in r for r in refused)
+    assert "llm_corrected" in _element(arch, "Window_1")["flags"]  # every corner used has two agreeing crops
+
+
+@pytest.mark.parametrize("given, applied", [({0, 1}, {"width", "center_s", "height"}), ({0, 2}, {"width", "center_s", "height"}), ({0, 3}, {"height"})])
+def test_a_door_reaches_the_floor_so_a_top_corner_gives_its_height(env, given, applied):
+    scan = {n: _param(env.arch, "Door_1", n)["value"] for n in ("width", "height", "center_s", "sill")}
+    rect = [[x, y + 0.03, z] for x, y, z in _opening_rect(env.arch, "Door_1", widen=0.04)]  # 4 cm wider, 3 cm higher
+    arch = env.merge(_answers(env, elements=[{"id": "Door_1", "corners": _keep(_corners(env, ["Door_1-a"], rect), given)}]))
+    expected = {"width": scan["width"] + 0.04, "height": scan["height"] + 0.03, "center_s": scan["center_s"]}
+    for name in ("width", "height", "center_s"):
+        value = _param(arch, "Door_1", name)["value"]
+        assert value == pytest.approx(expected[name] if name in applied else scan[name], abs=0.002), name
+    assert _param(arch, "Door_1", "sill") == _param(env.arch, "Door_1", "sill")
+    refused = [n["reason"] for n in _vision(arch)["not_applied"] if n["id"] == "Door_1"]
+    assert len(refused) == len({"width", "center_s"} - applied) and ("largeur" in " ".join(refused)) is ("width" not in applied)
+
+
+def test_corner_order_in_the_answer_does_not_decide_the_side(env):
+    rect = _opening_rect(env.arch, "Door_1", widen=0.04)
+    reversed_order = [rect[1], rect[0], rect[3], rect[2]]  # entries in the wrong order: left and right swapped
+    arch = env.merge(_answers(env, elements=[{"id": "Door_1", "corners": _corners(env, ["Door_1-a", "Door_1-b"], reversed_order)}]))
+    assert _param(arch, "Door_1", "width")["value"] == pytest.approx(_param(env.arch, "Door_1", "width")["value"] + 0.04, abs=0.002)
+
+
+def test_a_corner_on_which_crops_disagree_is_dropped_the_others_are_kept(env):
+    wide = _opening_rect(env.arch, "Door_1", widen=0.04)
+    moved = _opening_rect(env.arch, "Door_1", widen=0.04, shift=0.08)  # the whole rectangle slid by 8 cm
+    corners = [*_corners(env, ["Door_1-a"], wide), *_keep(_corners(env, ["Door_1-b"], moved), {0, 3})]  # b contradicts a on the left corners
+    arch = env.merge(_answers(env, elements=[{"id": "Door_1", "corners": corners}]))
+    assert "llm_inconsistent" in _element(arch, "Door_1")["flags"] and _vision(arch)["inconsistent"] == ["Door_1"]
+    assert _param(arch, "Door_1", "height")["value"] == pytest.approx(_param(env.arch, "Door_1", "height")["value"], abs=0.002)
+    assert _param(arch, "Door_1", "width") == _param(env.arch, "Door_1", "width")  # the left side is not trusted
 
 
 def test_llm_single_view_is_applied_and_flagged(env):
@@ -416,7 +490,7 @@ def test_unusable_answers_are_listed_never_raised(env):
                   {"type": "fixed"}, "not an object",
                   {"id": "Door_1", "corners": [{"crop": "nowhere", "uv": [[0, 0], [1, 0], [1, 1], [0, 1]]}]},
                   {"id": "Window_1", "corners": [{"crop": "Door_1-a", "uv": "garbage"}]},
-                  {"id": "Opening_1", "corners": [{"crop": "Opening_1-a", "uv": [[0, 0], [crops["Opening_1-a"]["size"][0], 0], [0, 1], [1, 1]]}]}],
+                  {"id": "Opening_1", "corners": [{"crop": "Window_1-a", "uv": [[0, 0], [crops["Window_1-a"]["size"][0], 0], [0, 1], [1, 1]]}]}],
         new_elements=[{"kind": "niche", "host_hint": "Nowhere", "corners": _corners(env, ["Wall_M2-ov"], _face_rect(env, "Wall_M2", None, (0.2, 0.5), (1, 1.5)))},
                       {"kind": "niche", "host_hint": "Wall_M2", "corners": []}],
         panel_frames=[{"host_hint": "Nowhere", "profile": "ogee", "corners": []}])

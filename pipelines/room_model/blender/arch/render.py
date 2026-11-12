@@ -67,7 +67,7 @@ def _setup(scene: bpy.types.Scene) -> None:
     scene.render.image_settings.color_mode = "RGB"
     scene.render.film_transparent = False
     shading = scene.display.shading
-    shading.light, shading.color_type, shading.show_object_outline = "STUDIO", "MATERIAL", True
+    shading.light, shading.color_type, shading.show_object_outline = "STUDIO", "TEXTURE", True  # texture: the image of a textured material, else its viewport colour
     scene.display.render_aa = "8"
     scene.world = scene.world or bpy.data.worlds.new("World")
     scene.world.color = BACKGROUND

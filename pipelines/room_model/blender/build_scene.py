@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from arch import collections as collection_names  # noqa: E402
 from arch import frame, materials, render, scan, shell  # noqa: E402
 
+GLB_JPEG_QUALITY = 85  # the static GLB embeds the textures as JPEG: a flat photo texture loses nothing visible at this quality
 HOOKS = ("joinery", "niches", "mouldings", "dimensions", "textures")  # arch/<name>.py with add(arch, collections, ctx)
 
 
@@ -72,7 +73,8 @@ def export_glb(path: str, colls: dict) -> None:
         for obj in colls[name].all_objects:
             obj.select_set(True)
     bpy.ops.export_scene.gltf(filepath=path, export_format="GLB", use_selection=True, export_extras=False,
-                              export_cameras=False, export_lights=False, export_yup=True)
+                              export_cameras=False, export_lights=False, export_yup=True,
+                              export_image_format="JPEG", export_jpeg_quality=GLB_JPEG_QUALITY)
 
 
 def write_report(out_dir: str) -> None:

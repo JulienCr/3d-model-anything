@@ -21,7 +21,7 @@ FLOOR = np.array([120, 100, 80])  # synthetic floor colour (class 2)
 @pytest.fixture(scope="module")
 def case(tmp_path_factory):
     root = tmp_path_factory.mktemp("vision")
-    ctx, truth = make_case(root, "full", window=True, partition=True, partition_opening=True, photos=8)
+    ctx, truth = make_case(root, "full", window=True, partition=True, partition_opening=True, photos=10, photo_scale=3)
     shell.run(ctx)
     model.run(ctx)
     openings.run(ctx)
@@ -113,6 +113,58 @@ def test_prepare_sheets(case, pending):
     assert (pending / "prompt.md").read_text(encoding="utf-8").strip() and (pending / "schema.json").exists()
     assert all(f["crop"] or f["sheet"] is None for f in elements["faces"]) and any(f["crop"] for f in elements["faces"])
     assert all(c["id"] in crops for e in by_id.values() for c in e["crops"])
+
+
+def _window_case(root: Path, angle: float, distance: float, scale: int = 3) -> StageContext:
+    """Capture whose only photo looks at the window from `angle` degrees off the wall normal, `distance` m away."""
+    a = np.radians(angle)
+    pose = ((3.0 + distance * np.sin(a), 1.4, distance * np.cos(a)), (3.0, 1.4, 0.0), 90.0)
+    ctx, _ = make_case(root, "cap", window=True, photos=1, photo_scale=scale, photo_poses=(pose,))
+    for stage in (shell, model, openings, architecture):
+        stage.run(ctx)
+    return ctx
+
+
+def _window_rect(ctx: StageContext) -> np.ndarray:
+    arch = json.loads((ctx.out / "architecture.json").read_text(encoding="utf-8"))
+    (x0, _, z0), (x1, _, z1) = architecture.dimension_endpoints(arch, "Window_1-w")
+    low, high = sorted(y for _, y, _ in architecture.dimension_endpoints(arch, "Window_1-h"))
+    return np.array([[x0, low, z0], [x1, low, z1], [x1, high, z1], [x0, high, z0]])
+
+
+@pytest.mark.parametrize("angle, distance, scale, expected", [
+    (0, 2.2, 3, "element"),  # frontal and large
+    (40, 3.2, 1, "overview"),  # facing and unobstructed, but 86 px tall: too small for corner clicks
+    (70, 2.5, 3, None),  # 136 px wide but 70 degrees off: grazing, and a grazing overview would be as bad
+])
+def test_element_crops_are_frontal_and_large_else_the_overview_else_nothing(tmp_path, angle, distance, scale, expected):
+    ctx = _window_case(tmp_path, angle, distance, scale)
+    pending = vision.prepare(ctx)
+    crops, elements = _load(pending, "crops.json"), _load(pending, "elements.json")
+    shown = {c: v for c, v in crops.items() if v["target"] == "Window_1"}
+    entry = next(e for e in elements["elements"] if e["id"] == "Window_1")
+    if expected is None:
+        assert not shown and entry["sheet"] is None and entry["crops"] == [] and not (pending / "Window_1.jpg").exists()
+        return
+    assert list(shown) == ["Window_1-a"] and shown["Window_1-a"]["kind"] == "element" and entry["sheet"] == "Window_1.jpg"
+    assert (pending / "Window_1.jpg").exists() and shown["Window_1-a"].get("fallback") == entry.get("fallback")
+    assert shown["Window_1-a"]["visible_corners"] == [True] * 4 and "covered_corners" not in entry
+    if expected == "element":
+        assert "fallback" not in entry
+        return
+    assert entry["fallback"] == "overview"
+    photo = load_posed_photos(ctx)[0]
+    uv = to_upright(photo, project(photo, _window_rect(ctx))[0])
+    x0, y0, x1, y1 = shown["Window_1-a"]["box"]
+    assert (uv >= [x0, y0]).all() and (uv <= [x1, y1]).all()  # the whole rectangle is in the crop
+    assert x1 - x0 > 1.5 * np.ptp(uv[:, 0])  # and it is a view of the wall around it
+
+
+def test_element_hidden_behind_the_partition_gets_no_crop(case, pending):
+    elements = _load(pending, "elements.json")
+    opening = next(e for e in elements["elements"] if e["id"] == "Opening_1")  # on face B: every photo stands on the A side
+    assert opening["sheet"] is None and opening["crops"] == [] and "fallback" not in opening
+    assert not any(v["target"] == "Opening_1" for v in _load(pending, "crops.json").values())
 
 
 def test_sheet_images_are_upright(case, pending):
@@ -250,6 +302,7 @@ def test_prompt_states_the_hinge_convention(pending):
         assert word in text
     assert "{{" not in text and all(t in text for t in catalogue.CATALOGUE["door"]) and all(t in text for t in catalogue.CATALOGUE["window"])
     assert "Door_1.jpg" in text
+    assert "`null`" in text and "left and a right corner" in text and "français" not in text  # hidden corners, explained in English
 
 
 def test_schema_enums_match_the_catalogue(pending):
@@ -383,6 +436,28 @@ def test_malformed_corners_are_rejected(case, pending, fake, uv):
     set_answer(json.dumps(answer))
     answers = _load(vision.run(_stage(case, force=True)).parent, "answers.json")
     assert answers["elements"] == [] and len(_reasons(case)) == 2
+
+
+def test_null_corners_need_two_points_on_a_crop(case, pending, fake):
+    set_answer, _ = fake
+    crops = _load(pending, "crops.json")
+    crop = next(c for c in crops if c.startswith("Door_1-"))
+    full = _corner(crops, crop)["uv"]
+    overview = _overview_crop(pending)
+    cases = {
+        "two": [full[0], None, None, full[3]],
+        "three": [None, full[1], full[2], full[3]],
+        "one": [full[0], None, None, None],
+        "none": [None, None, None, None],
+        "outside": [full[0], None, None, [5000, 10]],
+    }
+    for name, uv in cases.items():
+        set_answer({"elements": [{"id": "Door_1", "type": "hinged_single", "corners": [{"crop": crop, "uv": uv}]}]})
+        answers = _load(vision.run(_stage(case, force=True)).parent, "answers.json")
+        assert bool(answers["elements"]) is (name in ("two", "three")), name
+    set_answer({"new_elements": [{"kind": "niche", "host_hint": _overview_host(pending), "corners": [{"crop": overview, "uv": [full[0], None, full[2], full[3]]}]}]})
+    answers = _load(vision.run(_stage(case, force=True)).parent, "answers.json")
+    assert answers["new_elements"] == [] and "at least 4" in _reasons(case)[0]["reason"]  # a niche needs its whole rectangle
 
 
 def test_a_good_item_survives_a_bad_neighbour(case, pending, fake):

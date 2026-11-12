@@ -5,8 +5,12 @@ from synthetic import SyntheticOptions, make_capture
 
 @pytest.fixture(autouse=True)
 def _no_real_claude(monkeypatch):
-    """No test reaches the real `claude`; tests of the vision stage point ROOM_MODEL_CLAUDE at tests/fake_claude.py."""
+    """No test reaches the real `claude`; tests of the vision stage point ROOM_MODEL_CLAUDE at tests/fake_claude.py.
+
+    Nor the network: the textures stage fetches its fill textures only when ROOM_MODEL_FILL is unset.
+    """
     monkeypatch.setenv("ROOM_MODEL_CLAUDE", "/nonexistent/claude")
+    monkeypatch.setenv("ROOM_MODEL_FILL", "none")
 
 
 @pytest.fixture

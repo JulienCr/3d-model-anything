@@ -203,7 +203,7 @@
   "additionalProperties": false,
   "definitions": {
     "corners": {
-      "$comment": "Four points in the order top-left, top-right, bottom-right, bottom-left of the quadrilateral as seen on the crop.",
+      "$comment": "Four entries in the order top-left, top-right, bottom-right, bottom-left of the quadrilateral as seen on the crop; null for a corner that is hidden or outside the crop (an element needs at least two points, a declared niche or panel frame four).",
       "type": "object",
       "required": [
         "crop",
@@ -219,7 +219,10 @@
           "minItems": 4,
           "maxItems": 4,
           "items": {
-            "type": "array",
+            "type": [
+              "array",
+              "null"
+            ],
             "minItems": 2,
             "maxItems": 2,
             "items": {

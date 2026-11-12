@@ -146,3 +146,205 @@ def test_best_views_rank_box_occluded_views_last(tmp_path):
     turned = photo_geom.room_boxes({"objects": [{"transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.7, 0, 3.0, 1],
                                                   "dimensions": [0.4, 0.4, 0.4]}]}, np.eye(4))
     assert [p.name for p in photo_geom.best_views([near, far], span, wall, boxes=turned)] == ["far", "near"]
+
+
+# --- eligibility of a planar rectangle ---------------------------------------------------------------------------
+
+def _camera(name, position, target, tmp_path, f=1000.0, size=(640, 480)):
+    """Pinhole looking from `position` to `target` (room +Y up), 640x480 with a long focal so rectangles stay in frame."""
+    forward = np.asarray(target, float) - position
+    forward /= np.linalg.norm(forward)
+    right = np.cross(forward, [0.0, 1.0, 0.0])
+    right /= np.linalg.norm(right)
+    c2w = np.eye(4)
+    c2w[:3, 0], c2w[:3, 1], c2w[:3, 2], c2w[:3, 3] = right, -np.cross(right, forward), forward, position
+    K = np.array([[f, 0, size[0] / 2], [0, f, size[1] / 2], [0, 0, 1.0]])
+    return PosedPhoto(name, tmp_path / name, K, c2w, size, 0)
+
+
+RECT = np.array([[-0.5, -0.4, 5.0], [0.5, -0.4, 5.0], [0.5, 0.4, 5.0], [-0.5, 0.4, 5.0]])  # on the wall z = 5, facing -z
+TOWARDS_VIEWER = np.array([0.0, 0.0, -1.0])
+CENTRE = np.array([0.0, 0.0, 5.0])
+
+
+def _seen_from(angle_deg, distance, tmp_path, name="cam"):
+    a = np.radians(angle_deg)
+    return _camera(name, CENTRE + distance * np.array([np.sin(a), 0.0, -np.cos(a)]), CENTRE, tmp_path)
+
+
+def _names(views):
+    return [v.photo.name for v in views]
+
+
+def test_rect_views_accept_a_frontal_unoccluded_view(tmp_path):
+    wall = _plane(5.0, 4.0, 3.0)
+    views = photo_geom.rect_views([_seen_from(0, 3.0, tmp_path, "front"), _seen_from(50, 3.0, tmp_path, "side")], RECT, wall, TOWARDS_VIEWER)
+    assert _names(views) == ["front", "side"]  # larger area x cos first
+    assert views[0].cos == pytest.approx(1.0) and views[1].cos == pytest.approx(np.cos(np.radians(50)))
+    assert views[0].seen == 1.0
+
+
+def test_rect_views_drop_a_view_behind_an_occluding_wall(tmp_path):
+    wall_v, wall_f = _plane(5.0, 4.0, 3.0)
+    screen_v, screen_f = _plane(3.5, 1.5, 2.0)  # a wall between the camera and the rectangle, wider than it in the image
+    mesh = (np.vstack([wall_v, screen_v]), np.vstack([wall_f, screen_f + len(wall_v)]))
+    front = _seen_from(0, 3.0, tmp_path, "front")  # at z = 2: the rectangle projects inside the image, the screen hides it
+    uv, depth = photo_geom.project(front, RECT)
+    assert ((uv > 0).all() and (uv[:, 0] < 640).all() and (uv[:, 1] < 480).all() and (depth > 0).all())
+    around = _camera("around", np.array([0.0, 0.0, 4.0]), CENTRE, tmp_path)  # past the screen, 1 m from the wall: too small
+    assert photo_geom.rect_views([front], RECT, mesh, TOWARDS_VIEWER) == []
+    assert _names(photo_geom.rect_views([front], RECT, (wall_v, wall_f), TOWARDS_VIEWER)) == ["front"]
+    assert photo_geom.rect_views([around], RECT, mesh, TOWARDS_VIEWER) == []
+
+
+@pytest.mark.parametrize("angle, eligible", [(55, True), (59, True), (62, False), (68, False)])
+def test_rect_views_need_the_camera_to_face_the_rectangle(tmp_path, angle, eligible):
+    camera = _seen_from(angle, 3.0, tmp_path)
+    uv, _ = photo_geom.project(camera, RECT)
+    assert min(np.linalg.norm(uv[1] - uv[0]), np.linalg.norm(uv[3] - uv[0])) >= 120  # wide enough: only the angle can reject it
+    assert bool(photo_geom.rect_views([camera], RECT, _plane(5.0, 4.0, 3.0), TOWARDS_VIEWER)) is eligible
+
+
+def test_rect_views_need_a_large_enough_projection(tmp_path):
+    wall = _plane(5.0, 4.0, 3.0)
+    assert photo_geom.rect_views([_seen_from(0, 6.0, tmp_path)], RECT, wall, TOWARDS_VIEWER)  # 133 px
+    assert photo_geom.rect_views([_seen_from(0, 10.0, tmp_path)], RECT, wall, TOWARDS_VIEWER) == []  # 80 px on the shorter side
+
+
+def _slab(x0, x1, y0, y1):
+    """A box 30 cm in front of the wall hiding what the camera at z = 2 sees through x0..x1, y0..y1 on the wall (z = 5)."""
+    k = 2.7 / 3.0  # the box sits at z = 4.7: rays from z = 2 cross it at 0.9 of their wall offset
+    return photo_geom.RoomBox(np.array([k * (x0 + x1) / 2, k * (y0 + y1) / 2, 4.7]), np.eye(3), np.array([k * (x1 - x0) / 2 - 0.03, k * (y1 - y0) / 2 - 0.03, 0.1]))
+
+
+def test_rect_views_accept_a_partly_hidden_frame_when_every_corner_is_seen(tmp_path):
+    wall, camera = _plane(5.0, 4.0, 3.0), _seen_from(0, 3.0, tmp_path)
+    top, bottom = _slab(-0.35, 0.35, 0.3, 1.0), _slab(-0.35, 0.35, -1.0, -0.3)  # the middle three points of the top and bottom edges
+    band = photo_geom.rect_band(RECT)
+    assert len(band) == 16 and photo_geom.occluded_mask(camera.centre, band, [top, bottom]).sum() == 6  # 62 % of the band seen
+    kept = photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=[top, bottom])
+    assert _names(kept) == ["cam"] and kept[0].seen == pytest.approx(10 / 16)
+    sides = [_slab(-0.6, -0.1, -1.0, 1.0), _slab(0.1, 0.6, -1.0, 1.0)]  # two thirds of the band hidden
+    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=sides) == []
+
+
+def test_rect_views_report_which_corners_are_visible(tmp_path):
+    wall, camera = _plane(5.0, 4.0, 3.0), _seen_from(0, 3.0, tmp_path)
+    corner = _slab(-0.6, -0.3, 0.2, 1.0)  # hides the top-left corner only (RECT is ordered BL, BR, TR, TL)
+    assert photo_geom.occluded_mask(camera.centre, photo_geom.rect_corner_samples(RECT)[3], [corner]).sum() >= 4
+    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER)[0].corners == (True, True, True, True)
+    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=[corner])[0].corners == (True, True, True, False)
+
+
+def test_rect_views_need_two_visible_corners(tmp_path):
+    wall, camera = _plane(5.0, 4.0, 3.0), _seen_from(0, 3.0, tmp_path)
+    left_hidden = [_slab(-0.6, -0.1, -1.0, 1.0)]  # the left corners and 44 % of the band are hidden
+    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=left_hidden)[0].corners == (False, True, True, False)
+    one_left = left_hidden + [_slab(0.3, 0.6, 0.2, 1.0)]  # and the top-right corner too
+    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=one_left) == []
+
+
+def test_rect_views_cover_the_corners_with_complementary_views(tmp_path):
+    wall = _plane(5.0, 4.0, 3.0)
+    left = _camera("left", CENTRE + np.array([0.0, 0.0, -3.0]), CENTRE + np.array([-0.6, 0.0, 0.0]), tmp_path)  # the right edge leaves the image
+    right = _camera("right", CENTRE + np.array([0.0, 0.0, -3.0]), CENTRE + np.array([0.6, 0.0, 0.0]), tmp_path)
+    full = _seen_from(30, 3.5, tmp_path, "full")
+    views = photo_geom.rect_views([left, right, full], RECT, wall, TOWARDS_VIEWER)
+    assert _names(views)[0] == "full" and {"left", "right"} <= set(_names(views))  # most corners first
+    assert views[0].corners == (True,) * 4
+    two = photo_geom.rect_views([left, right], RECT, wall, TOWARDS_VIEWER)
+    assert {v.corners for v in two} == {(True, False, False, True), (False, True, True, False)}
+    ranked = [photo_geom.rect_views([c], RECT, wall, TOWARDS_VIEWER)[0] for c in (left, right, full)]
+    assert [v.photo.name for v in photo_geom.cover([ranked[0], ranked[0], ranked[1]], 2)] == ["left", "right"]  # the repeat adds nothing
+
+
+def test_rect_views_tolerate_a_casing_standing_out_of_the_plane(tmp_path):
+    camera = _seen_from(0, 3.0, tmp_path)
+    assert photo_geom.rect_views([camera], RECT, _plane(4.95, 4.0, 3.0), TOWARDS_VIEWER)  # the surface 5 cm in front of the plane
+    assert photo_geom.rect_views([camera], RECT, _plane(4.85, 4.0, 3.0), TOWARDS_VIEWER) == []  # 15 cm: something stands there
+
+
+def test_rect_grid_stops_three_centimetres_inside_the_edges():
+    grid = photo_geom.rect_grid(RECT)
+    assert grid.shape == (25, 3) and np.allclose(grid[:, 2], 5.0)
+    corners = photo_geom.rect_corner_samples(RECT)
+    assert corners.shape == (4, 5, 3) and np.allclose(corners[0, 0], [-0.47, -0.37, 5.0]) and np.allclose(corners[2, 0], [0.47, 0.37, 5.0])
+    assert np.abs(corners[:, 1:] - corners[:, :1]).max() == pytest.approx(photo_geom.CORNER_RADIUS)
+    assert grid[:, 0].min() == pytest.approx(-0.47) and grid[:, 0].max() == pytest.approx(0.47)
+    assert grid[:, 1].min() == pytest.approx(-0.37) and grid[:, 1].max() == pytest.approx(0.37)
+    assert len(np.unique(grid[:, 0].round(6))) == 5 and len(np.unique(grid[:, 1].round(6))) == 5
+
+
+def test_an_opening_is_eligible_from_the_side_of_either_face(tmp_path):
+    wall = _plane(5.0, 4.0, 3.0)
+    side_b = _camera("b", CENTRE + np.array([0.0, 0.0, 3.0]), CENTRE, tmp_path)  # the host's face A looks to -z; this camera is on face B
+    assert photo_geom.rect_views([side_b], RECT, wall, TOWARDS_VIEWER, two_sided=True)  # a hole is seen through from either side
+    assert photo_geom.rect_views([side_b], RECT, wall, TOWARDS_VIEWER) == []  # a recess that is not through is not
+
+
+def test_rect_views_without_a_normal_accept_either_side_of_the_rectangle(tmp_path):
+    wall = _plane(5.0, 4.0, 3.0)
+    behind = _camera("behind", np.array([0.0, 0.0, 8.0]), CENTRE, tmp_path)
+    assert photo_geom.rect_views([behind], RECT, wall, -TOWARDS_VIEWER)  # a normal pointing at the camera
+    assert photo_geom.rect_views([behind], RECT, wall, TOWARDS_VIEWER) == []  # the viewing side is the other one
+    assert photo_geom.rect_views([behind], RECT, wall, TOWARDS_VIEWER, two_sided=True)
+    assert photo_geom.rect_views([behind], RECT, wall)  # normal taken from the rectangle itself
+
+
+def test_best_views_drop_the_photos_that_do_not_face_the_span(tmp_path):
+    wall = _plane(5.0, 4.0, 3.0)
+    span = np.array([[-0.5, 0.0, 5.0], [0.5, 0.0, 5.0]])
+    cameras = [_seen_from(a, 3.0, tmp_path, f"a{a}") for a in (0, 65, 75)]
+    assert _names_of(photo_geom.best_views(cameras, span, wall, 3, TOWARDS_VIEWER)) == ["a0", "a65", "a75"]
+    kept = photo_geom.best_views(cameras, span, wall, 3, TOWARDS_VIEWER, min_cos=photo_geom.SURVEY_FACING_COS)
+    assert _names_of(kept) == ["a0", "a65"]  # 65 degrees stay, 75 do not
+
+
+def _names_of(photos):
+    return [p.name for p in photos]
+
+
+def test_a_corner_needs_two_of_its_five_samples(tmp_path):
+    wall, camera = _plane(5.0, 4.0, 3.0), _seen_from(0, 3.0, tmp_path)
+    samples = photo_geom.rect_corner_samples(RECT)[2]  # the top-right corner (RECT is ordered BL, BR, TR, TL)
+    k = 2.93 / 3.0  # a thin box 7 cm from the wall: rays from z = 2 cross it at 0.977 of their wall offset
+
+    def flat(x0, y0):  # hides the wall from (x0, y0) up and to the right
+        return photo_geom.RoomBox(np.array([k * (x0 + 0.6) / 2, k * (y0 + 1.0) / 2, 4.93]), np.eye(3), np.array([k * (0.6 - x0) / 2 - 0.03, k * (1.0 - y0) / 2 - 0.03, 0.0]))
+
+    three_hidden, four_hidden = flat(0.46, 0.36), flat(0.46, 0.34)  # the samples are at x 0.45 0.47 0.49 and y 0.35 0.37 0.39
+    assert photo_geom.occluded_mask(camera.centre, samples, [three_hidden]).sum() == 3
+    assert photo_geom.occluded_mask(camera.centre, samples, [four_hidden]).sum() == 4
+    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=[three_hidden])[0].corners == (True, True, True, True)
+    assert photo_geom.rect_views([camera], RECT, wall, TOWARDS_VIEWER, boxes=[four_hidden])[0].corners == (True, True, False, True)
+
+
+def _corner_cos(camera):
+    to = camera.centre - RECT
+    return (to @ TOWARDS_VIEWER) / np.linalg.norm(to, axis=1)
+
+
+def test_a_far_corner_seen_at_a_grazing_angle_is_not_counted(tmp_path):
+    wall = _plane(5.0, 4.0, 3.0)
+    close = _camera("close", np.array([1.2, 0.0, 4.1]), CENTRE, tmp_path, f=400.0)  # 60 degrees at the centre, 63 at the far corners
+    to_centre = close.centre - CENTRE
+    assert to_centre @ TOWARDS_VIEWER / np.linalg.norm(to_centre) == pytest.approx(0.6, abs=0.01)
+    assert _corner_cos(close)[[0, 3]].max() < 0.5 < _corner_cos(close)[[1, 2]].min()
+    assert photo_geom.rect_views([close], RECT, wall, TOWARDS_VIEWER)[0].corners == (False, True, True, False)  # the near corners only
+
+
+def test_a_view_with_strong_perspective_is_dropped(tmp_path):
+    wall = _plane(5.0, 4.0, 3.0)
+    close = _camera("close", np.array([0.9, 0.0, 4.325]), CENTRE, tmp_path, f=400.0)  # the near edge is twice the far one
+    uv, _ = photo_geom.project(close, RECT)
+    near, far = np.linalg.norm(uv[2] - uv[1]), np.linalg.norm(uv[3] - uv[0])
+    assert min(near, far) / max(near, far) < 0.5 and photo_geom.project(close, RECT)[1].min() > 0.3
+    assert photo_geom.rect_views([close], RECT, wall, TOWARDS_VIEWER) == []
+
+
+def test_a_corner_near_the_image_border_is_not_counted(tmp_path):
+    wall = _plane(5.0, 4.0, 3.0)
+    inside = _camera("inside", CENTRE + np.array([0.0, 0.0, -3.0]), CENTRE + np.array([0.3, 0.0, 0.0]), tmp_path)  # corners at 591 px of 640
+    edge = _camera("edge", CENTRE + np.array([0.0, 0.0, -3.0]), CENTRE + np.array([0.4, 0.0, 0.0]), tmp_path)  # at 627 px, 2 % from the border
+    assert photo_geom.rect_views([inside], RECT, wall, TOWARDS_VIEWER)[0].corners == (True,) * 4
+    assert photo_geom.rect_views([edge], RECT, wall, TOWARDS_VIEWER)[0].corners == (False, True, True, False)

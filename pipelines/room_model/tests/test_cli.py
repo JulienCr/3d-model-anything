@@ -62,7 +62,7 @@ def test_all_runs_stages_in_order(tmp_path, monkeypatch):
 
         _fake_stage(monkeypatch, stage, run)
     assert _run(tmp_path, "all") == 0
-    assert order == ["registration", "shell", "model", "export", "openings", "vision", "architecture", "blender"]
+    assert order == ["registration", "shell", "model", "export", "openings", "vision", "architecture", "textures", "blender"]
 
 
 def test_vision_placeholder_and_stale_architecture_rerun(tmp_path, monkeypatch):
@@ -85,6 +85,28 @@ def test_vision_placeholder_and_stale_architecture_rerun(tmp_path, monkeypatch):
     os.utime(answers, ns=(time.time_ns() + 10**10,) * 2)  # answers newer than architecture.json
     assert _run(tmp_path, "architecture") == 0  # merge them again
     assert [c[0] for c in calls].count("architecture") == 2
+
+
+def test_textures_and_blender_rerun_when_their_inputs_are_newer(tmp_path, monkeypatch):
+    calls = []
+    for stage in ("architecture", "textures", "blender"):
+        def run(ctx, stage=stage):
+            calls.append(stage)
+            out = ctx.out / STAGE_OUTPUTS[stage]
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("{}")
+            return out
+
+        _fake_stage(monkeypatch, stage, run)
+    assert _run(tmp_path, "all") == 0 and _run(tmp_path, "all") == 0
+    assert calls.count("textures") == calls.count("blender") == 1
+    out = tmp_path / "out"
+    os.utime(out / STAGE_OUTPUTS["architecture"], ns=(time.time_ns() + 10**10,) * 2)
+    assert _run(tmp_path, "all") == 0
+    assert calls.count("textures") == calls.count("blender") == 2  # the new architecture reaches the textures and the scene
+    os.utime(out / STAGE_OUTPUTS["textures"], ns=(time.time_ns() + 2 * 10**10,) * 2)
+    assert _run(tmp_path, "all") == 0
+    assert calls.count("textures") == 2 and calls.count("blender") == 3
 
 
 def _synthetic(build, tmp_path):

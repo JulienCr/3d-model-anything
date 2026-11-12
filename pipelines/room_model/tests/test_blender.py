@@ -177,13 +177,93 @@ def scene(tmp_path_factory):
     return ctx, arch, json.loads(facts_path.read_text(encoding="utf-8"))
 
 
-def _probe(ctx, arch_path, rays=(), spans=()):
-    spec = {"rays": list(rays), "rigs": [], "spans": list(spans), "arch": str(arch_path), "blender_dir": str(BLENDER_DIR)}
+def _probe(ctx, arch_path, rays=(), spans=(), texel_rays=()):
+    spec = {"rays": list(rays), "rigs": [], "spans": list(spans), "texel_rays": list(texel_rays), "arch": str(arch_path), "blender_dir": str(BLENDER_DIR)}
     spec_path, facts_path = ctx.out / "spec.json", ctx.out / "facts.json"
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
     blender_stage.run_blender(["--background", ctx.out / "architecture.blend", "--python-exit-code", "1", "--python", PROBE,
                                "--", spec_path, facts_path], ctx.out / "probe.log")
     return json.loads(facts_path.read_text(encoding="utf-8"))
+
+
+GRID_U, GRID_V = (0.12, 0.37, 0.63, 0.88), (0.2, 0.5, 0.8)
+
+
+@pytest.fixture(scope="module")
+def textured_scene(tmp_path_factory):
+    """A scene whose textures encode their own texel coordinates (red: u, green: v), with rays cast at known points of every surface."""
+    from room_model import textures
+    ctx, _ = make_case(tmp_path_factory.mktemp("textured"), "textured", window=True, partition=True, partition_opening=True,
+                       partition_opening_width=0.6)
+    for stage in (shell, model, openings, architecture):
+        stage.run(ctx)
+    arch = json.loads(output_path(ctx, "architecture").read_text(encoding="utf-8"))
+    folder = ctx.out / "textures"
+    folder.mkdir()
+    doc, rays = {}, []
+    for s in textures.surfaces_of(arch):
+        nu, nv = s.size
+        pixels = np.zeros((nv, nu, 3), np.uint8)
+        pixels[..., 0] = ((np.arange(nu) + 0.5) / nu * 255).astype(np.uint8)
+        pixels[..., 1] = (((np.arange(nv) + 0.5) / nv * 255).astype(np.uint8))[:, None]
+        name = f"{s.element}_{s.face}.png"
+        Image.fromarray(pixels[::-1]).save(folder / name)
+        doc.setdefault(s.element, {})[s.face] = {
+            "image": f"textures/{name}", "origin": list(s.origin), "u_axis": list(s.u_axis), "v_axis": list(s.v_axis),
+            "normal": list(s.normal), "texel": textures.TEXEL, "size": [nu, nv], "coverage": 1.0}
+        for fu in GRID_U:
+            for fv in GRID_V:
+                p = s.origin + fu * nu * textures.TEXEL * s.u_axis + fv * nv * textures.TEXEL * s.v_axis
+                rays.append({"name": f"{s.element}/{s.face}/{fu}/{fv}", "object": s.element,
+                             "origin": _blender_point(*(p + 0.5 * s.normal)), "direction": _blender_point(*(-s.normal))})
+    (folder / "textures.json").write_text(json.dumps(doc), encoding="utf-8")
+    blender_stage.run(ctx)
+    return ctx, arch, doc, _probe(ctx, output_path(ctx, "architecture"), texel_rays=rays)
+
+
+@needs_blender
+def test_blender_uv(textured_scene):
+    _, _, doc, facts = textured_scene
+    hits = {}
+    for name, texel in facts["texels"].items():
+        element, face, fu, fv = name.split("/")
+        if not texel["hit"]:
+            continue
+        nu, nv = doc[element][face]["size"]
+        hits[(element, face)] = hits.get((element, face), 0) + 1
+        assert texel["material"] == f"Tex_{element}_{face}", name
+        assert texel["rgb"][0] / 255 == pytest.approx(float(fu), abs=1.5 / nu + 0.01), name
+        assert texel["rgb"][1] / 255 == pytest.approx(float(fv), abs=1.5 / nv + 0.01), name
+    expected = {(e, f) for e, faces in doc.items() for f in faces}
+    assert set(hits) == expected and min(hits.values()) >= 4, "every surface is hit by several rays, cuts left aside"
+    assert {"Floor", "Ceiling_1", "Partition_P1"} <= set(doc) and set(doc["Partition_P1"]) == {"A", "B"}
+
+
+@needs_blender
+def test_textures_leave_the_other_faces_on_the_named_material(textured_scene):
+    _, arch, doc, facts = textured_scene
+    for element, faces in doc.items():
+        assert facts["objects"][element]["materials"][0] in ("Mur", "Sol", "Plafond")
+        assert facts["objects"][element]["materials"][1:] == [f"Tex_{element}_{face}" for face in faces]
+    assert {"Mur", "Sol", "Plafond", "Menuiserie", "Verre", "Moulure"} <= set(facts["materials"])
+
+
+@needs_blender
+def test_textured_glb_embeds_small_jpegs(textured_scene):
+    ctx, _, doc, _ = textured_scene
+    path = ctx.out / "architecture.glb"
+    gltf = read_glb(path)
+    surfaces = sum(len(faces) for faces in doc.values())
+    assert len(gltf["images"]) >= surfaces and {i["mimeType"] for i in gltf["images"]} == {"image/jpeg"}
+    assert path.stat().st_size < 2_000_000
+
+
+@needs_blender
+def test_perspective_render_shows_the_textures(textured_scene):
+    ctx, _, _, _ = textured_scene
+    rgb = np.asarray(Image.open(ctx.out / "renders" / "persp_1.png").convert("RGB"), int)
+    coloured = ((rgb[..., :2].max(axis=2) - rgb[..., 2]) > 30).mean()  # the encoded textures have no blue, the plain materials are nearly grey
+    assert coloured > 0.3
 
 
 @pytest.fixture(scope="module")
@@ -286,6 +366,7 @@ def test_scene_objects(scene):
     assert {"Mur", "Sol", "Plafond", "Menuiserie", "Verre", "Moulure"} <= set(facts["materials"])
     walls = [facts["objects"][e["id"]] for e in arch["elements"] if e["kind"] in ("wall", "partition")]
     assert all(o["modifiers"] == 0 and o["non_manifold"] == 0 and o["materials"] == ["Mur"] for o in walls)
+    assert all(o["bare_faces"] == 0 for o in walls), "a boolean cut must not leave faces on an empty material slot"
     assert facts["objects"]["Floor"]["materials"] == ["Sol"] and facts["objects"]["Ceiling_1"]["materials"] == ["Plafond"]
     assert not any("utter" in name for name in facts["objects"]) and not facts["scene_objects"]
     orphans = [e["id"] for e in arch["elements"] if "host" in e and e["host"] is None]
