@@ -84,7 +84,8 @@ def test_parameters_list_every_source_and_flag_a_conflict(ctx):
     door = next(e for e in _arch(ctx)["elements"] if e["id"] == "Door_1")
     entry = doc["parameters"][door["params"]["width"]]
     assert [s["source"] for s in entry["sources"]][-1] == "tape" and entry["retained"]["source"] == "tape"
-    assert len(entry["sources"]) == 2 and "conflict" in entry["flags"] and "measure:Door_1-w" in entry["actions"]
+    assert len(entry["sources"]) == 2 and "conflict" in entry["flags"]
+    assert entry["actions"] == ["measure:Door_1-leaf-w"]  # a door is surveyed through its leaf row
     assert "Paramètres en désaccord" in md
 
 
@@ -212,7 +213,7 @@ def test_actions_are_explained_and_failures_indexed_by_element(ctx):
     arch = _arch(ctx)
     width = next(d for d in arch["dimensions"] if d["id"] == "Door_1-w")
     doc, md = _run(ctx, {"Door_1-w": round(width["value"] + 0.20, 4)})
-    assert "`measure:Door_1-w` : mesurer au mètre la cote Door_1-w" in md
+    assert "`measure:Door_1-leaf-w` : mesurer au mètre la cote Door_1-leaf-w" in md
     assert "Infinity" not in json.dumps(doc) and isinstance(doc["elements"], dict)
     assert reconcile.explain("prefer:opening.Door_1.height:lidar").startswith("revenir pour opening.Door_1.height à la valeur LiDAR")
 
@@ -269,8 +270,21 @@ def test_every_measure_action_names_a_row_of_the_survey(ctx):
     b_dir = reconcile._direction(b)
     b["end"] = [b["end"][0] - 0.3 * b_dir[1], b["end"][1] + 0.3 * b_dir[0]]  # a corner far out of square
     outline[2]["start"] = list(b["end"])
+    door = _element(arch, "Door_1")
+    _set(arch, door, "center_s", reconcile._length(_element(arch, door["host"])) + 0.2)  # out of its wall
+    arch["parameters"][door["params"]["height"]]["value"] += 1.0  # and through the ceiling
+    twin = copy.deepcopy(_element(arch, "Window_1"))
+    twin["id"] = "Window_9"
+    arch["elements"].append(twin)  # two windows on one another
+    door["params"]["leaf_width"] = "opening.Door_1.leaf_width"
+    arch["parameters"]["opening.Door_1.leaf_width"] = {"value": 3.0, "sigma": 0.005, "unit": "m", "source": "photo"}
     actions = [x for c in reconcile.element_checks(arch) for x in c["actions"] if x.startswith("measure:")]
+    layers = [("scan", _arch(ctx)), ("tape", copy.deepcopy(_arch(ctx)))]
+    layers[1][1]["parameters"][door["params"]["width"]].update(value=9.0, source="tape")
+    actions += [x for x in reconcile.build(layers, None)["actions"] if x.startswith("measure:")]
     from room_model import survey_page
 
     rows = {r.dim["id"] for r in survey_page.numbered_rows(_arch(ctx))}
-    assert actions and all(x.removeprefix("measure:") in rows for x in actions)
+    assert {"measure:Door_1-leaf-w", "measure:Door_1-leaf-h", "measure:Window_1-leaf-w"} <= set(actions)
+    actions = [x for x in actions if "Window_9" not in x]  # the twin exists only in this test
+    assert all(x.removeprefix("measure:") in rows for x in actions), set(actions) - {f"measure:{r}" for r in rows}

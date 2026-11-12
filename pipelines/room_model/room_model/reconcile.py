@@ -28,14 +28,18 @@ VERDICT_WORDS = {"ok": "cohérent", "conflict": "incohérent", "probable_tape_er
 # --- sources ---------------------------------------------------------------------------------------------------------
 
 def _dims_of_params(arch: dict) -> dict:
-    """{parameter id: [dimension ids]} for the dimensions whose value is one parameter."""
+    """{parameter id: [survey row ids]} for the dimensions whose value is one parameter (a door or window hole is
+    surveyed through its leaf rows)."""
     elements = {e["id"]: e for e in arch["elements"]}
     out = {}
     for dim in arch["dimensions"]:
         name = {**OPENING_PARAMS, "ceiling_height": "level"}.get(dim["kind"])
         el = elements.get(dim["elements"][0]) if dim["elements"] else None
         if name and el is not None and name in el["params"]:
-            out.setdefault(el["params"][name], []).append(dim["id"])
+            row = dim["id"]
+            if el["kind"] in LEAF_ROWS and dim["kind"] in ("opening_width", "opening_height"):
+                row = _row(el, "w" if dim["kind"] == "opening_width" else "h").removeprefix("measure:")  # the survey's row
+            out.setdefault(el["params"][name], []).append(row)
     return out
 
 
@@ -232,6 +236,14 @@ def _implied(k: str, raw: dict, failing) -> dict:
 
 # --- element checks --------------------------------------------------------------------------------------------------
 
+LEAF_ROWS = ("door", "window")  # the survey measures these by their leaf: `-leaf-w`, `-leaf-h` rows, not `-w`, `-h`
+
+
+def _row(el: dict, size: str) -> str:
+    """The survey row measuring `size` ("w" or "h") of an opening."""
+    return f"measure:{el['id']}-{'leaf-' if el['kind'] in LEAF_ROWS else ''}{size}"
+
+
 def _rect(arch: dict, el: dict) -> tuple[float, float, float, float, float, float]:
     """(s0, s1, y0, y1, sigma along, sigma up) of an opening on its host."""
     p = {k: _value(arch, v) for k, v in el["params"].items()}
@@ -259,7 +271,7 @@ def element_checks(arch: dict) -> list[dict]:
         top = _value(arch, host["params"]["top"]) - _value(arch, "floor.level") if "top" in host["params"] else np.inf
         along, up = max(0.0, -s0, s1 - _length(host)), max(0.0, y1 - top)
         over = max(along, up)
-        actions = ([f"measure:{el['id']}-w"] if along > Z * ss else []) + ([f"measure:{el['id']}-h"] if up > Z * sy else [])
+        actions = ([_row(el, "w")] if along > Z * ss else []) + ([_row(el, "h")] if up > Z * sy else [])
         out.append({"id": f"inside:{el['id']}", "kind": "opening_inside_host", "verdict": "conflict" if actions else "ok",
                     "residual": over, "sigma": max(ss, sy), "elements": [el["id"], host["id"]], "actions": actions})
     for i, a in enumerate(openings):
@@ -274,7 +286,7 @@ def element_checks(arch: dict) -> list[dict]:
             smaller = min((a, b), key=lambda e: (_rect(arch, e)[1] - _rect(arch, e)[0]) * (_rect(arch, e)[3] - _rect(arch, e)[2]))
             out.append({"id": f"overlap:{a['id']}:{b['id']}", "kind": "opening_overlap", "verdict": _verdict(overlap, sigma),
                         "residual": overlap, "sigma": sigma, "elements": [a["id"], b["id"]],
-                        "actions": [f"override:{smaller['id']}:remove", f"measure:{a['id']}-w", f"measure:{b['id']}-w"]})
+                        "actions": [f"override:{smaller['id']}:remove", _row(a, "w"), _row(b, "w")]})
     for el in openings:
         for name, suffix in (("width", "leaf-w"), ("height", "leaf-h")):
             pid = el["params"].get(f"leaf_{name}")
@@ -283,7 +295,7 @@ def element_checks(arch: dict) -> list[dict]:
             excess, tol = leaf_excess(arch, el, name, arch["parameters"][pid], arch["parameters"][el["params"][name]])
             out.append({"id": f"leaf:{el['id']}:{name}", "kind": "leaf_fits", "verdict": "conflict" if excess > tol else "ok",
                         "residual": excess, "sigma": tol, "elements": [el["id"]],
-                        "actions": [f"measure:{el['id']}-{suffix}", f"measure:{el['id']}-{suffix[-1]}"] if excess > tol else []})
+                        "actions": [f"measure:{el['id']}-{suffix}"] if excess > tol else []})
     out += _corners(arch) + _wall_tops(arch) + _outline_check(arch)
     return out
 

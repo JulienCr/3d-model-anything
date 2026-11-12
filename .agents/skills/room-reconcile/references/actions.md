@@ -9,8 +9,10 @@ Ask the user to measure that dimension with the tape. The id is a row of the sur
 When they answer, write the value into `measurements.json` v2 and keep their note:
 
 ```json
-{"version": 2, "values": {"Door_3-h": {"value_m": 2.103, "date": "2026-11-12", "note": "remesuré"}}}
+{"version": 2, "values": {"Door_3-leaf-h": {"value_m": 2.003, "date": "2026-11-12", "note": "remesuré"}}}
 ```
+
+- **Doors and windows** are surveyed by their leaf: the actions name `<id>-leaf-w` / `<id>-leaf-h` (the leaf, or both leaves together), never the hole `-w` / `-h`, which is the outer extent with the casings. Niches and bare openings keep `-w`, `-h`, `-sill`.
 
 - **Re-measure after a `probable_tape_error`:** the pipeline already keeps the value out of the model (`tape_set_aside`), so leave the entry and overwrite `value_m` when the new reading arrives. `{"value_m": null, "note": "..."}` is the form for a value the user withdraws: a note without a value is kept and never applied.
 - **Stations:** `S..` rows are the distance between two parallel walls at a marked spot. Remind the user which one a row is before they measure again.
