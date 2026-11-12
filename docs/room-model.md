@@ -1,3 +1,5 @@
+Guide de l'opérateur (HTML, du scan à Blender) : [room-model-guide.html](room-model-guide.html)
+
 # Room model pipeline (CPU, Python)
 
 Turns a House Capture export (`house-capture/5`) into a measured architectural model of one room: walls, floor, ceilings, beams and columns, with a sigma on every measurement. Milestone M1 measures the shell; milestone M1.5 adds openings, photo-anchored fixture edges, a vision pass, an architecture description and a Blender scene. `docs/specs/room-model-pipeline.md` holds the decisions.
