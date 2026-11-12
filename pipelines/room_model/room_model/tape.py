@@ -23,12 +23,12 @@ def compare(arch: dict, tape: dict) -> str:
         if dim is None:
             unknown.append(dim_id)
             continue
-        corrected = "scan_value" in dim
-        scan, sigma = (dim["scan_value"], dim.get("scan_sigma", dim["sigma"])) if corrected else (dim["value"], dim["sigma"])
+        scan, sigma = (dim["scan_value"], dim.get("scan_sigma", dim["sigma"])) if "scan_value" in dim else (dim["value"], dim["sigma"])
+        llm_value = dim.get("llm_value", dim["value"] if "scan_value" in dim and dim["source"] != "tape" else None)
         gap = measured - scan
         gaps.append((abs(gap), dim_id, gap))
-        llm = fr(dim["value"] * 100) if corrected else NONE
-        llm_gap = signed_cm(measured - dim["value"]) if corrected else NONE
+        llm = NONE if llm_value is None else fr(llm_value * 100)
+        llm_gap = NONE if llm_value is None else signed_cm(measured - llm_value)
         verdict = "dans l'incertitude du scan" if abs(gap) <= 2 * sigma else "hors de l'incertitude du scan"
         rows.append(f"| {dim_id} | {dim['label']} | {fr(scan * 100)} | {llm} | {fr(measured * 100)} | {signed_cm(gap)} | {llm_gap} | {verdict} |")
     out = ["# Comparaison au mètre ruban", "",

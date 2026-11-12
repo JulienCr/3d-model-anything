@@ -19,7 +19,7 @@ from room_model.fmt import fr
 from room_model.photo_geom import DepthMaps, PosedPhoto, best_views, load_posed_photos, load_room_mesh, occluded_fraction, project, room_boxes, to_upright, upright, upright_size
 
 GROUP = {"opening_width": 0, "opening_height": 0, "opening_sill": 0, "width": 1, "length": 1, "ceiling_height": 2}
-SOURCES = {"lidar": "LiDAR", "roomplan": "RoomPlan", "assumed": "valeur supposée", "llm": "LLM"}
+SOURCES = {"lidar": "LiDAR", "roomplan": "RoomPlan", "assumed": "valeur supposée", "llm": "LLM", "tape": "mètre ruban"}
 PRIORITY_SIGMA = 0.02  # m
 PRIORITY_SOURCES = ("roomplan", "llm", "assumed")
 BADGE = "à reprendre en priorité"
@@ -45,7 +45,7 @@ class Row:
 
 
 def is_priority(dim: dict) -> bool:
-    return dim["sigma"] >= PRIORITY_SIGMA or dim["source"] in PRIORITY_SOURCES or bool(dim["flags"])
+    return dim["source"] != "tape" and (dim["sigma"] >= PRIORITY_SIGMA or dim["source"] in PRIORITY_SOURCES or bool(dim["flags"]))
 
 
 def numbered_rows(arch: dict) -> list[Row]:
@@ -121,9 +121,14 @@ def _describe(dim: dict, arch: dict) -> str:
 
 
 def _values(dim: dict) -> str:
-    if "scan_value" in dim:
-        return f"Scan : {fr(dim['scan_value'] * 100)} cm · LLM : {fr(dim['value'] * 100)} cm"
-    return f"Scan : {fr(dim['value'] * 100)} cm"
+    """Scan value, then the LLM and tape values when they were applied."""
+    llm = dim.get("llm_value", dim["value"] if "scan_value" in dim and dim["source"] != "tape" else None)
+    parts = [f"Scan : {fr(dim.get('scan_value', dim['value']) * 100)} cm"]
+    if llm is not None:
+        parts.append(f"LLM : {fr(llm * 100)} cm")
+    if dim["source"] == "tape":
+        parts.append(f"Mètre : {fr(dim['value'] * 100)} cm")
+    return " · ".join(parts)
 
 
 def _row_html(row: Row, arch: dict, crops: list[str], masked: bool = False) -> str:

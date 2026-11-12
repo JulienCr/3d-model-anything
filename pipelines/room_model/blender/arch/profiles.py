@@ -5,7 +5,6 @@ For architraves, a runs outward across the band from the opening edge and b out 
 """
 import math
 
-FALLBACK = "flat"
 RECT = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
 
 
@@ -43,7 +42,6 @@ PROFILES = {
                     (0.0, 0.7)],
     },
     "panel_frame": {
-        "flat": RECT,
         "quarter_round": [(0.0, 0.0), *_arc(0.0, 0.0, 1.0, 1.0, 0.0, 90.0)],
         "ogee": [(0.0, 0.0), (1.0, 0.0), *_s_curve((1.0, 0.3), (0.1, 1.0)), (0.0, 1.0)],
     },
@@ -51,8 +49,8 @@ PROFILES = {
 
 
 def resolve(kind: str, name: str | None) -> tuple[list[tuple[float, float]], bool]:
-    """(polygon, known) for a profile of `kind`; an unknown or missing name gives the flat profile and known=False."""
+    """(polygon, known) for a profile of `kind`; an unknown or missing name gives a plain rectangle and known=False."""
     table = PROFILES[kind]
     if name in table:
         return table[name], True
-    return table[FALLBACK], False
+    return RECT, False

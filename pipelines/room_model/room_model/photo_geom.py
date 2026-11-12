@@ -17,6 +17,7 @@ DEPTH_SIDE = 320  # px on the long side of the depth maps
 DEPTH_TOLERANCE = 0.03  # m; a point this much nearer than the nearest surface is still visible
 EDGE_MARGIN = 0.02  # fraction of the image kept clear of a point that must be visible
 MIN_DEPTH = 0.3
+PARALLEL_EPS = 1e-3  # |cos| between a ray and the plane normal below which the ray counts as parallel
 BOX_MARGIN = 0.03  # m; furniture boxes are grown by this much before the sight test
 SIGHT_SAMPLES = 9
 ROTATE = {1: Image.Transpose.ROTATE_90, 2: Image.Transpose.ROTATE_180, 3: Image.Transpose.ROTATE_270}
@@ -124,13 +125,23 @@ def project(photo: PosedPhoto, pts_room: np.ndarray) -> tuple[np.ndarray, np.nda
     return uv, depth
 
 
-def backproject(photo: PosedPhoto, uv_sensor: np.ndarray, plane: tuple[np.ndarray, float]) -> np.ndarray:
-    """Room-frame points where the rays through sensor pixels meet the plane n . x = offset; (n, 3)."""
+def backproject(photo: PosedPhoto, uv_sensor: np.ndarray, plane: tuple[np.ndarray, float]) -> np.ndarray | None:
+    """Room-frame points (n, 3) where the rays through sensor pixels meet the plane n . x = offset.
+
+    None when any ray is parallel to the plane or meets it behind the camera: no point is a better answer than a
+    point at infinity or on the wrong side.
+    """
     uv = np.atleast_2d(np.asarray(uv_sensor, float))
     normal, offset = np.asarray(plane[0], float), float(plane[1])
     rays_cam = np.column_stack([uv, np.ones(len(uv))]) @ np.linalg.inv(photo.K).T
     rays = rays_cam @ photo.c2w_room[:3, :3].T
-    t = (offset - normal @ photo.centre) / (rays @ normal)
+    rays /= np.linalg.norm(rays, axis=1, keepdims=True)
+    slope = rays @ normal
+    if (np.abs(slope) < PARALLEL_EPS * np.linalg.norm(normal)).any():
+        return None
+    t = (offset - normal @ photo.centre) / slope
+    if not (np.isfinite(t).all() and (t > 0).all()):
+        return None
     return photo.centre + t[:, None] * rays
 
 

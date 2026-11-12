@@ -64,6 +64,81 @@ def wall_mesh(start, end, normal, thickness: float, y0: float, y1: float, extend
     return prism(np.array([a, b, b - normal * thickness, a - normal * thickness]), y0, y1)
 
 
+NEAR_PARALLEL = float(np.sin(np.radians(10.0)))  # |sin| of the turn under which two walls count as parallel
+JOIN_TOL, CORNER_SHIFT = 0.02, 2.0  # walls join when one's end is within JOIN_TOL m of the next start; an intersection further than CORNER_SHIFT thicknesses off is cut at the bisector
+
+
+def _convex(poly: np.ndarray) -> bool:
+    edges = np.roll(poly, -1, axis=0) - poly
+    cross = edges[:, 0] * np.roll(edges, -1, axis=0)[:, 1] - edges[:, 1] * np.roll(edges, -1, axis=0)[:, 0]
+    cross = cross[np.abs(cross) > 1e-12]
+    return len(cross) > 0 and bool((cross > 0).all() or (cross < 0).all())
+
+
+def mitred_wall_footprints(walls: list[dict]) -> list[np.ndarray]:
+    """Plan footprints [start face, end face, end back, start back] of walls mitred where one ends on the next one's start.
+
+    A wall is {"start", "end", "normal", "offset", "thickness"}: raw corners, unit interior normal, face line n.p = offset.
+    Test-side twin of the Blender scene builder (blender/arch/plan.py); the GLB export keeps `wall_mesh`.
+    """
+    lines = []
+    for w in walls:
+        n, t = np.asarray(w["normal"], float), float(w["thickness"])
+        u = np.array([-n[1], n[0]])
+        lines.append({"n": n, "u": u if u @ (np.asarray(w["end"]) - np.asarray(w["start"])) >= 0 else -u,
+                      "o": float(w["offset"]), "t": t})
+
+    def meet(a, b, back):
+        oa, ob = a["o"] - back * a["t"], b["o"] - back * b["t"]
+        return np.linalg.solve(np.array([a["n"], b["n"]]), [oa, ob])
+
+    def along(line, back, point, d):
+        if abs(line["n"] @ d) < 0.2 * np.linalg.norm(d):
+            return None
+        return point + d * ((line["o"] - back * line["t"] - line["n"] @ point) / (line["n"] @ d))
+
+    def joint(la, lb, corner):
+        if abs(la["u"][0] * lb["u"][1] - la["u"][1] * lb["u"][0]) >= NEAR_PARALLEL:
+            inner, outer = meet(la, lb, 0), meet(la, lb, 1)
+            limit = CORNER_SHIFT * max(la["t"], lb["t"])
+            if np.linalg.norm(inner - corner) <= limit and np.linalg.norm(outer - corner) <= limit + la["t"] + lb["t"]:
+                return (inner, outer), (inner, outer)
+        if la["n"] @ lb["n"] <= 0:
+            return None
+        d = la["n"] + lb["n"]
+        cuts = [tuple(along(line, back, corner, d) for back in (0, 1)) for line in (la, lb)]
+        if any(p is None for cut in cuts for p in cut):
+            return None
+        spans = [sorted(float(la["n"] @ p) for p in cut) for cut in cuts]
+        if max(spans[0][0], spans[1][0]) > min(spans[0][1], spans[1][1]):  # a gap between the two bodies: they meet along one edge
+            points = [p for cut in cuts for p in cut]
+            edge = (max(points, key=lambda p: la["n"] @ p), min(points, key=lambda p: la["n"] @ p))
+            return edge, edge
+        return tuple(cuts)
+
+    cuts = [{} for _ in walls]
+    for i, a in enumerate(walls):
+        for j, b in enumerate(walls):
+            if i == j or np.linalg.norm(np.asarray(a["end"]) - np.asarray(b["start"])) > JOIN_TOL:
+                continue
+            corner = (np.asarray(a["end"], float) + np.asarray(b["start"], float)) / 2
+            found = joint(lines[i], lines[j], corner)
+            if found is not None:
+                cuts[i]["end"], cuts[j]["start"] = found
+    out = []
+    for w, line, cut in zip(walls, lines, cuts):
+        def free(point, line=line, back=False):
+            p = np.asarray(point, float)
+            return p + line["n"] * (line["o"] - back * line["t"] - line["n"] @ p)
+
+        start, end = cut.get("start", (free(w["start"]), free(w["start"], back=True))), cut.get("end", (free(w["end"]), free(w["end"], back=True)))
+        quad = np.array([start[0], end[0], end[1], start[1]])
+        if not _convex(quad):  # a wall too short for its mitres: square ends
+            quad = np.array([free(w["start"]), free(w["end"]), free(w["end"], back=True), free(w["start"], back=True)])
+        out.append(quad)
+    return out
+
+
 def beam_mesh(axis: list, width: float, y0: float, y1: float) -> Mesh:
     a, b = np.asarray(axis, float)
     t = (b - a) / np.linalg.norm(b - a)

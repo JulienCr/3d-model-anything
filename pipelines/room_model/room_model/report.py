@@ -218,3 +218,93 @@ def render(doc: dict, poses: dict | None = None) -> str:
     for title, body in r.sections():
         out += [f"## {title}", "", *body, ""]
     return "\n".join(out)
+
+
+PARAMETER_NAMES = {"kind": "nature", "through": "traversante", "dividers": "séparations", "shelves_count": "étagères", "width": "largeur", "height": "hauteur", "sill": "allège", "center_s": "position", "projection": "saillie",
+                   "type": "type", "hinge": "charnières", "swing": "sens d'ouverture", "panels": "panneaux", "handle": "poignée", "frame": "cadre"}
+CORRECTION_TITLES = ("Corrections LLM", "Mesures au mètre", "Corrections manuelles")
+
+
+def _cm(value) -> str:
+    return DASH if value is None else fr(value * 100)
+
+
+def _gap(delta) -> str:
+    from room_model.tape import signed_cm
+
+    return DASH if delta is None else signed_cm(delta)
+
+
+def _typed(value) -> str:
+    if isinstance(value, bool):
+        return "oui" if value else "non"
+    if isinstance(value, dict):
+        return f"{value['profile']}, {fr(value['width_cm'])} cm"
+    return DASH if value is None else str(value)
+
+
+def _llm_section(arch: dict) -> list[str]:
+    vision = arch["diagnostics"].get("vision")
+    if vision is None:
+        note = arch["diagnostics"].get("vision_unreadable")
+        return [f"Aucune réponse du LLM appliquée : fichier de réponses inutilisable ({note})." if note
+                else "Aucune réponse du LLM appliquée (étape vision non exécutée, ignorée ou en échec)."]
+    counts = (("corrigés (au moins deux vues d'accord à 3 cm)", "corrected"), ("corrigés sur une seule vue", "single_view"),
+              ("laissés tels quels (vues en désaccord)", "inconsistent"), ("déclarés", "declared"))
+    out = ["- " + " ; ".join(f"{len(vision[key])} {label}" for label, key in counts) + f" ; {len(vision['not_applied'])} non appliqués", ""]
+    rows = [[c["element"], PARAMETER_NAMES.get(c["parameter"], c["parameter"]), _cm(c["scan"]), _cm(c["llm"]),
+             _gap(None if c["scan"] is None else c["llm"] - c["scan"])] for c in vision["corrections"]]
+    rows += [[t["element"], PARAMETER_NAMES.get(t["field"], t["field"]), DASH, _typed(t["value"]), DASH] for t in vision["typing"]]
+    out += _table(["Élément", "Paramètre", "Scan (cm)", "LLM (cm)", "Écart (cm)"], rows) if rows else ["Aucune valeur corrigée ni déclarée."]
+    if vision["inconsistent"]:
+        out += ["", "Vues en désaccord, valeurs du scan conservées : " + ", ".join(vision["inconsistent"]) + "."]
+    if vision["single_view"]:
+        out += ["", "Corrigés sur une seule vue, à vérifier : " + ", ".join(vision["single_view"]) + "."]
+    if vision["not_applied"]:
+        out += ["", "Non appliqués :", ""] + [f"- {n['id']} : {n['reason']}" for n in vision["not_applied"]]
+    return out
+
+
+def _tape_section(arch: dict) -> list[str]:
+    tape = arch["diagnostics"].get("tape")
+    if tape is None:
+        return ["Aucune mesure au mètre fournie."]
+    rows = [[r["id"], _cm(r["scan"]), _cm(r["llm"]), _cm(r["tape"]), _cm(r["applied"]), r["effect"] or DASH] for r in tape["applied"]]
+    out = _table(["Cote", "Scan (cm)", "LLM (cm)", "Mètre (cm)", "Retenue (cm)", "Effet"], rows) if rows else ["Aucune cote appliquée."]
+    if tape["derived"]:
+        out += ["", "Cotes déplacées avec un mur recalé :", ""] + _table(
+            ["Cote", "Scan (cm)", "Retenue (cm)"], [[d["id"], _cm(d["scan"]), _cm(d["applied"])] for d in tape["derived"]])
+    if tape["not_applied"]:
+        out += ["", "Non appliquées :", ""] + [f"- {n['id']} : {n['reason']}" for n in tape["not_applied"]]
+    return out
+
+
+def _manual_section(arch: dict) -> list[str]:
+    manual = arch["diagnostics"].get("overrides")
+    if manual is None:
+        return ["Aucune correction manuelle fournie."]
+    rows = [[a["element"], PARAMETER_NAMES.get(a["field"], a["field"]), _typed(a["value"])] for a in manual["applied"]]
+    rows += [[i, "suppression", "oui"] for i in manual["removed"]]
+    out = _table(["Élément", "Champ", "Valeur"], rows) if rows else ["Aucune correction appliquée."]
+    if manual["rejected"]:
+        out += ["", "Refusées :", ""] + [f"- {r['id']}{'' if r['field'] is None else ' / ' + r['field']} : {r['reason']}" for r in manual["rejected"]]
+    return out
+
+
+def render_corrections(arch: dict) -> list[tuple[str, list[str]]]:
+    """The report sections that come from the architecture stage: LLM corrections, tape measurements, manual corrections."""
+    return [("Corrections LLM", _llm_section(arch)), ("Mesures au mètre", _tape_section(arch)), ("Corrections manuelles", _manual_section(arch))]
+
+
+def write_sections(path, arch: dict) -> None:
+    """Replaces the sections of `render_corrections` in the report at `path` (created when absent), keeping the others."""
+    kept, skipping = [], False
+    for line in (path.read_text(encoding="utf-8").splitlines() if path.exists() else [f"# Rapport de mesure — {arch['source']['capture']}"]):
+        if line.startswith("## "):
+            skipping = line[3:].strip() in CORRECTION_TITLES
+        if not skipping:
+            kept.append(line)
+    out = ["\n".join(kept).rstrip("\n"), ""]
+    for title, body in render_corrections(arch):
+        out += [f"## {title}", "", *body, ""]
+    path.write_text("\n".join(out), encoding="utf-8")

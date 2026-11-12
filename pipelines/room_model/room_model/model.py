@@ -16,7 +16,7 @@ from room_model.roomplan import Room, Station
 
 SCHEMA = "room-model/1"
 VERSION = "v1-scan"
-SOURCE_RANK = {"assumed": 0, "roomplan": 1, "lidar": 2}
+SOURCE_RANK = {"assumed": 0, "roomplan": 1, "lidar": 2, "llm": 3, "tape": 4}
 PARALLEL_COS = np.cos(np.radians(20.0))
 EXTENT_MARGIN = 0.10  # m past a wall end still counted as facing it
 AXES = {"x": np.array([1.0, 0.0]), "z": np.array([0.0, 1.0])}

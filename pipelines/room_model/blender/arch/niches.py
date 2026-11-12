@@ -14,9 +14,9 @@ def _boards(width: float, height: float, depth: float, dividers: int, shelves: l
     for k in range(1, dividers + 1):
         x = -width / 2 + width * k / (dividers + 1)
         out.append((f"Divider_{k}", (x - BOARD / 2, x + BOARD / 2, 0.0, depth, 0.0, height)))
-    for k, z in enumerate(sorted(shelves), start=1):
-        if BOARD / 2 <= z <= height - BOARD / 2:
-            out.append((f"Shelf_{k}", (-width / 2, width / 2, 0.0, depth, z - BOARD / 2, z + BOARD / 2)))
+    inside = [z for z in sorted(shelves) if BOARD / 2 <= z <= height - BOARD / 2]
+    for k, z in enumerate(inside, start=1):
+        out.append((f"Shelf_{k}", (-width / 2, width / 2, 0.0, depth, z - BOARD / 2, z + BOARD / 2)))
     return out
 
 

@@ -1,0 +1,257 @@
+{
+  "$comment": "Answer of the vision stage. Every field is optional; a field that is given must be valid. uv are pixels of the crop image, origin top-left, u right, v down.",
+  "type": "object",
+  "properties": {
+    "elements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "hinged_single",
+              "hinged_double",
+              "sliding",
+              "pocket",
+              "french_window",
+              "casement_single",
+              "casement_double",
+              "tilt_turn",
+              "fixed",
+              null
+            ]
+          },
+          "hinge": {
+            "enum": [
+              "left",
+              "right",
+              null
+            ]
+          },
+          "swing": {
+            "enum": [
+              "in",
+              "out",
+              null
+            ]
+          },
+          "panels": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8
+          },
+          "handle": {
+            "type": "boolean"
+          },
+          "frame": {
+            "$ref": "#/definitions/frame"
+          },
+          "corners": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/corners"
+            }
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      }
+    },
+    "new_elements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "kind",
+          "host_hint",
+          "corners"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "niche"
+            ]
+          },
+          "host_hint": {
+            "type": "string"
+          },
+          "through": {
+            "type": "boolean"
+          },
+          "dividers": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10
+          },
+          "shelves_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10
+          },
+          "frame": {
+            "$ref": "#/definitions/frame"
+          },
+          "corners": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/definitions/corners"
+            }
+          }
+        }
+      }
+    },
+    "cornice": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "profile",
+        "height_cm",
+        "projection_cm"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "enum": [
+            "cove",
+            "ogee",
+            "stepped",
+            "flat"
+          ]
+        },
+        "height_cm": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 60
+        },
+        "projection_cm": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 40
+        }
+      }
+    },
+    "skirting": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "profile",
+        "height_cm"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "enum": [
+            "flat",
+            "bevel",
+            "ogee"
+          ]
+        },
+        "height_cm": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 60
+        }
+      }
+    },
+    "panel_frames": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "host_hint",
+          "corners",
+          "profile"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "host_hint": {
+            "type": "string"
+          },
+          "corners": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/definitions/corners"
+            }
+          },
+          "profile": {
+            "enum": [
+              "quarter_round",
+              "ogee"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "corners": {
+      "$comment": "Four points in the order top-left, top-right, bottom-right, bottom-left of the quadrilateral as seen on the crop.",
+      "type": "object",
+      "required": [
+        "crop",
+        "uv"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "crop": {
+          "type": "string"
+        },
+        "uv": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "number"
+            }
+          }
+        }
+      }
+    },
+    "frame": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "profile",
+        "width_cm"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "enum": [
+            "flat",
+            "moulded"
+          ]
+        },
+        "width_cm": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 30
+        }
+      }
+    }
+  }
+}

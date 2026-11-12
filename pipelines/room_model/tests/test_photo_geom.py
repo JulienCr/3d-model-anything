@@ -55,6 +55,23 @@ def test_backproject_hits_wall(case):
     assert np.linalg.norm(hit[0] - corner) < 0.01
 
 
+def test_backproject_refuses_rays_that_never_meet_the_plane(case):
+    ctx, truth, photos = case
+    photo = photos[0]
+    centre = photo.c2w_room[:3, 3]
+    forward = photo.c2w_room[:3, 2]
+    plane_ahead = (forward, float(forward @ centre) + 3.0)
+    assert photo_geom.backproject(photo, np.array([[photo.K[0, 2], photo.K[1, 2]]]), plane_ahead) is not None
+    parallel = (photo.c2w_room[:3, 0], float(photo.c2w_room[:3, 0] @ centre) + 1.0)  # contains the optical axis direction
+    assert photo_geom.backproject(photo, np.array([[photo.K[0, 2], photo.K[1, 2]]]), parallel) is None
+    behind = (forward, float(forward @ centre) - 3.0)  # the plane lies behind the camera
+    assert photo_geom.backproject(photo, np.array([[photo.K[0, 2], photo.K[1, 2]]]), behind) is None
+    grazing = (photo.c2w_room[:3, 0], float(photo.c2w_room[:3, 0] @ centre) + 1.0)  # one ray meets it, the other is parallel
+    assert photo_geom.backproject(photo, np.array([[photo.K[0, 2] + 100.0, photo.K[1, 2]], [photo.K[0, 2], photo.K[1, 2]]]), grazing) is None
+    hit = photo_geom.backproject(photo, np.array([[photo.K[0, 2], photo.K[1, 2]]]), plane_ahead)
+    assert np.isfinite(hit).all() and hit[0] @ forward == pytest.approx(forward @ centre + 3.0)
+
+
 def test_depth_map_agrees_with_projection_of_the_lidar_mesh(case):
     ctx, truth, photos = case
     T = truth_to_room(ctx, truth)
