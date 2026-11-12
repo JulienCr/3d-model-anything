@@ -453,18 +453,25 @@ def _param_doc(m: dict) -> dict:
     return {"value": float(m["value"]), "sigma": float(m["sigma"]), "unit": "m", "source": "photo"}
 
 
-def _leaf_too_large(arch: dict, el: dict, names, item: dict, scan: dict) -> str | None:
-    """Why the leaf cannot fit its hole, or None: the leaf plus its visible jambs (one at the head of a door, which
-    has none at the floor) must stay within the outer extent plus that extent's sigma and the leaf's own."""
-    name = "width" if "width" in names else "height"
+def leaf_excess(arch: dict, el: dict, name: str, leaf: dict, hole: dict) -> tuple[float, float]:
+    """(excess, tolerance) in metres of a leaf `width` or `height` ({value, sigma}) over its hole ({value, sigma}):
+    the leaf plus its visible jambs (one at the head of a door, which has none at the floor) against the outer extent.
+    The leaf cannot fit when excess > tolerance (the extent's sigma plus the leaf's own)."""
     jambs = 2 if name == "width" or el["kind"] != "door" else 1
     pid = el["params"].get("jamb_width")
     jamb = arch["parameters"][pid]["value"] if pid else JAMB_VISIBLE
+    return leaf["value"] + jambs * jamb - hole["value"], hole["sigma"] + leaf["sigma"]
+
+
+def _leaf_too_large(arch: dict, el: dict, names, item: dict, scan: dict) -> str | None:
+    """Why the leaf cannot fit its hole (`leaf_excess` against the scanned extent, not an LLM click), or None."""
+    name = "width" if "width" in names else "height"
     pid = el["params"][name]
-    leaf, hole = item["measures"][name], scan.get(pid, arch["parameters"][pid])  # the scanned extent, not an LLM click
-    if leaf["value"] + jambs * jamb > hole["value"] + hole["sigma"] + leaf["sigma"]:
-        return (f"leaf {name} {leaf['value']:.3f} m + {jambs} jamb(s) {jamb:.3f} m exceeds the hole "
-                f"{hole['value']:.3f} +- {hole['sigma']:.3f} m")
+    leaf, hole = item["measures"][name], scan.get(pid, arch["parameters"][pid])
+    excess, tolerance = leaf_excess(arch, el, name, leaf, hole)
+    if excess > tolerance:
+        return (f"leaf {name} {leaf['value']:.3f} m with its jambs exceeds the hole {hole['value']:.3f} "
+                f"+- {hole['sigma']:.3f} m by {excess:.3f} m")
     return None
 
 

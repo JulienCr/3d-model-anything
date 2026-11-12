@@ -215,7 +215,7 @@ def _read(path: Path, label: str) -> dict:
 
 
 def run(ctx: StageContext) -> Path:
-    from room_model import report, survey_page
+    from room_model import reconcile, report, survey_page
 
     model_doc = json.loads(require(ctx, "model").read_text(encoding="utf-8"))
     openings_doc = json.loads(require(ctx, "openings").read_text(encoding="utf-8"))
@@ -238,4 +238,6 @@ def run(ctx: StageContext) -> Path:
     path.write_text(json.dumps(arch, indent=2), encoding="utf-8")
     survey_page.write(ctx, arch)
     report.write_sections(ctx.out / "report.md", arch)
+    reconcile.write(ctx, arch, {"model_doc": model_doc, "openings_doc": openings_doc, "vision": vision, "anchors": anchors,
+                                "picks": picks, "tape": tape, "overrides": overrides})
     return path
