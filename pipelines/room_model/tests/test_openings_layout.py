@@ -114,3 +114,12 @@ def test_the_pipeline_jamb_matches_the_scene_jamb():
 def test_an_explicit_zero_jamb_is_honoured():
     lay = _layout("door", width=0.9, jamb_width=0.0)
     assert lay.jamb == 0.0 and lay.leaf_w == pytest.approx(0.9) and lay.cut_w == pytest.approx(0.9)
+
+
+
+@pytest.mark.parametrize("leaf_centre", [2.5, -0.6, 1.44])
+def test_a_leaf_centred_outside_its_extent_never_gives_a_negative_cut(leaf_centre):
+    lay = _layout("door", width=0.9, leaf_width=0.7, leaf_height=2.0, leaf_center_s=leaf_centre)
+    low, high = lay.span
+    assert lay.cut_w >= openings.MIN_LEAF + 2 * J - 1e-9 and lay.leaf_w >= openings.MIN_LEAF
+    assert 1.0 - 0.45 - 1e-9 <= low < high <= 1.0 + 0.45 + 1e-9 and "to_verify" in lay.flags
