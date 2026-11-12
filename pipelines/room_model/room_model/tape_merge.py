@@ -126,7 +126,9 @@ def _move_wall(arch: dict, wall: dict, delta: float) -> None:
             if el.get("host") != host_id:
                 continue
             if "center_s" in el.get("params", {}):
-                arch["parameters"][el["params"]["center_s"]]["value"] -= shift
+                for name, pid in el["params"].items():  # the hole and its leaf, which share the host's s axis
+                    if name.endswith("center_s"):
+                        arch["parameters"][pid]["value"] -= shift
             elif el["kind"] == "panel_frame":
                 el["rect"] = [el["rect"][0] - shift, el["rect"][1], el["rect"][2] - shift, el["rect"][3]]
     for el in arch["elements"]:

@@ -628,8 +628,12 @@ def test_moving_a_wall_keeps_the_geometry_closed(env):
     station = _dim(env.arch, "S01")
     model_doc = copy.deepcopy(env.model_doc)
     model_doc["parameters"][_element(env.arch, "Wall_M1")["params"]["offset"]]["sigma"] = 0.1  # M1 is the wall that moves; M2 starts on it
-    arch = architecture.build(model_doc, env.openings_doc, None, {"S01": station["value"] - 0.04}, env.ctx)
+    leaf = _anchors(Door_1=_door(env))
+    before = architecture.build(model_doc, env.openings_doc, None, None, env.ctx, None, leaf)
+    arch = architecture.build(model_doc, env.openings_doc, None, {"S01": station["value"] - 0.04}, env.ctx, None, leaf)
     assert arch["diagnostics"]["tape"]["moved"][0]["wall"] == "Wall_M1"
+    offset = lambda a: _param(a, "Door_1", "leaf_center_s")["value"] - _param(a, "Door_1", "center_s")["value"]  # noqa: E731
+    assert offset(arch) == pytest.approx(offset(before), abs=1e-9)  # the anchored leaf follows its hole
     walls = [e for e in arch["elements"] if e["kind"] == "wall"]
     for w in walls:
         n = np.array([np.cos(arch["parameters"][w["params"]["azimuth"]]["value"]), np.sin(arch["parameters"][w["params"]["azimuth"]]["value"])])
