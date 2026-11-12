@@ -14,11 +14,15 @@ WALL_FLAGS = {
     "low_support": "appui LiDAR faible, ajustement peu fiable",
     "seeded_from_outline": "mur absent de la liste RoomPlan, initialisé depuis le contour du sol",
     "near_parallel_corner": "angle quasi plat avec un mur voisin, coin obtenu par projection",
+    "out_of_square": "hors équerre : écart supérieur à l'incertitude de mesure, angle mesuré conservé",
 }
 PARTITION_FLAGS = {
     "one_face_seen": "une seule face vue par le LiDAR, épaisseur supposée",
     "roomplan_fallback": "cloison non vue par le LiDAR, position RoomPlan conservée",
+    "out_of_square": WALL_FLAGS["out_of_square"],
 }
+CEILING_FLAGS = {"assumed": "niveau supposé : aucun point LiDAR dans la zone, repris du plus grand voisin"}
+SQUARING_STATE = {"squared": "équerré", "out_of_square": "hors équerre"}
 GENERAL_FLAGS = {
     "floor:roomplan_fallback": "sol non vu par le LiDAR, niveau RoomPlan conservé",
     "columns:no_ceiling": "aucun plafond détecté, poteaux non recherchés",
@@ -34,7 +38,7 @@ HORIZONTAL = {
     "suspended": "suspendu sous un plafond visible (luminaire, gaine, chemin de câbles)",
 }
 TO_VERIFY = "poutre probable, à confirmer (photos ou relevé)"
-SOURCES = {"lidar": "LiDAR", "roomplan": "RoomPlan", "assumed": "supposé"}
+SOURCES = {"lidar": "LiDAR", "roomplan": "RoomPlan", "assumed": "supposé", "llm": "LLM", "photo": "photos"}
 OBSTRUCTED = "obstacle_or_uneven_wall"
 UNOBSERVED_ALERT = 0.05  # share of the ceiling the LiDAR never saw above which an alert is raised
 STATION_FLAG = "section de mur encombrée ou irrégulière, mesure à prendre avec réserve"
@@ -73,7 +77,7 @@ class _Report:
         return [("Entrées", self.inputs()), ("Repère", self.frame()), ("Recalage", self.registration()),
                 ("Murs", self.walls()), ("Cloisons", self.partitions()), ("Sol", self.floor()), ("Plafonds", self.ceilings()), ("Poutres", self.beams()),
                 ("Poteaux", self.columns()), ("Surfaces verticales non expliquées", self.unexplained()), ("Éléments horizontaux non expliqués (réseaux, luminaires ?)", self.horizontal()),
-                ("Orthogonalité", self.orthogonality()), ("Alertes", self.alerts()), ("Épaisseurs", self.thickness())]
+                ("Équerrage", self.squaring()), ("Alertes", self.alerts()), ("Épaisseurs", self.thickness())]
 
     def inputs(self) -> list[str]:
         src, n = self.doc["source"], self.doc
@@ -107,7 +111,7 @@ class _Report:
         for el in self.els["wall"]:
             label, d = el["label"], self.diag["walls"][el["label"]]
             ids = [el["params"]["azimuth"], el["params"]["offset"]]
-            alerts = "; ".join(WALL_FLAGS.get(f, f) for f in el["flags"]) or DASH
+            alerts = "; ".join(WALL_FLAGS.get(f, f) for f in el["flags"] if f != "squared") or DASH
             rows.append([label, self.source(ids), fr(self.p(ids[1])["sigma"] * 100), _cell(d["rms_cm"], 2),
                          _cell(d["support_m2"]), f"{_cell(d['offset_vs_roomplan_cm'])} cm, {_cell(d['angle_vs_roomplan_deg'])}°",
                          _cell(d["tilt_deg"], 2) + ("" if d["tilt_deg"] is None else "°"), alerts])
@@ -118,7 +122,7 @@ class _Report:
         rows = []
         for el in self.els["partition"]:
             p, d = el["params"], support.get(el["id"], {})
-            alerts = "; ".join(PARTITION_FLAGS.get(f, f) for f in el["flags"]) or DASH
+            alerts = "; ".join(PARTITION_FLAGS.get(f, f) for f in el["flags"] if f != "squared") or DASH
             length = float(np.linalg.norm(np.subtract(el["end"], el["start"])))
             rows.append([el["label"], self.level(p["thickness"]), SOURCES[self.p(p["thickness"])["source"]],
                          fr(length, 2) + " m", f"{_cell(d.get('support_a_m2'))} / {_cell(d.get('support_b_m2'))}", alerts])
@@ -138,10 +142,10 @@ class _Report:
         for el in self.els["ceiling"]:
             c, pid = by_id.get(el["id"], {}), el["params"]["level"]
             rows.append([el["id"].split("_")[1], self.level(pid), fr((self.p(pid)["value"] - self.floor_y) * 100, 0) + " cm",
-                         _cell(c.get("area_m2")), _cell(c.get("support_m2"))])
+                         _cell(c.get("area_m2")), _cell(c.get("support_m2")), self.source([pid])])
         frac = self.diag.get("ceiling_unobserved_fraction")
         tail = [] if frac is None else ["", f"Part du plafond non observée par le LiDAR : {fr(frac * 100)} %"]
-        return _table(["Plafond", "Niveau y", "Hauteur sous plafond", "Surface m²", "Appui m²"], rows) + tail
+        return _table(["Plafond", "Niveau y", "Hauteur sous plafond", "Surface m²", "Appui m²", "Source"], rows) + tail
 
     def beams(self) -> list[str]:
         rows = []
@@ -180,26 +184,60 @@ class _Report:
                          fr(u["length"], 2) + " m", HORIZONTAL.get(u["reason"], u["reason"])])
         return _table(["Emprise", "Hauteur dessous", "Largeur", "Longueur", "Raison"], rows)
 
-    def orthogonality(self) -> list[str]:
-        lines = shell.wall_lines(self.doc)
+    def squaring(self) -> list[str]:
+        sq = self.diag.get("squaring")
+        if sq is None:
+            lines = shell.wall_lines(self.doc)
+            corners = []
+            for a, b in zip(lines[-1:] + lines[:-1], lines):
+                angle = float(np.degrees(np.arccos(np.clip(a["normal"] @ b["normal"], -1, 1))))
+                corners.append({"between": [a["label"], b["label"]], "measured_deg": angle, "retained_deg": angle})
+            sq = {"corners": corners, "walls": {}, "partitions": {}}
         rows = []
-        for a, b in zip(lines, lines[1:] + lines[:1]):
-            angle = float(np.degrees(np.arccos(np.clip(a["normal"] @ b["normal"], -1, 1))))
-            dev = min(abs(angle - ref) for ref in (0.0, 90.0, 180.0))
-            rows.append([f"{a['label']} → {b['label']}", fr(angle) + "°", fr(dev) + "°"])
-        return _table(["Murs consécutifs", "Angle entre normales", "Écart à l'angle droit ou à l'alignement"], rows)
+        for c in sq["corners"]:
+            a, b = c["between"]
+            dev = min(abs(c["retained_deg"] - ref) for ref in (0.0, 90.0, 180.0))
+            seen = {w: sq["walls"].get(w, {}) for w in (a, b)}
+            notes = [f"{w} hors équerre" for w, e in seen.items() if e.get("state") == "out_of_square"]
+            notes += [f"{w} équerre imposée" for w, e in seen.items() if e.get("forced")]
+            squared = any(e.get("state") == "squared" for e in seen.values())
+            rows.append([f"{a} → {b}", fr(c["measured_deg"]) + "°", fr(c["retained_deg"]) + "°", fr(dev) + "°",
+                         ", ".join(notes) or (SQUARING_STATE["squared"] if squared else DASH)])
+        out = _table(["Murs consécutifs", "Angle mesuré entre normales", "Angle retenu", "Écart retenu à l'angle droit ou à l'alignement", "État"], rows)
+        if "frame_deg" in sq:
+            out += ["", f"- Axes de la pièce : {fr(sq['frame_deg'], 2)}° par rapport au repère pièce ; un mur est équerré quand son écart à l'axe ne dépasse "
+                        f"pas max({fr(sq['floor_deg'], 0)}°, {fr(sq['sigmas'], 0)} σ de son azimut)"]
+        forced = [(f"Mur {k}", e) for k, e in sq["walls"].items()] + [(f"Cloison {k}", e) for k, e in sq["partitions"].items()]
+        out += [f"- {name} : équerre imposée, écart de {fr(e['deviation_deg'])}° soit {fr(e['deviation_deg'] / e['sigma_deg'])} σ (σ = {fr(e['sigma_deg'], 2)}°), "
+                "au-delà de l'incertitude mais sous la tolérance d'équerrage" for name, e in forced if e.get("forced")]
+        out += [f"- Cloison {label} : azimut mesuré {fr(p['measured_deg'])}°, écart {fr(p['deviation_deg'])}° à l'axe, {SQUARING_STATE[p['state']]}"
+                for label, p in sq["partitions"].items()]
+        return out
+
+    def flag_text(self, texts: dict, group: str, el: dict, flag: str) -> str:
+        entry = self.diag.get("squaring", {}).get(group, {}).get(el["label"])
+        if flag == "out_of_square" and entry:
+            return f"{texts[flag]} ({fr(entry['deviation_deg'])}° pour une tolérance de {fr(entry['tolerance_deg'])}°)"
+        return texts.get(flag, flag)
 
     def alerts(self) -> list[str]:
         out = []
         for el in self.els["wall"]:
-            out += [f"- Mur {el['label']} : {WALL_FLAGS.get(f, f)}" for f in el["flags"]]
+            out += [f"- Mur {el['label']} : {self.flag_text(WALL_FLAGS, 'walls', el, f)}" for f in el["flags"] if f != "squared"]
         out += [f"- {GENERAL_FLAGS[f]}" for f in self.diag["flags"] if f in GENERAL_FLAGS]
         known = set(GENERAL_FLAGS) | {f"{e['label']}:{f}" for e in self.els["wall"] + self.els["partition"] for f in e["flags"]}
         out += [f"- {f}" for f in self.diag["flags"] if f not in known]
-        out += [f"- Cloison {e['label']} : {PARTITION_FLAGS.get(f, f)}" for e in self.els["partition"] for f in e["flags"]]
+        out += [f"- Cloison {e['label']} : {self.flag_text(PARTITION_FLAGS, 'partitions', e, f)}" for e in self.els["partition"]
+                for f in e["flags"] if f != "squared"]
+        out += [f"- Plafond {e['id'].split('_')[1]} : {CEILING_FLAGS.get(f, f)}" for e in self.els["ceiling"] for f in e.get("flags", [])]
         out += [f"- Poutre {e['id'].split('_')[1]} : {TO_VERIFY}" for e in self.els["beam"] if "to_verify" in e.get("flags", [])]
         out += [f"- Mur RoomPlan hors du contour du sol (cloison ?), ignoré : {i}" for i in self.diag["off_outline_walls"]]
         out += [f"- Porte rattachée à un mur hors contour, ignorée : {i}" for i in self.diag.get("orphan_doors", [])]
+        out += [f"- Plafond : un second niveau à {fr((n['level'] - self.floor_y) * 100, 0)} cm du sol ({fr(n['support_m2'])} m² d'appui) près de "
+                f"[{fr(n['at'][0], 2)} ; {fr(n['at'][1], 2)}] n'a pas pu être découpé proprement, la zone garde un seul niveau"
+                for n in self.diag.get("ceiling_notes", [])]
+        out += [("- Sol et plafonds : contour extérieur des murs invalide, pas de prolongement sous les murs" if n["reason"] == "no_extent"
+                 else f"- Seuil de {n['element']} : hors des murs, sol non prolongé") for n in self.diag.get("underlay_notes", [])]
         if (frac := self.diag.get("ceiling_unobserved_fraction")) and frac > UNOBSERVED_ALERT:
             out.append(f"- {fr(frac * 100)} % du plafond non observé par le LiDAR")
         out += [f"- Station {d['id']} : {STATION_FLAG}" for d in self.doc["dimensions"]

@@ -98,7 +98,7 @@
 - [ ] **Step 1: tests.** `test_upright_roundtrip` (random sensor pixels → upright → `to_sensor` identity for each of the 4 `up_turns`); `test_backproject_hits_wall` (pixel of a known synthetic wall corner back-projects within 1 cm); `test_depth_map_occlusion` (a box in front of a wall: wall points behind it fail the 3 cm depth test); `test_architecture_dimensions` (synthetic with door + window: `Door_1-w`, `Door_1-h`, `Window_1-sill`, `L-M1` present and within 2 cm of truth); `test_survey_page` (synthetic with door + window: page exists, every number in `plan_numbers.json` appears in the SVG and has one input row, `Door_1-w` row present, a dimension with source `roomplan` carries the priority badge, no `http` URL in the file); `test_tape_report` (tape value 2 cm off → difference column shows `+2,0`).
 - [ ] **Step 2:** FAIL.
 - [ ] **Step 3: implement** per interfaces. Rasterise at most 320 px on the long side.
-- [ ] **Step 4:** full suite passes; run on the real capture: `.venv/bin/python -m room_model architecture --capture ../../data/captures-in/bureau/Room --out ../../data/room-model/bureau` (with `--no-llm`) succeeds and writes the sheet.
+- [ ] **Step 4:** full suite passes; run on the real capture: `.venv/bin/python -m room_model architecture --capture ../../data/captures-in/<room>/Room --out ../../data/room-model/<room>` (with `--no-llm`) succeeds and writes the sheet.
 - [ ] **Step 5: commit** `feat(room-model): add the architecture stage and the tape measurement sheet`.
 
 ### Task 4: Blender scene builder: shell, cuts, collections, scan, GLB — `sonnet-high`
@@ -165,7 +165,7 @@
 - [ ] **Step 2–4:** FAIL, implement, pass.
 - [ ] **Step 5: commit** `feat(room-model): add niches, cornices, skirting and architraves`.
 
-**Checkpoint (orchestrator):** run `all --no-llm` on the capture, write trace `09-bureau-ouvertures-rig` (blend, glb, renders, measurement sheet, index.html), hand the measurement list to the user.
+**Checkpoint (orchestrator):** run `all --no-llm` on the capture, write trace `09-<room>-ouvertures-rig` (blend, glb, renders, measurement sheet, index.html), hand the measurement list to the user.
 
 ### Task 8: `vision` stage — `sonnet-high`
 
@@ -200,7 +200,7 @@
 - [ ] **Step 2–4:** FAIL, implement, pass.
 - [ ] **Step 5: commit** `feat(room-model): apply LLM corrections and declared niches with scan values kept`.
 
-**Checkpoint (orchestrator):** run `vision` (Opus) on the capture, rebuild, trace `10-bureau-llm-moulures`; hand the survey page (`measurements/index.html`) to the user; with their `measurements.json`, run `compare-tape`, rebuild with `--tape`, and put both reports in the trace.
+**Checkpoint (orchestrator):** run `vision` (Opus) on the capture, rebuild, trace `10-<room>-llm-moulures`; hand the survey page (`measurements/index.html`) to the user; with their `measurements.json`, run `compare-tape`, rebuild with `--tape`, and put both reports in the trace.
 
 ### Task 10: Projected textures — `sonnet-high`
 
@@ -219,7 +219,7 @@
 - [ ] **Step 2–4:** FAIL, implement, pass; time the stage on the capture (must stay within the 30 min budget with the other stages).
 - [ ] **Step 5: commit** `feat(room-model): project photos onto walls, floor and ceilings with an occlusion mask`.
 
-**Checkpoint (orchestrator):** trace `11-bureau-textures`.
+**Checkpoint (orchestrator):** trace `11-<room>-textures`.
 
 ### Task 11: Integration and docs — `sonnet-low`
 
@@ -230,4 +230,18 @@
 - [ ] **Step 1–4:** test, FAIL, implement, pass.
 - [ ] **Step 5: commit** `docs(room-model): document the architecture stages and the Blender scene`.
 
-**Checkpoint (orchestrator):** full run timed on the capture, trace `12-bureau-final`, whole-branch review.
+**Checkpoint (orchestrator):** full run timed on the capture, trace `12-<room>-final`, whole-branch review.
+
+---
+
+## Addendum (2026-11-11): photo anchoring and measurement semantics
+
+Spec: section "Photo anchoring of fixture edges". Reference implementation and numbers: `~/dev/spikes/photo-anchoring/` (`REPORT.md`, `code/`, `setup.sh`).
+
+- **Task 12 — `anchor` stage** (`room_model/ortho.py`, `segment.py`, `anchor.py`; torch + SAM 2.1 pinned in requirements; stage between `openings` and `architecture`; `architecture` uses anchored edges with `source: "photo"` and their depth in `dimension_endpoints`). Synthetic tests per REPORT §Integration plan (recessed leaf + casing from 3 poses; ortho round-trip; recipes with a stub mask; endpoints at depth). GPU tests skipped when CUDA is absent.
+- **Task 13 — `edge_pick`** replaces the corner clicks in `vision`/`llm_merge`: lettered candidate lines on rectified strips, the LLM answers letters; validation; merge as photo source.
+- **Task 14 — leaf/jamb/casing joinery + survey page**: Blender cut = leaf + 2 jambs, casing to the LiDAR outer extent; survey rows per kind with precise wording, endpoints on anchored edges, durable store (FS Access autosave, pre-fill, import, per-capture key, date + note per row); skirting gaps fixed (observed: back-wall skirting only in short pieces).
+- **Task 15a/15b** (user feedback 2026-11-12): squared walls within uncertainty, floor and ceiling zones from walls (15a); Blender junctions, casings clipped by abutting bodies, continuous wall tops, skirting returns in passages (15b).
+- **Task 16 — `reconcile.json` + global consistency checks** (spec "Reconciliation with the human survey").
+- **Task 17 — skill `.agents/skills/room-reconcile/`** guiding an agent from the human survey to applied/arbitrated/asked decisions (written with the skill-creator guidance; tested on a synthetic capture with fake tape values including one typo).
+- **Task 18 — documentation pass (last, after 16–17)**: `docs/room-model.md` reconciled with the final code (every stage, inputs/outputs, CLI flags, GPU/Blender/claude setup, files the user edits, survey page, Blender scene, reconciliation, limits) plus an end-to-end workflow section "New scan to Blender" (unzip → `all` → check the preview → survey on site → `--tape` → reconcile skill → final .blend), and a short architecture note (stage graph, source priority, sigma propagation, where each rule lives). Every statement checked against the code; no real-capture values.

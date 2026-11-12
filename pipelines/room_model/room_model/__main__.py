@@ -18,13 +18,17 @@ STAGE_MODULES = {
     "export": "room_model.export",
     "openings": "room_model.openings",
     "vision": "room_model.vision",
+    "anchor": "room_model.anchor",
+    "edge_pick": "room_model.edge_pick",
     "architecture": "room_model.architecture",
     "textures": "room_model.textures",
     "blender": "room_model.blender_stage",
 }
 
 
-STALE_AFTER = {"architecture": ("vision/answers.json", "measurements.json", "overrides.json"), "textures": ("architecture.json",),
+STALE_AFTER = {"openings": ("model.json",), "anchor": ("openings.json", "vision/answers.json", "overrides.json"),
+               "edge_pick": ("anchors.json",),
+               "architecture": ("model.json", "openings.json", "anchors.json", "edge_pick/answers.json", "vision/answers.json", "measurements.json", "overrides.json"), "textures": ("architecture.json",),
                "blender": ("architecture.json", "textures/textures.json")}  # the stage reruns when one of these is newer than its output
 TAPE_FILE, OVERRIDES_FILE = "measurements.json", "overrides.json"
 
@@ -45,7 +49,7 @@ def _current(ctx: StageContext, name: str) -> bool:
     out = ctx.out / STAGE_OUTPUTS[name]
     if not out.exists():
         return False
-    if name == "vision" and (kind := _placeholder(out)) and (kind == "error" or not ctx.no_llm):
+    if name in ("vision", "edge_pick") and (kind := _placeholder(out)) and (kind == "error" or not ctx.no_llm):
         return False
     newer = [ctx.out / rel for rel in STALE_AFTER.get(name, ())]
     return not any(p.is_file() and p.stat().st_mtime_ns > out.stat().st_mtime_ns for p in newer)
@@ -71,7 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name in (*STAGE_MODULES, "all"):
         stage = sub.add_parser(name, parents=[parent], help=f"run {name}")
         if name in ("architecture", "all"):
-            stage.add_argument("--tape", type=Path, help='tape measurements {"<dimension id>": <metres>}, copied to <out>/measurements.json')
+            stage.add_argument("--tape", type=Path, help='tape measurements: the survey page file (version 2, "values") or {"<dimension id>": <metres>}, copied to <out>/measurements.json')
             stage.add_argument("--overrides", type=Path, help='manual corrections {"<element id>": {field: value}}, copied to <out>/overrides.json')
     cmp = sub.add_parser("compare", help="compare a model.json against a reference")
     cmp.add_argument("--model", type=Path, required=True)

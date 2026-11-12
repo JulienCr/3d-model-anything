@@ -1,7 +1,7 @@
 """Builds the architecture scene from architecture.json, headless.
 
 blender --background --python build_scene.py -- --arch A --out-dir D [--textures T] [--scan S]
-Writes D/architecture.blend, D/architecture.glb and D/renders/{top,persp_1,persp_2}.png.
+Writes D/architecture.blend, D/architecture.glb, D/renders/{top,persp_1,persp_2,open}.png and D/blender_report.json.
 """
 import argparse
 import importlib
@@ -14,7 +14,7 @@ import bpy
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from arch import collections as collection_names  # noqa: E402
-from arch import frame, materials, render, scan, shell  # noqa: E402
+from arch import clip, frame, materials, plan, render, scan, shell  # noqa: E402
 
 GLB_JPEG_QUALITY = 85  # the static GLB embeds the textures as JPEG: a flat photo texture loses nothing visible at this quality
 HOOKS = ("joinery", "niches", "mouldings", "dimensions", "textures")  # arch/<name>.py with add(arch, collections, ctx)
@@ -50,6 +50,7 @@ def build(arch: dict, textures: dict | None, scan_path: str | None, out_dir: str
     ctx = {"textures": dict | None, "scan_path": str | None, "out_dir": str}; the objects it returns must be linked.
     """
     _clear()
+    arch = plan.level_tops(arch)
     scene = bpy.context.scene
     scene.unit_settings.system, scene.unit_settings.scale_length = "METRIC", 1.0
     colls = collection_names.create(scene)
@@ -77,10 +78,13 @@ def export_glb(path: str, colls: dict) -> None:
                               export_image_format="JPEG", export_jpeg_quality=GLB_JPEG_QUALITY)
 
 
-def write_report(out_dir: str) -> None:
-    """blender_report.json: which dimensions backend ran, how many dimensions, and the MeasureIt error if it fell back."""
+def write_report(arch: dict, out_dir: str) -> None:
+    """blender_report.json: dimensions backend and count, the MeasureIt error if it fell back, and `avertissements`:
+    one French line per cut that runs into a neighbouring wall or partition (the cut is kept as measured)."""
     scene = bpy.context.scene
-    report = {"dimensions_backend": scene.get("dimensions_backend"), "dimensions": scene.get("dimensions_count", 0)}
+    report = {"dimensions_backend": scene.get("dimensions_backend"), "dimensions": scene.get("dimensions_count", 0),
+              "avertissements": [f"{oid} : la découpe empiète de {over * 100:.1f} cm sur un mur ou une cloison voisin, à vérifier".replace(".", ",")
+                                 for oid, over in clip.overlaps(arch)]}
     if "measureit_error" in scene:
         report["measureit_error"] = scene["measureit_error"]
     with open(os.path.join(out_dir, "blender_report.json"), "w", encoding="utf-8") as fh:
@@ -105,7 +109,7 @@ def main(argv: list[str]) -> None:
     os.makedirs(args.out_dir, exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=os.path.join(args.out_dir, "architecture.blend"))
     export_glb(os.path.join(args.out_dir, "architecture.glb"), colls)
-    write_report(args.out_dir)
+    write_report(arch, args.out_dir)
     render.render_views(arch, args.out_dir)
 
 

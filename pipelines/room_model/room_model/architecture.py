@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
+from room_model import regularize
 from room_model.context import StageContext, StageInputMissing, output_path, require
 from room_model.model import _Doc
 
@@ -18,6 +19,8 @@ STATION_HEIGHT = 1.2  # m above the floor at which a width or length is read
 VISION_PATH = "vision/answers.json"
 TAPE_PATH = "measurements.json"
 OVERRIDES_PATH = "overrides.json"
+ANCHORS_PATH = "anchors.json"
+PICKS_PATH = "edge_pick/answers.json"
 OPENING_KINDS = ("door", "window", "opening", "niche")
 
 
@@ -52,6 +55,19 @@ def _opening_dimensions(o: dict, params: dict, center) -> list[dict]:
     return out
 
 
+def _leaf_dimensions(arch: dict, el: dict) -> list[dict]:
+    """`<id>-leaf-w` / `-leaf-h` of a door or window whose leaf parameters exist and that no tape value created yet."""
+    from room_model.tape_merge import LEAF_DIMENSION
+
+    have = {d["id"] for d in arch["dimensions"]}
+    out = []
+    for name, (suffix, label) in LEAF_DIMENSION.items():
+        if name in el["params"] and f"{el['id']}-{suffix}" not in have:
+            out.append(_dimension(f"{el['id']}-{suffix}", name, f"{label} {el['id']}", arch["parameters"][el["params"][name]],
+                                  [el["id"]] + ([el["host"]] if el["host"] else []), None, el["flags"]))
+    return out
+
+
 def _wall_length_dimensions(model_doc: dict) -> list[dict]:
     """L-M<k>: corner to corner along the room face of each wall; the corners move with the neighbouring walls."""
     d = _Doc(model_doc)
@@ -77,35 +93,51 @@ def _wall_length_dimensions(model_doc: dict) -> list[dict]:
 
 
 def build(model_doc: dict, openings_doc: dict, vision: dict | None = None, tape: dict | None = None, ctx: StageContext | None = None,
-          overrides: dict | None = None) -> dict:
+          overrides: dict | None = None, anchors: dict | None = None, picks: dict | None = None) -> dict:
     """architecture.json: the model, the openings as elements, and their dimensions plus the wall lengths.
 
-    `vision` (the answers document), `tape` ({dimension id: metres}) and `overrides` ({element id: fields}) are merged
-    in that order when given: see `llm_merge`, `tape_merge` and `overrides`. `ctx` gives the LLM corners their photos and the niche check its LiDAR samples.
+    `vision` (the answers document), `anchors` (anchors.json), `tape` ({dimension id: metres}) and `overrides`
+    ({element id: fields}) are merged in that order when given: see `llm_merge`, `anchor`, `tape_merge`, `overrides`.
+    `picks` (edge_pick answers) complete the anchors first; an element the photos measure whole ignores the LLM corners. `ctx` gives the LLM corners their photos and the niche check its LiDAR samples.
     """
-    from room_model import llm_merge, overrides as user_overrides, tape_merge
+    from room_model import anchor, edge_pick, llm_merge, overrides as user_overrides, tape_merge
 
     arch = {"schema": SCHEMA, "version": VERSION, "source": model_doc.get("source"), "frame": copy.deepcopy(model_doc["frame"]),
             "parameters": copy.deepcopy({**model_doc["parameters"], **openings_doc["parameters"]}),
             "elements": copy.deepcopy([*model_doc["elements"], *map(_opening_element, openings_doc["openings"])]),
             "diagnostics": copy.deepcopy({**model_doc["diagnostics"], "openings": openings_doc["diagnostics"]}), "dimensions": []}
+    if anchors and edge_pick.usable(picks):
+        anchors = edge_pick.merge(anchors, picks, arch["parameters"]["floor.level"]["sigma"])
+    scan = copy.deepcopy(arch["parameters"])
     if llm_merge.usable(vision):
-        arch["diagnostics"]["vision"] = llm_merge.apply(arch, vision, ctx)
+        angle = anchor.pose_angle_of(anchors or {})
+        anchored = {i for i, item in (anchors or {}).get("elements", {}).items() if anchor.fully_applied(item, angle)}
+        arch["diagnostics"]["vision"] = llm_merge.apply(arch, vision, ctx, frozenset(anchored))
+    if anchors:
+        arch["diagnostics"]["anchor"] = anchor.apply(arch, anchors, scan)
+        arch["diagnostics"]["anchor"]["llm_not_applied"] = anchor.keep_hole_from_scan(arch, scan)
     arch["dimensions"] = copy.deepcopy(model_doc["dimensions"])
     if tape:
         arch["diagnostics"]["tape"] = tape_merge.apply(arch, tape)
     if overrides:
-        arch["diagnostics"]["overrides"] = user_overrides.apply(arch, overrides)
+        arch["diagnostics"]["overrides"] = user_overrides.apply(arch, overrides, {**model_doc["parameters"], **openings_doc["parameters"]})
     arch["dimensions"] += _wall_length_dimensions(arch)
+    for row in (arch["diagnostics"].get("tape") or {}).get("applied", []):  # a taped wall length keeps its tape identity
+        dim = next((d for d in arch["dimensions"] if d["id"] == row["id"] and d["kind"] == "wall_length"), None)
+        if dim is not None:
+            dim.update(scan_value=row["scan"], scan_sigma=dim["sigma"], value=row["tape"], source="tape", sigma=tape_merge.TAPE_SIGMA)
     hosts, centres = {e["id"]: e for e in arch["elements"]}, {o["id"]: o["center"] for o in openings_doc["openings"]}
     for el in arch["elements"]:
         if el["kind"] in OPENING_KINDS:
             host = hosts.get(el["host"])
             centre = centres.get(el["id"]) if host is None else _face_point(arch, host, el.get("face"), _value(arch, el["params"]["center_s"]))
             arch["dimensions"] += _opening_dimensions(el, arch["parameters"], centre)
+            arch["dimensions"] += _leaf_dimensions(arch, el)
     for dim in arch["dimensions"]:
         ends = dimension_endpoints(arch, dim["id"])
         dim["endpoints"] = None if ends is None else [[float(c) for c in ends[0]], [float(c) for c in ends[1]]]
+    if any("extent" in el for el in arch["elements"]):
+        regularize.underlay(arch)
     return arch
 
 
@@ -129,13 +161,27 @@ def _opening_endpoints(arch: dict, dim: dict, element: dict):
         return None
     floor = _value(arch, "floor.level")
     p = {name: _value(arch, pid) for name, pid in element["params"].items()}
-    if dim["kind"] == "opening_width":
+    az = _value(arch, host["params"]["azimuth"])
+    normal = np.array([np.cos(az), np.sin(az)]) * (-1.0 if element["face"] == "B" else 1.0)
+    edges = element.get("edges", {})  # depth of each anchored edge along the face normal
+    kind = dim["kind"]
+    if kind.startswith("leaf_"):  # the leaf's own span at its own edges' depths; a door leaf stands on the floor
+        edges = element.get("leaf_edges", {})
+        p = {"center_s": p.get("leaf_center_s", p["center_s"]), "width": p.get("leaf_width", p["width"]),
+             "sill": p.get("leaf_sill", 0.0 if element["kind"] == "door" else p["sill"]), "height": p.get("leaf_height", p["height"])}
+        kind = {"leaf_width": "opening_width", "leaf_height": "opening_height"}[kind]
+
+    def at(s: float, side: str) -> np.ndarray:
+        return _face_point(arch, host, element["face"], s) + edges.get(side, 0.0) * normal
+
+    if kind == "opening_width":
         y = floor + p["sill"] + p["height"] / 2
-        (x0, z0), (x1, z1) = (_face_point(arch, host, element["face"], p["center_s"] + k * p["width"] / 2) for k in (-1, 1))
+        (x0, z0), (x1, z1) = at(p["center_s"] - p["width"] / 2, "left"), at(p["center_s"] + p["width"] / 2, "right")
         return [x0, y, z0], [x1, y, z1]
-    x, z = _face_point(arch, host, element["face"], p["center_s"])
-    low, high = {"opening_height": (p["sill"], p["sill"] + p["height"]), "opening_sill": (0.0, p["sill"])}[dim["kind"]]
-    return [x, floor + low, z], [x, floor + high, z]
+    low, high = {"opening_height": ((p["sill"], "bottom"), (p["sill"] + p["height"], "top")),
+                 "opening_sill": ((0.0, "bottom"), (p["sill"], "bottom"))}[kind]
+    (xa, za), (xb, zb) = at(p["center_s"], low[1]), at(p["center_s"], high[1])
+    return [xa, floor + low[0], za], [xb, floor + high[0], zb]
 
 
 def dimension_endpoints(arch: dict, dim_id: str) -> tuple[list[float], list[float]] | None:
@@ -160,7 +206,7 @@ def dimension_endpoints(arch: dict, dim_id: str) -> tuple[list[float], list[floa
         wall = elements[dim["elements"][0]]
         (x0, z0), (x1, z1) = wall["start"], wall["end"]
         return [x0, floor + STATION_HEIGHT, z0], [x1, floor + STATION_HEIGHT, z1]
-    if kind in ("opening_width", "opening_height", "opening_sill"):
+    if kind in ("opening_width", "opening_height", "opening_sill", "leaf_width", "leaf_height"):
         return _opening_endpoints(arch, dim, elements[dim["elements"][0]])
     return None
 
@@ -176,7 +222,7 @@ def _read(path: Path, label: str) -> dict:
 
 
 def run(ctx: StageContext) -> Path:
-    from room_model import report, survey_page
+    from room_model import reconcile, report, survey_page
 
     model_doc = json.loads(require(ctx, "model").read_text(encoding="utf-8"))
     openings_doc = json.loads(require(ctx, "openings").read_text(encoding="utf-8"))
@@ -189,11 +235,25 @@ def run(ctx: StageContext) -> Path:
             unreadable = str(exc)
     tape = _read(tape_path, "mesures au mètre") if tape_path.exists() else None
     overrides = _read(ctx.out / OVERRIDES_PATH, "corrections manuelles") if (ctx.out / OVERRIDES_PATH).exists() else None
-    arch = build(model_doc, openings_doc, vision, tape, ctx, overrides)
+    anchors = _read(ctx.out / ANCHORS_PATH, "ancrages photo") if (ctx.out / ANCHORS_PATH).exists() else None
+    picks = _read(ctx.out / PICKS_PATH, "choix des arêtes") if (ctx.out / PICKS_PATH).exists() else None
+    arch = build(model_doc, openings_doc, vision, tape, ctx, overrides, anchors, picks)
     if unreadable:
         arch["diagnostics"]["vision_unreadable"] = unreadable
     path = output_path(ctx, "architecture")
     path.parent.mkdir(parents=True, exist_ok=True)
+    aside = []
+    try:  # the reconciliation reads the model, it must never cost the user the model itself
+        aside = reconcile.set_aside(reconcile.write(ctx, arch, {"model_doc": model_doc, "openings_doc": openings_doc, "vision": vision,
+                                                                "anchors": anchors, "picks": picks, "tape": tape, "overrides": overrides}))
+    except Exception as exc:  # noqa: BLE001
+        arch["diagnostics"]["reconcile_error"] = f"{type(exc).__name__}: {exc}"
+        reconcile.write_error(ctx, arch["diagnostics"]["reconcile_error"])
+    if aside:  # a tape value the other measures reject is never forced into the model: one rebuild without it
+        arch = build(model_doc, openings_doc, vision, reconcile.without(tape, {e["id"] for e in aside}), ctx, overrides, anchors, picks)
+        reconcile.mark_set_aside(arch, aside)
+        if unreadable:
+            arch["diagnostics"]["vision_unreadable"] = unreadable
     path.write_text(json.dumps(arch, indent=2), encoding="utf-8")
     survey_page.write(ctx, arch)
     report.write_sections(ctx.out / "report.md", arch)

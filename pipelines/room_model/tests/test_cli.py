@@ -62,7 +62,7 @@ def test_all_runs_stages_in_order(tmp_path, monkeypatch):
 
         _fake_stage(monkeypatch, stage, run)
     assert _run(tmp_path, "all") == 0
-    assert order == ["registration", "shell", "model", "export", "openings", "vision", "architecture", "textures", "blender"]
+    assert order == ["registration", "shell", "model", "export", "openings", "vision", "anchor", "edge_pick", "architecture", "textures", "blender"]
 
 
 def test_vision_placeholder_and_stale_architecture_rerun(tmp_path, monkeypatch):
@@ -177,7 +177,7 @@ def test_tape_flag_installs_the_file_and_reruns_the_architecture(build, tmp_path
     first = json.loads((out / STAGE_OUTPUTS["architecture"]).read_text(encoding="utf-8"))
     door = next(d for d in first["dimensions"] if d["id"] == "Door_1-w")
     mine = tmp_path / "mine.json"
-    mine.write_text(json.dumps({"Door_1-w": door["value"] + 0.03}), encoding="utf-8")
+    mine.write_text(json.dumps({"Door_1-w": door["value"] + 0.03, "Door_1-leaf-w": 0.8}), encoding="utf-8")
     capsys.readouterr()
     assert cli.main(["architecture", *args, "--tape", str(mine)]) == 0  # no --force: the new file makes the output stale
     assert "skipped" not in capsys.readouterr().out
@@ -223,3 +223,41 @@ def test_overrides_flag_installs_the_file_and_reruns_the_architecture(build, tmp
     bad = tmp_path / "bad.json"
     bad.write_text("[]", encoding="utf-8")
     assert cli.main(["all", *args, "--overrides", str(bad)]) == 1 and len(capsys.readouterr().err.strip().splitlines()) == 1
+
+
+def test_edge_pick_reruns_after_a_new_anchor_and_architecture_after_new_picks(tmp_path, monkeypatch):
+    calls = []
+    for stage in ("anchor", "edge_pick", "architecture"):
+        def run(ctx, stage=stage):
+            calls.append(stage)
+            out = ctx.out / STAGE_OUTPUTS[stage]
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text('{"elements": {}}')
+            return out
+
+        _fake_stage(monkeypatch, stage, run)
+    for stage in ("anchor", "edge_pick", "architecture"):
+        assert _run(tmp_path, stage) == 0
+    out = tmp_path / "out"
+    os.utime(out / STAGE_OUTPUTS["anchor"], ns=(time.time_ns() + 10**10,) * 2)
+    assert _run(tmp_path, "edge_pick") == 0 and calls.count("edge_pick") == 2
+    os.utime(out / STAGE_OUTPUTS["edge_pick"], ns=(time.time_ns() + 2 * 10**10,) * 2)
+    assert _run(tmp_path, "architecture") == 0 and calls.count("architecture") == 2
+
+
+def test_openings_and_architecture_rerun_after_a_new_model(tmp_path, monkeypatch):
+    calls = []
+    for stage in ("model", "openings", "architecture"):
+        def run(ctx, stage=stage):
+            calls.append(stage)
+            out = ctx.out / STAGE_OUTPUTS[stage]
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("{}")
+            return out
+
+        _fake_stage(monkeypatch, stage, run)
+    for stage in ("model", "openings", "architecture"):
+        assert _run(tmp_path, stage) == 0
+    os.utime(tmp_path / "out" / STAGE_OUTPUTS["model"], ns=(time.time_ns() + 10**10,) * 2)
+    assert _run(tmp_path, "openings") == 0 and _run(tmp_path, "architecture") == 0
+    assert calls.count("openings") == 2 and calls.count("architecture") == 2

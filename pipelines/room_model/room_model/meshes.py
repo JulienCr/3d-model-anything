@@ -36,6 +36,13 @@ def ceiling_mesh(region: list[dict], y: float) -> Mesh:
     return _horizontal(shapely.MultiPolygon(parts) if len(parts) > 1 else parts[0], y, up=False)
 
 
+def sheet_mesh(parts: list[dict], y: float, up: bool) -> Mesh:
+    """Horizontal sheets of `parts` (`{"exterior", "holes", "drop"}`), each `drop` m below the level y."""
+    meshes = [_horizontal(shapely.Polygon(p["exterior"], p["holes"]), y - p["drop"], up) for p in parts]
+    sizes = np.cumsum([0] + [len(m[0]) for m in meshes])
+    return np.vstack([m[0] for m in meshes]), np.vstack([m[1] + int(o) for m, o in zip(meshes, sizes)]).astype(np.uint32)
+
+
 def prism(quad: np.ndarray, y0: float, y1: float) -> Mesh:
     """Vertical box over a convex plan quad (4 points), faces pointing outwards."""
     quad = np.asarray(quad, float)

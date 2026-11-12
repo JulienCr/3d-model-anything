@@ -303,6 +303,7 @@ def test_prompt_states_the_hinge_convention(pending):
     assert "{{" not in text and all(t in text for t in catalogue.CATALOGUE["door"]) and all(t in text for t in catalogue.CATALOGUE["window"])
     assert "Door_1.jpg" in text
     assert "`null`" in text and "left and a right corner" in text and "français" not in text  # hidden corners, explained in English
+    assert "outer edges of the casings" in text and "arris where the jamb" in text  # doors and windows: extent; passages: arris
 
 
 def test_schema_enums_match_the_catalogue(pending):

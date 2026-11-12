@@ -8,10 +8,9 @@ import math
 import bmesh
 import bpy
 
-from . import catalogue, frame
+from . import catalogue, clip, frame, openings, plan
 from .catalogue import FIXED, HINGED, POCKET, SLIDING
 
-JAMB = 0.05  # m, width of the frame members seen from the front
 FRAME_DEPTH = 0.10  # m, frame depth when the wall is thicker than this
 BITE = 0.002  # m the frame sinks into the reveal, so no two faces are coplanar
 LEAF_T = 0.04
@@ -66,12 +65,13 @@ def _driver(obj: bpy.types.Object, path: str, index: int, expression: str, root:
             var.targets[0].id, var.targets[0].data_path = root, f'["{prop}"]'
 
 
-def _frame_boxes(kind: str, w: float, h: float, depth: float) -> list[tuple]:
+def _frame_boxes(kind: str, lay: openings.Layout, depth: float) -> list[tuple]:
+    """The fixed frame around the leaf: a jamb on each side, a head, and a sill bar on a window."""
+    w, h, leaf, jamb = lay.cut_w, lay.cut_h, lay.leaf_w / 2, lay.jamb
     hw, hd, z0 = w / 2 + BITE, depth / 2, (0.0 if kind == "door" else -BITE)
-    boxes = [(-hw, -w / 2 + JAMB, -hd, hd, z0, h + BITE), (w / 2 - JAMB, hw, -hd, hd, z0, h + BITE),
-             (-w / 2 + JAMB, w / 2 - JAMB, -hd, hd, h - JAMB, h + BITE)]
+    boxes = [(-hw, -leaf, -hd, hd, z0, h + BITE), (leaf, hw, -hd, hd, z0, h + BITE), (-leaf, leaf, -hd, hd, h - jamb, h + BITE)]
     if kind == "window":
-        boxes.append((-w / 2 + JAMB, w / 2 - JAMB, -hd, hd, z0, JAMB))
+        boxes.append((-leaf, leaf, -hd, hd, z0, jamb))
     return boxes
 
 
@@ -145,15 +145,14 @@ def _rig(obj: bpy.types.Object, leaf: dict, root: bpy.types.Object) -> None:
         _driver(obj, "scale", 0, flip, root)
 
 
-def _root(arch: dict, el: dict, j: catalogue.Joinery, host: dict, collection) -> bpy.types.Object:
-    geom = frame.wall_geometry(arch, host)
-    p = el["params"]
-    s, sill = frame.value(arch, p["center_s"]), frame.value(arch, p["sill"])
-    (x, z), (nx, nz), t = geom["point"](s), geom["n"], geom["thickness"]
+def _root(arch: dict, el: dict, j: catalogue.Joinery, lay: openings.Layout, flags: tuple, host: dict, geom: dict, collection) -> bpy.types.Object:
+    sill, (nx, nz) = lay.bottom, geom["n"]
+    (xa, za), (xb, zb) = (frame.face_point(geom, lay.centre, side) for side in (1, -1))
+    x, z = (xa + xb) / 2, (za + zb) / 2  # the middle of the built thickness
     away = (-1 if j.swing == "out" else 1) * (-1 if host["kind"] == "partition" and el.get("face") == "B" else 1)
     root = bpy.data.objects.new(el["id"], None)
     root.empty_display_type, root.empty_display_size = "PLAIN_AXES", 0.15
-    root.location = frame.to_blender(x - nx * t / 2, frame.value(arch, "floor.level") + sill, z - nz * t / 2)
+    root.location = frame.to_blender(x, frame.value(arch, "floor.level") + sill, z)
     root.rotation_euler = (0.0, 0.0, math.atan2(-away * nx, -away * nz))  # local +Y = swing direction
     for name, (default, text, span) in RIG_PROPS.items():
         root[name] = default
@@ -162,21 +161,21 @@ def _root(arch: dict, el: dict, j: catalogue.Joinery, host: dict, collection) ->
             ui.update(default=default, description=text)
         else:
             ui.update(min=span[0], max=span[1], soft_min=span[0], soft_max=span[1], description=text)
+    if flags:
+        root["flags"] = ",".join(flags)
     collection.objects.link(root)
     return root
 
 
-def _build(arch: dict, el: dict, host: dict, j: catalogue.Joinery, collection) -> list[bpy.types.Object]:
-    p = el["params"]
-    w, h = frame.value(arch, p["width"]), frame.value(arch, p["height"])
+def _build(arch: dict, el: dict, host: dict, geom: dict, j: catalogue.Joinery, flags: tuple, collection) -> list[bpy.types.Object]:
+    lay = openings.resolve(arch, el)
     t = frame.value(arch, host["params"]["thickness"])
     depth = FRAME_DEPTH if t >= FRAME_DEPTH + 0.02 else t + 0.01
-    inner = w - 2 * JAMB
-    bottom, top = (0.0, h - JAMB) if j.kind == "door" else (JAMB, h - JAMB)
-    root = _root(arch, el, j, host, collection)
-    out = [root, _object(f"{el['id']}_Frame", _frame_boxes(j.kind, w, h, depth), "Menuiserie", root, collection)]
-    height = top - bottom
-    for k, leaf in enumerate(_leaves(j, inner, t), start=1):
+    bottom = 0.0 if j.kind == "door" else lay.jamb
+    root = _root(arch, el, j, lay, flags, host, geom, collection)
+    out = [root, _object(f"{el['id']}_Frame", _frame_boxes(j.kind, lay, depth), "Menuiserie", root, collection)]
+    height = lay.leaf_h
+    for k, leaf in enumerate(_leaves(j, lay.leaf_w, t), start=1):
         lo, hi = leaf["x"]
         boxes, pane = _leaf_boxes(lo, hi, height, j.spec.glazed)
         if not j.spec.glazed:
@@ -194,6 +193,7 @@ def _build(arch: dict, el: dict, host: dict, j: catalogue.Joinery, collection) -
 def add(arch: dict, collections: dict, ctx: dict) -> list[bpy.types.Object]:
     """Frame, leaves and glass of every hosted door and window, in `Menuiseries`."""
     hosts = {e["id"]: e for e in arch["elements"]}
+    bodies, solids = plan.built(arch)
     out = []
     for el in arch["elements"]:
         j = catalogue.resolve(el)
@@ -202,5 +202,7 @@ def add(arch: dict, collections: dict, ctx: dict) -> list[bpy.types.Object]:
             continue
         if min(frame.value(arch, el["params"]["width"]), frame.value(arch, el["params"]["height"])) < MIN_SIZE:
             continue
-        out += _build(arch, el, host, j, collections["Menuiseries"])
+        fitted = clip.fits(arch, el, host, (1, -1) if host["kind"] == "partition" else (1,), bodies, solids)
+        flags = tuple(dict.fromkeys((*openings.resolve(arch, el).flags, *clip.flags(fitted))))
+        out += _build(arch, el, host, plan.host_geometry(arch, host, bodies), j, flags, collections["Menuiseries"])
     return out

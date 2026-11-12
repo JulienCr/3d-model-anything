@@ -18,6 +18,7 @@ from helpers import make_case
 PROBE = Path(__file__).with_name("blender_probe.py")
 BLENDER_DIR = Path(__file__).resolve().parents[1] / "blender"
 sys.path.insert(0, str(BLENDER_DIR))  # the pure-Python modules of blender/arch are importable as `arch.*`
+from arch import frame as wall_frame  # noqa: E402
 from arch import plan as wall_plan  # noqa: E402
 OPEN_RATIO = 0.6
 needs_blender = pytest.mark.skipif(shutil.which(blender_stage.blender_executable()) is None, reason="Blender is not installed")
@@ -177,8 +178,9 @@ def scene(tmp_path_factory):
     return ctx, arch, json.loads(facts_path.read_text(encoding="utf-8"))
 
 
-def _probe(ctx, arch_path, rays=(), spans=(), texel_rays=()):
-    spec = {"rays": list(rays), "rigs": [], "spans": list(spans), "texel_rays": list(texel_rays), "arch": str(arch_path), "blender_dir": str(BLENDER_DIR)}
+def _probe(ctx, arch_path, rays=(), spans=(), texel_rays=(), rigs=(), moulding_overlaps=False):
+    spec = {"rays": list(rays), "rigs": list(rigs), "spans": list(spans), "texel_rays": list(texel_rays), "arch": str(arch_path),
+            "blender_dir": str(BLENDER_DIR), "moulding_overlaps": moulding_overlaps}
     spec_path, facts_path = ctx.out / "spec.json", ctx.out / "facts.json"
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
     blender_stage.run_blender(["--background", ctx.out / "architecture.blend", "--python-exit-code", "1", "--python", PROBE,
@@ -422,6 +424,167 @@ def test_open_render_shows_the_leaves_swung(scene):
     ctx, _, _ = scene
     closed, opened = (np.asarray(Image.open(ctx.out / "renders" / f"{n}.png").convert("L"), int) for n in ("top", "open"))
     assert (np.abs(closed - opened) > 20).sum() > 300
+
+
+LEAF_FRAME = {"profile": "flat", "width": 0.07}
+JAMB = 0.05  # openings.JAMB_VISIBLE
+# (source, id, host, centre along the host, parameter values, fields): doors and windows measured by their leaf
+LEAF_ELEMENTS = [
+    ("Door_1", "Door_L1", "Wall_M3", 0.6, {"width": 1.04, "height": 2.12, "leaf_width": 0.8, "leaf_height": 2.0}, {"frame": LEAF_FRAME}),
+    ("Door_1", "Door_L2", "Wall_M3", 1.9, {"width": 1.04, "height": 2.12}, {"frame": LEAF_FRAME}),
+    ("Door_1", "Door_L3", "Wall_M1", 0.9, {"width": 1.7, "height": 2.15, "leaf_width": 1.4, "leaf_height": 2.0},
+     {"frame": {"profile": "flat", "width": 0.1}, "type": "hinged_double"}),
+    ("Door_1", "Door_L4", "Wall_M5", 1.25, {"width": 1.5, "height": 2.12, "leaf_width": 0.8, "leaf_height": 2.0}, {"frame": LEAF_FRAME}),
+    ("Door_1", "Door_L5", "Wall_M3", 2.95, {"width": 1.04, "height": 2.12, "leaf_width": 0.8, "leaf_height": 2.0, "leaf_center_s": 2.99},
+     {"frame": LEAF_FRAME}),  # the leaf sits 4 cm off the middle of the outer extent: casings of 11 and 3 cm
+    ("Window_1", "Window_L1", "Wall_M1", 4.6, {"width": 1.0, "height": 1.2, "sill": 0.9, "leaf_width": 0.8, "leaf_height": 1.0},
+     {"frame": {"profile": "flat", "width": 0.05}, "type": "casement_single"}),
+]
+
+
+def _add_leaf_elements(arch):
+    for source, new_id, host, centre, values, fields in LEAF_ELEMENTS:
+        element = json.loads(json.dumps(_element(arch, source)))
+        element.update(id=new_id, host=host, **fields)
+        for name, pid in list(element["params"].items()):
+            element["params"][name] = f"opening.{new_id}.{name}"
+            arch["parameters"][element["params"][name]] = dict(arch["parameters"][pid])
+        for name, value in {**values, "center_s": centre}.items():
+            pid = element["params"].setdefault(name, f"opening.{new_id}.{name}")
+            arch["parameters"][pid] = {**arch["parameters"].get(pid, {"sigma": 0.0, "unit": "m", "source": "llm"}), "value": value}
+        arch["elements"].append(element)
+
+
+def _cut_rays(arch, oid, cut_w, bottom, top):
+    """Rays across the wall just inside and just outside the cut, along it and up its height."""
+    host = _element(arch, oid)["host"]
+    mid, c = (bottom + top) / 2, CUT_SHIFT.get(oid, 0.0)
+    rays = []
+    for name, along, height in (("in-left", c - cut_w / 2 + 0.01, mid), ("in-right", c + cut_w / 2 - 0.01, mid), ("out-left", c - cut_w / 2 - 0.01, mid),
+                                ("out-right", c + cut_w / 2 + 0.01, mid), ("in-low", c, bottom + 0.01), ("in-high", c, top - 0.01),
+                                ("out-high", c, top + 0.01)):
+        rays.append(_ray(arch, oid, f"{oid}-{name}", along, height, target=host))
+    if bottom > 0.05:
+        rays.append(_ray(arch, oid, f"{oid}-out-low", c, bottom - 0.01, target=host))
+    return rays
+
+
+CUTS = {  # id: (cut width, bottom, top) in metres above the floor
+    "Door_L1": (0.9, 0.0, 2.05), "Door_L2": (0.9, 0.0, 2.05), "Door_L3": (1.5, 0.0, 2.05), "Door_L4": (0.9, 0.0, 2.05),
+    "Window_L1": (0.9, 0.95, 2.05), "Door_L5": (0.9, 0.0, 2.05),
+}
+CUT_SHIFT = {"Door_L5": 0.04}  # centre of the cut relative to `center_s`
+
+
+@pytest.fixture(scope="module")
+def leafed(tmp_path_factory):
+    ctx, _ = make_case(tmp_path_factory.mktemp("leafed"), "leafed", window=True, partition=True, partition_opening=True,
+                       partition_opening_width=0.6)
+    shell.run(ctx)
+    model.run(ctx)
+    openings.run(ctx)
+    architecture.run(ctx)
+    arch_path = output_path(ctx, "architecture")
+    arch = json.loads(arch_path.read_text(encoding="utf-8"))
+    _add_leaf_elements(arch)
+    arch_path.write_text(json.dumps(arch), encoding="utf-8")
+    blender_stage.run(ctx)
+    rays = [r for oid, (w, bottom, top) in CUTS.items() for r in _cut_rays(arch, oid, w, bottom, top)]
+    rigs = [{"name": f"{kind}-{oid}", "empty": oid, "props": props} for oid in CUTS for kind, props in (("closed", {}), ("open", {"Ouverture": 1}))]
+    return ctx, arch, _probe(ctx, arch_path, rays, rigs=rigs)
+
+
+@needs_blender
+@pytest.mark.parametrize("oid", CUTS)
+def test_wall_cut_is_the_leaf_plus_a_jamb_on_each_side(leafed, oid):
+    _, _, facts = leafed
+    rays = facts["rays"]
+    for inside in ("in-left", "in-right", "in-low", "in-high"):
+        assert not rays[f"{oid}-{inside}"]["hit"], f"{oid}: wall left inside the cut ({inside})"
+    for outside in ("out-left", "out-right", "out-high", *(["out-low"] if f"{oid}-out-low" in rays else [])):
+        assert rays[f"{oid}-{outside}"]["hit"], f"{oid}: wall cut away outside the cut ({outside})"
+
+
+@needs_blender
+@pytest.mark.parametrize("oid,width", [("Door_L1", 0.8), ("Door_L2", 0.8), ("Window_L1", 0.8), ("Door_L4", 0.8)])
+def test_single_leaf_is_as_wide_as_the_leaf(leafed, oid, width):
+    _, _, facts = leafed
+    assert facts["objects"][f"{oid}_Leaf_1"]["dims"][0] == pytest.approx(width, abs=0.001)
+
+
+@needs_blender
+def test_double_leaves_add_up_to_the_leaf_width(leafed):
+    _, _, facts = leafed
+    one, two = (facts["rigs"]["closed-Door_L3"][f"Door_L3_Leaf_{k}"]["extent_x"] for k in (1, 2))
+    assert min(one + two) == pytest.approx(-0.7, abs=0.001) and max(one + two) == pytest.approx(0.7, abs=0.001)
+    assert one[1] == pytest.approx(two[0], abs=0.001), "the leaves meet in the middle"
+
+
+@needs_blender
+def test_leaf_rig_still_opens_ninety_degrees_from_the_jamb(leafed):
+    _, _, facts = leafed
+    closed, opened = facts["rigs"]["closed-Door_L1"]["Door_L1_Leaf_1"], facts["rigs"]["open-Door_L1"]["Door_L1_Leaf_1"]
+    assert abs(closed["location"][0]) == pytest.approx(0.4, abs=0.001), "hinged at the leaf edge, in front of the jamb"
+    assert abs(opened["rotation_z_deg"]) == pytest.approx(90, abs=0.5)
+    assert opened["location"] == pytest.approx(closed["location"], abs=1e-4)
+
+
+@needs_blender
+def test_frame_surrounds_the_leaf_with_a_jamb_each_side(leafed):
+    _, arch, facts = leafed
+    frame_ = facts["objects"]["Door_L1_Frame"]
+    n = _on_face(arch, _element(arch, "Door_L1"))[2]
+    lo, hi = np.array(frame_["bbox"])
+    n_b = _plan_dir(n)
+    assert (hi - lo)[:2] @ np.abs(np.array([-n_b[1], n_b[0]])) == pytest.approx(0.8 + 2 * JAMB, abs=0.006)
+    assert hi[2] - lo[2] == pytest.approx(2.0 + JAMB, abs=0.006)
+
+
+@needs_blender
+def test_architraves_run_from_the_cut_to_the_outer_extent(leafed):
+    _, arch, facts = leafed
+    floor = _value(arch, "floor.level")
+    for oid, outer_w, outer_top in (("Door_L5", 1.04, 2.12), ("Door_L1", 1.04, 2.12), ("Door_L2", 1.04, 2.12), ("Door_L3", 1.7, 2.15), ("Window_L1", 1.0, 2.1)):
+        obj = facts["objects"][f"{oid}_Architrave"]
+        lo, hi = np.array(obj["bbox"])
+        n_b = _plan_dir(_on_face(arch, _element(arch, oid))[2])
+        assert (hi - lo)[:2] @ np.abs(np.array([-n_b[1], n_b[0]])) == pytest.approx(outer_w, abs=0.012), oid
+        assert hi[2] - floor == pytest.approx(outer_top, abs=0.004), oid
+        assert obj["collections"] == ["Moulures"] and obj["flags"] is None, oid
+
+
+@needs_blender
+def test_an_off_centre_leaf_gets_unequal_casings_on_the_same_outer_extent(leafed):
+    _, arch, facts = leafed
+    _, p, n = _on_face(arch, _element(arch, "Door_L5"))
+    along = np.array([-_plan_dir(n)[1], _plan_dir(n)[0]])
+    outer = facts["objects"]["Door_L5_Architrave"]
+    lo, hi = np.array(outer["bbox"])
+    assert (hi - lo)[:2] @ np.abs(along) == pytest.approx(1.04, abs=0.012), "outer edges stay on the outer extent"
+    centre_outer = (lo + hi)[:2] / 2 @ along
+    centre_leaf = (np.array(facts["rigs"]["closed-Door_L5"]["Door_L5_Leaf_1"]["world_centre"]))[:2] @ along
+    assert centre_leaf - centre_outer == pytest.approx(0.04, abs=0.004), "the leaf is 4 cm off the middle"
+    assert outer["flags"] is None
+
+
+@needs_blender
+def test_derived_leaf_is_flagged_and_a_measured_one_is_not(leafed):
+    _, _, facts = leafed
+    objects = facts["objects"]
+    assert objects["Door_L2"]["flags"] == "leaf_estimated"
+    assert all(objects[o]["flags"] is None for o in ("Door_L1", "Door_L3", "Window_L1"))
+
+
+@needs_blender
+def test_an_implausible_casing_is_clamped_and_sent_to_verification(leafed):
+    _, arch, facts = leafed
+    root, band = facts["objects"]["Door_L4"], facts["objects"]["Door_L4_Architrave"]
+    assert "to_verify" in root["flags"] and "to_verify" in band["flags"]
+    assert band["collections"] == ["\u00c0 v\u00e9rifier"]
+    lo, hi = np.array(band["bbox"])
+    n_b = _plan_dir(_on_face(arch, _element(arch, "Door_L4"))[2])
+    assert (hi - lo)[:2] @ np.abs(np.array([-n_b[1], n_b[0]])) == pytest.approx(0.9 + 2 * 0.2, abs=0.012), "20 cm a side, not the 30 cm left over"
+    assert hi[2] - lo[2] == pytest.approx(2.12, abs=0.004), "the head keeps its own 7 cm"
 
 
 def _plan_dir(vec):
@@ -694,11 +857,13 @@ def test_build_passes_ctx_and_rejects_unlinked_hook_objects(scene):
     assert "zz_probe" in hook["unlinked"]["raised"] and "ProbeLoose" in hook["unlinked"]["raised"]
 
 
+CASING = {"profile": "flat", "width": 0.07}
 JOIN_VARIANTS = [  # a door close to a near-parallel corner, to a right-angle corner and to a reflex corner
     ("Door_1", "Door_9", "Wall_M7", 0.18, 0.3, {}),
     ("Door_1", "Door_10", "Wall_M2", 0.2, 0.3, {}),
     ("Door_1", "Door_11", "Wall_M4", 0.18, 0.3, {}),
-    ("Door_1", "Door_12", "Wall_M1", 1.05, 0.8, {}),  # where Partition_P1 ends on the wall
+    ("Door_1", "Door_12", "Wall_M1", 1.05, 0.8, {"frame": {"profile": "flat", "width": 0.03}}),  # where Partition_P1 ends on the wall
+    ("Door_1", "Door_14", "Wall_M2", 2.28, 0.5, {"frame": CASING}),  # its casing would run 3 cm past the face, into the next wall
 ]
 SPLIT_AT, SPLIT_TURN_DEG, SPLIT_JOG = 2.5, -3.0, 0.06  # Wall_M1 splits into itself and Wall_M7, a near-parallel step
 PARTITION_OVERSHOOT = 0.3  # m the partition is drawn into Wall_M1
@@ -784,7 +949,8 @@ def joined(tmp_path_factory):
                  "direction": [0.0, -1.0, 0.0]})
     rays += _cornice_rays(arch)
     rays += _face_rays(arch, "skirting", "Skirting", 0.01, lambda host: _value(arch, "floor.level") + _value(arch, "skirting.height"))
-    return ctx, arch, _probe(ctx, arch_path, rays), {r["name"]: r for r in rays}
+    rays += _top_grid(arch, [shapely.Point(_element(arch, "Wall_M1")["end"]), min(_partition_ends(arch, "Partition_P1"), key=lambda p: p.y)])
+    return ctx, arch, _probe(ctx, arch_path, rays, moulding_overlaps=True), {r["name"]: r for r in rays}
 
 
 @needs_blender
@@ -916,6 +1082,376 @@ def test_junction_walls_do_not_overlap(junctions):
     assert junctions[2]["overlaps"] == {}
 
 
+def _levelled_arch(arch):
+    """The junction room with tops that differ by a few cm, less than the noise of two measures, where the bodies meet."""
+    _junction_arch(arch)
+    base = _value(arch, "wall.M3.top")
+    for oid, delta in (("Wall_M3", 0.0), ("Wall_M6", 0.0), ("Wall_M7", 0.025), ("Partition_P1", -0.02), ("Partition_P2", 0.01)):
+        pid = _element(arch, oid)["params"]["top"]
+        arch["parameters"][pid] = {"value": base + delta, "sigma": 0.012, "unit": "m", "source": "lidar"}
+
+
+def _partition_ends(arch, pid):
+    """The middle of each end of a partition, as built."""
+    quad = wall_plan.built(arch)[0][pid]
+    return [shapely.Point((quad[a][0] + quad[b][0]) / 2, (quad[a][1] + quad[b][1]) / 2) for a, b in ((0, 3), (1, 2))]
+
+
+def _top_grid(arch, centres, radius=0.3, step=0.02, prefix="top"):
+    """Rays coming down on a grid round each of the `centres` (plan points), over the region the shell's plan fills."""
+    _, solids = wall_plan.built(arch)
+    parts = [shapely.Polygon(solid).difference(shapely.union_all([shapely.Polygon(c) for c in cuts])) if cuts else shapely.Polygon(solid)
+             for solid, cuts in solids.values()]
+    filled = shapely.union_all(parts).buffer(-0.003)
+    rays = []
+    for k, c in enumerate(centres):
+        for i in range(-int(radius / step), int(radius / step) + 1):
+            for j in range(-int(radius / step), int(radius / step) + 1):
+                p = shapely.Point(c.x + (i + 0.13) * step, c.y + (j + 0.29) * step)
+                if p.distance(c) <= radius and filled.contains(p):
+                    rays.append({"name": f"{prefix}-{k}-{i}-{j}", "object": _shell_ids(arch), "origin": _blender_point(p.x, 5.0, p.y),
+                                 "direction": [0.0, 0.0, -1.0]})
+    return rays
+
+
+def _assert_flat_top(facts, rays):
+    heights = [facts["rays"][r["name"]] for r in rays]
+    assert all(h["hit"] for h in heights), "a hole in the top"
+    zs = np.array([h["location"][2] for h in heights])
+    assert zs.max() - zs.min() < 0.0005, f"the top steps by {1000 * (zs.max() - zs.min()):.1f} mm between bodies that meet"
+
+
+@pytest.fixture(scope="module")
+def levelled(tmp_path_factory):
+    ctx, _ = make_case(tmp_path_factory.mktemp("levelled"), "levelled", window=True, partition=True)
+    shell.run(ctx)
+    model.run(ctx)
+    openings.run(ctx)
+    architecture.run(ctx)
+    arch_path = output_path(ctx, "architecture")
+    arch = json.loads(arch_path.read_text(encoding="utf-8"))
+    _levelled_arch(arch)
+    arch_path.write_text(json.dumps(arch), encoding="utf-8")
+    blender_stage.run(ctx)
+    # the joint of the two west walls, the end of Partition_P1 on them, and the end of Partition_P2 on Partition_P1
+    centres = [shapely.Point(_element(arch, "Wall_M6")["end"]), min(_partition_ends(arch, "Partition_P1"), key=lambda p: p.x),
+               min(_partition_ends(arch, "Partition_P2"), key=lambda p: p.distance(shapely.Polygon(wall_plan.built(arch)[0]["Partition_P1"])))]
+    rays = _top_grid(arch, centres)
+    return ctx, arch, _probe(ctx, arch_path, rays), rays
+
+
+@needs_blender
+def test_the_top_is_continuous_where_bodies_meet_within_the_noise_of_their_heights(levelled):
+    _, _, facts, rays = levelled
+    assert len(rays) > 900
+    _assert_flat_top(facts, rays)
+
+
+SKIRT_ELEMENTS = [  # (kind, id, host, face, centre along the host, width, sill, height, frame, extra fields)
+    ("opening", "Opening_3", "Partition_P1", "A", 0.9, 0.7, 0.0, 2.0, {"profile": "flat", "width": 0.05}, {}),
+    ("niche", "Niche_3", "Partition_P1", "B", 1.6, 0.5, 0.0, 1.6, None, {"through": False, "dividers": 0, "shelves": [], "depth": 0.08}),
+    ("niche", "Niche_4", "Wall_M2", None, 2.1, 0.3, 0.8, 0.8, None, {"through": False, "dividers": 0, "shelves": [], "depth": 0.08}),
+    ("door", "Door_13", "Wall_M2", None, 0.2, 0.3, 0.0, 2.0, None, {}),  # 5 cm from the corner it shares with Wall_M1
+    ("opening", "Opening_4", "Partition_P1", "A", 2.2, 0.5, 0.0, 2.0, None, {}),  # a passage with no casing
+    ("niche", "Niche_5", "Wall_M5", None, 1.0, 0.4, 0.0, 1.2, None, {"through": True, "dividers": 0, "shelves": []}),  # goes through, to the floor
+]
+# (host, side) -> (centre, half width the skirting stops at): the cuts that reach the floor, on the face they open on
+SKIRT_GAPS = {("Partition_P1", 1): [(0.9, 0.35 + 0.05), (2.2, 0.25)], ("Partition_P1", -1): [(0.9, 0.35 + 0.05), (1.6, 0.25), (2.2, 0.25)],
+              ("Wall_M2", 1): [(1.25, 0.45), (0.2, 0.15)], ("Wall_M5", 1): [(1.0, 0.2)]}
+SKIRT_STEP, SKIRT_END, SKIRT_EDGE = 0.025, 0.15, 0.04  # m: ray spacing, margin kept from the ends of a face, margin around a gap
+
+
+def _add_skirt_elements(arch):
+    for kind, new_id, host, face, centre, width, sill, height, frame_, extra in SKIRT_ELEMENTS:
+        params = {"center_s": centre, "width": width, "height": height, "sill": sill, "depth": extra.pop("depth", 0.2)}
+        element = {"id": new_id, "kind": kind, "host": host, "face": face, "type": None, "flags": [], "frame": frame_, **extra,
+                   "params": {k: f"opening.{new_id}.{k}" for k in params}}
+        for k, v in params.items():
+            arch["parameters"][element["params"][k]] = {"value": v, "sigma": 0.0, "unit": "m", "source": "llm"}
+        arch["elements"].append(element)
+
+
+def _skirting_samples(arch):
+    """{(host id, side): [(s, ray)]}: rays coming down on the skirting every SKIRT_STEP along the built face of each wall and partition."""
+    footprints = wall_plan.wall_footprints(arch)
+    footprints.update(wall_plan.partition_footprints(arch, footprints))
+    floor, top = _value(arch, "floor.level"), _value(arch, "skirting.height")
+    out = {}
+    for host in (e for e in arch["elements"] if e["kind"] in ("wall", "partition")):
+        quad = np.array(footprints[host["id"]])
+        az = _value(arch, host["params"]["azimuth"])
+        u = np.array(host["end"]) - np.array(host["start"])
+        u = u / np.linalg.norm(u)
+        for side, (a, b) in ((1, (quad[0], quad[1])), (-1, (quad[3], quad[2]))):
+            if side < 0 and host["kind"] == "wall":
+                continue
+            n = np.array([math.cos(az), math.sin(az)]) * side
+            length = np.linalg.norm(b - a)
+            samples = []
+            for k in range(int((length - 2 * SKIRT_END) / SKIRT_STEP) + 1):
+                p = a + (b - a) / length * (SKIRT_END + k * SKIRT_STEP)
+                origin = p + n * 0.008
+                s = float((p - np.array(host["start"])) @ u)
+                samples.append((s, {"name": f"s-{host['id']}-{side}-{k}", "object": "Skirting", "distance": 3.0,
+                                    "origin": _blender_point(origin[0], floor + top + 1.0, origin[1]), "direction": [0.0, 0.0, -1.0]}))
+            out[(host["id"], side)] = samples
+    return out
+
+
+def _casing_rays(arch, oid, host_id, on_casing, beside):
+    """Per face of a partition, a ray straight onto its architrave (`on_casing`, m along the host) and one onto the bare wall beside it."""
+    host = _element(arch, host_id)
+    az = _value(arch, host["params"]["azimuth"])
+    n = np.array([math.cos(az), math.sin(az)])
+    start, end = np.array(host["start"]), np.array(host["end"])
+    u = (end - start) / np.linalg.norm(end - start)
+    rays = []
+    for side, face in ((1, "A"), (-1, "B")):
+        for label, s, target in (("casing", on_casing, f"{oid}_Architrave_{face}"), ("wall", beside, host_id)):
+            p = start + u * s
+            p = p + n * (_value(arch, host["params"]["offset"]) - n @ p) - (n * _value(arch, host["params"]["thickness"]) if side < 0 else 0)
+            origin = p + side * n * 0.6
+            rays.append({"name": f"{oid}-{face}-{label}", "object": target, "origin": _blender_point(origin[0], _value(arch, "floor.level") + 1.0, origin[1]),
+                         "direction": _blender_point(-side * n[0], 0.0, -side * n[1])})
+    return rays
+
+
+REVEAL_INSET = 0.006  # m: the rays go down this far inside the passage from the jamb plane
+REVEAL_DEPTHS = (0.15, 0.5, 0.85)  # fractions of the thickness of the host
+
+
+def _reveal_rays(arch, oid):
+    """Rays coming down on the skirting of the reveals of a cut: {name: ray}, at three depths of each jamb, and in the corner
+    squares just inside the passage and just in front of each face."""
+    el = _element(arch, oid)
+    host = _element(arch, el["host"])
+    bodies, _ = wall_plan.built(arch)
+    geom = wall_plan.host_geometry(arch, host, bodies)
+    centre, width = (_value(arch, el["params"][k]) for k in ("center_s", "width"))
+    floor, top = _value(arch, "floor.level"), _value(arch, "skirting.height")
+    u, n = np.array(geom["u"]), np.array(geom["n"])
+    rays = {}
+
+    def down(name, p):
+        rays[name] = {"name": name, "object": "Skirting", "distance": 3.0, "origin": _blender_point(p[0], floor + top + 1.0, p[1]),
+                      "direction": [0.0, 0.0, -1.0]}
+    for jamb, s, inward in (("lo", centre - width / 2, 1.0), ("hi", centre + width / 2, -1.0)):
+        a, b = (np.array(wall_frame.face_point(geom, s, side)) for side in (1, -1))
+        for k, f in enumerate(REVEAL_DEPTHS):
+            down(f"reveal-{oid}-{jamb}-{k}", a + (b - a) * f + inward * u * REVEAL_INSET)
+        for side, face in ((1, a), (-1, b)):
+            down(f"corner-{oid}-{jamb}-{side}", face + inward * u * 0.004 + n * side * 0.004)
+    return rays
+
+
+@pytest.fixture(scope="module")
+def skirted(tmp_path_factory):
+    ctx, _ = make_case(tmp_path_factory.mktemp("skirted"), "skirted", window=True, partition=True)
+    shell.run(ctx)
+    model.run(ctx)
+    openings.run(ctx)
+    architecture.run(ctx)
+    arch_path = output_path(ctx, "architecture")
+    arch = json.loads(arch_path.read_text(encoding="utf-8"))
+    _junction_arch(arch)  # Partition_P1 is snapped flush with Wall_M3: its built faces sit up to 3.5 cm off its nominal lines
+    _add_skirt_elements(arch)
+    for pid in ("skirting.height", "skirting.projection"):
+        arch["parameters"][pid] = {"value": MOULDING_PARAMS[pid][0], "sigma": 0.0, "unit": "m", "source": "llm"}
+    arch["elements"].append(json.loads(json.dumps(_element_of(MOULDING_ELEMENTS, "Skirting"))))
+    arch_path.write_text(json.dumps(arch), encoding="utf-8")
+    blender_stage.run(ctx)
+    samples = _skirting_samples(arch)
+    rays = [r for runs in samples.values() for _, r in runs]
+    partition = _element(arch, "Partition_P1")
+    rays.append(_ray(arch, "Opening_3", "opening-through", 0.0, 1.0, target="Partition_P1"))
+    rays.append(_ray(arch, "Opening_3", "opening-through-near-end", -0.3, 1.0, target="Partition_P1"))
+    rays += _casing_rays(arch, "Opening_3", "Partition_P1", 0.525, 0.485)
+    rays += [r for oid in ("Opening_3", "Opening_4", "Niche_5", "Door_13") for r in _reveal_rays(arch, oid).values()]
+    return ctx, arch, _probe(ctx, arch_path, rays), samples, partition
+
+
+@needs_blender
+def test_skirting_stops_only_at_floor_cuts_on_its_own_face(skirted):
+    _, arch, facts, samples, _ = skirted
+    assert any(len(runs) > 20 for runs in samples.values())
+    for (host, side), runs in samples.items():
+        gaps = [(c - h, c + h) for c, h in SKIRT_GAPS.get((host, side), [])]
+        for s, ray in runs:
+            if any(lo - SKIRT_EDGE < s < hi + SKIRT_EDGE for lo, hi in gaps) and not any(lo + SKIRT_EDGE < s < hi - SKIRT_EDGE for lo, hi in gaps):
+                continue
+            inside = any(lo < s < hi for lo, hi in gaps)
+            assert facts["rays"][ray["name"]]["hit"] == (not inside), f"{host} side {side} at s={s:.2f}: {'gap missing' if inside else 'skirting missing'}"
+
+
+@needs_blender
+@pytest.mark.parametrize("oid", ["Opening_3", "Opening_4", "Niche_5"])
+def test_skirting_continues_along_both_reveals_of_a_passage(skirted, oid):
+    _, arch, facts, _, _ = skirted
+    for name in (n for n in _reveal_rays(arch, oid) if n.startswith("reveal-")):
+        assert facts["rays"][name]["hit"], f"{name}: no skirting on the reveal"
+
+
+@needs_blender
+def test_the_return_is_joined_to_the_face_runs_at_the_corner(skirted):
+    _, arch, facts, _, _ = skirted
+    for name in (n for n in _reveal_rays(arch, "Opening_4") if n.startswith("corner-")):
+        assert facts["rays"][name]["hit"], f"{name}: the face run and the reveal do not meet at the corner"
+
+
+@needs_blender
+def test_a_door_keeps_the_gap_in_the_skirting(skirted):
+    _, arch, facts, _, _ = skirted
+    for name in (n for n in _reveal_rays(arch, "Door_13") if n.startswith("reveal-")):
+        assert not facts["rays"][name]["hit"], f"{name}: skirting on the reveal of a door"
+
+
+@needs_blender
+@pytest.mark.parametrize("face", ["A", "B"])
+def test_casings_sit_on_the_built_faces_of_a_snapped_partition(skirted, face):
+    _, arch, facts, _, _ = skirted
+    spec = {r["name"]: r for r in _casing_rays(arch, "Opening_3", "Partition_P1", 0.525, 0.485)}
+    casing, wall = (facts["rays"][f"Opening_3-{face}-{k}"] for k in ("casing", "wall"))
+    assert casing["hit"] and wall["hit"]
+    direction = np.array(spec[f"Opening_3-{face}-casing"]["direction"])
+    standing_out = (np.array(wall["location"]) - np.array(casing["location"])) @ direction
+    assert standing_out == pytest.approx(0.015 - 0.001, abs=0.0007), "the casing's back is flush (1 mm bite) with the built face: it stands out by its projection only"
+
+
+@needs_blender
+def test_opening_in_a_snapped_partition_goes_through_both_faces(skirted):
+    _, _, facts, _, _ = skirted
+    assert not facts["rays"]["opening-through"]["hit"] and not facts["rays"]["opening-through-near-end"]["hit"], "a skin of wall is left"
+
+
+ABUT_WIDTH, ABUT_CUT = 0.9, 0.76  # outer width of the doors (casings included) and their cut (the leaf and its jambs)
+# (id, partition, side of the partition the door stands on, free host length left between the cut and the partition: < 0 is inside it)
+ABUTTING_DOORS = [("Door_A", "Partition_P1", "west", 0.03), ("Door_B", "Partition_P1", "east", 0.01),
+                  ("Door_C", "Partition_P2", "west", -0.04), ("Door_E", "Partition_P2", "east", 0.15)]
+
+
+def _partition_on_wall(arch, new_id, x_face, z_end, thickness=0.1):
+    """A partition along z, its face at x = `x_face`, running from inside the south wall to `z_end` (`Partition_P1` is moved, others are copies)."""
+    wall = _element(arch, "Wall_M1")
+    partition = _element(arch, new_id) if new_id == "Partition_P1" else json.loads(json.dumps(_element(arch, "Partition_P1")))
+    if partition["id"] != new_id:
+        partition["id"], partition["params"] = new_id, {k: f"partition.{new_id[-2:]}.{k}" for k in partition["params"]}
+        for k, pid in _element(arch, "Partition_P1")["params"].items():
+            arch["parameters"][partition["params"][k]] = dict(arch["parameters"][pid])
+        arch["elements"].append(partition)
+    partition.update(start=[x_face - thickness / 2, _face_z(arch, wall, x_face) - 0.02], end=[x_face - thickness / 2, z_end])
+    for name, value in (("azimuth", 0.0), ("offset", x_face), ("thickness", thickness)):
+        arch["parameters"][partition["params"][name]]["value"] = value
+    arch["elements"] = [e for e in arch["elements"] if e.get("host") != new_id]
+
+
+def _along(arch, host_id, x):
+    """Position along a wall, from its start, of the point of its face line at plan abscissa x."""
+    host = _element(arch, host_id)
+    u = np.array(host["end"]) - np.array(host["start"])
+    return float((np.array([x, _face_z(arch, host, x)]) - np.array(host["start"])) @ u / np.linalg.norm(u))
+
+
+def _abutting_faces(arch, partition_id):
+    """(west, east) position along Wall_M1 of the two faces of a partition that runs along z."""
+    p = _element(arch, partition_id)
+    x = _value(arch, p["params"]["offset"])
+    return _along(arch, "Wall_M1", x - _value(arch, p["params"]["thickness"])), _along(arch, "Wall_M1", x)
+
+
+def _abutting_arch(arch):
+    """Two partitions that end on the south wall, and doors with casings beside them, in front of them and just clear of them."""
+    _partition_on_wall(arch, "Partition_P1", -1.94, 0.0)
+    _partition_on_wall(arch, "Partition_P2", 1.5, -0.8)
+    for oid, partition, side, free in ABUTTING_DOORS:
+        west, east = _abutting_faces(arch, partition)
+        centre = west - free + 0.07 - ABUT_WIDTH / 2 if side == "west" else east + free - 0.07 + ABUT_WIDTH / 2
+        element = json.loads(json.dumps(_element(arch, "Door_1")))
+        element.update(id=oid, host="Wall_M1", frame=CASING)
+        for name, pid in element["params"].items():
+            element["params"][name] = f"opening.{oid}.{name}"
+            arch["parameters"][element["params"][name]] = dict(arch["parameters"][pid])
+        for name, value in (("center_s", centre), ("width", ABUT_WIDTH), ("height", 2.12)):
+            arch["parameters"][element["params"][name]]["value"] = value
+        arch["elements"].append(element)
+
+
+@pytest.fixture(scope="module")
+def abutted(tmp_path_factory):
+    ctx, _ = make_case(tmp_path_factory.mktemp("abutted"), "abutted", window=True, partition=True)
+    shell.run(ctx)
+    model.run(ctx)
+    openings.run(ctx)
+    architecture.run(ctx)
+    arch_path = output_path(ctx, "architecture")
+    arch = json.loads(arch_path.read_text(encoding="utf-8"))
+    _abutting_arch(arch)
+    arch_path.write_text(json.dumps(arch), encoding="utf-8")
+    blender_stage.run(ctx)
+    return ctx, arch, _probe(ctx, arch_path, moulding_overlaps=True)
+
+
+FRAME_BITE_VOLUME = 0.001  # m3: a frame sinks 2 mm into the reveal of each cut it fills, also in a wall the cut reaches into
+
+
+def _assert_mouldings_only_in_their_host(arch, facts):
+    """A casing lies in no body but its host's; a door frame in none beyond the bite it takes into the reveals."""
+    assert any(name.endswith("_Architrave") for name in facts["objects"]), "the scene has casings"
+    for name, bodies in facts["moulding_overlaps"].items():
+        host = _element(arch, re.split("_(?:Architrave|Frame)", name)[0])["host"]
+        deep = {b: v for b, v in bodies.items() if b != host and (not name.endswith("_Frame") or v > FRAME_BITE_VOLUME)}
+        assert not deep, f"{name} lies inside {deep}"
+
+
+@needs_blender
+def test_the_top_has_no_hole_or_step_at_a_jog_and_where_a_partition_ends_on_a_wall(joined):
+    _, _, facts, rays = joined
+    _assert_flat_top(facts, [r for name, r in rays.items() if name.startswith("top-")])
+
+
+@needs_blender
+def test_casings_near_a_jog_a_corner_and_a_partition_end_stay_out_of_other_bodies(joined):
+    _assert_mouldings_only_in_their_host(joined[1], joined[2])
+
+
+def _casing_width(arch, facts, oid):
+    """Extent of an architrave along Wall_M1."""
+    lo, hi = np.array(facts["objects"][f"{oid}_Architrave"]["bbox"])
+    host = _element(arch, "Wall_M1")
+    u = np.array(host["end"]) - np.array(host["start"])
+    u = _plan_dir(u / np.linalg.norm(u))
+    return float((hi - lo)[:2] @ np.abs(u))
+
+
+@needs_blender
+def test_casings_and_frames_stay_out_of_the_bodies_they_abut(abutted):
+    _assert_mouldings_only_in_their_host(abutted[1], abutted[2])
+
+
+@needs_blender
+@pytest.mark.parametrize("oid,expected", [("Door_A", ABUT_CUT + 0.07 + 0.03), ("Door_B", ABUT_CUT + 0.07), ("Door_C", ABUT_CUT - 0.04 + 0.07),
+                                          ("Door_E", ABUT_WIDTH)])
+def test_a_casing_stops_at_the_free_length_of_its_host_face(abutted, oid, expected):
+    _, arch, facts = abutted
+    assert _casing_width(arch, facts, oid) == pytest.approx(expected, abs=0.004)
+
+
+@needs_blender
+def test_a_cut_running_into_a_partition_is_named_in_the_report(abutted):
+    ctx = abutted[0]
+    warnings = json.loads((ctx.out / "blender_report.json").read_text(encoding="utf-8"))["avertissements"]
+    assert len(warnings) == 1 and warnings[0].startswith("Door_C : la découpe empiète de 4,0 cm"), warnings
+
+
+@needs_blender
+@pytest.mark.parametrize("oid,verify", [("Door_A", False), ("Door_B", True), ("Door_C", True), ("Door_E", False)])
+def test_a_casing_clipped_below_the_minimum_is_flagged_with_its_door(abutted, oid, verify):
+    _, _, facts = abutted
+    objects = facts["objects"]
+    band = objects[f"{oid}_Architrave"]
+    assert ("to_verify" in (objects[oid]["flags"] or "")) == verify and ("to_verify" in (band["flags"] or "")) == verify
+    assert band["collections"] == (["\u00c0 v\u00e9rifier"] if verify else ["Moulures"])
+
+
 MOULDING_PARAMS = {  # id: (value, unit)
     "niche.1.center_s": (0.3, "m"), "niche.1.sill": (0.8, "m"), "niche.1.width": (0.4, "m"), "niche.1.height": (0.8, "m"),
     "niche.1.depth": (0.05, "m"),  # ignored: the niche is through
@@ -960,7 +1496,10 @@ CORNICE_REACH = 0.05  # m from the wall face where the cornice rays come down
 
 def _stop_short(arch):
     """Insets the floor and every ceiling region by STOP_SHORT, so no mesh outline lies on a wall face."""
-    inset = lambda ring, holes=(): [list(p) for p in shapely.Polygon(ring, holes).buffer(-STOP_SHORT).exterior.coords][:-1]  # noqa: E731
+    def inset(ring, holes=()):
+        shrunk = shapely.Polygon(ring, holes).buffer(-STOP_SHORT)
+        shrunk = max(getattr(shrunk, "geoms", [shrunk]), key=lambda g: g.area)  # a narrow neck can split the region
+        return [list(p) for p in shrunk.exterior.coords][:-1]
     floor = _element(arch, "Floor")
     floor["polygon"] = inset(floor["polygon"])
     for ceiling in (e for e in arch["elements"] if e["kind"] == "ceiling"):
@@ -1172,8 +1711,9 @@ def test_architraves_frame_the_openings(moulded):
             obj = objects[name]
             lo, hi = np.array(obj["bbox"])
             assert obj["collections"] == ["Moulures"] and obj["materials"] == ["Moulure"]
-            assert hi[2] - floor == pytest.approx(h + spec["width"], abs=0.003) and lo[2] == pytest.approx(floor, abs=0.003)
-            assert (hi - lo)[:2] @ np.abs(np.array([-n_b[1], n_b[0]])) == pytest.approx(w + 2 * spec["width"], abs=0.012)
+            grow = 0.0 if el["kind"] in ("door", "window") else spec["width"]  # a door or window casing lies inside the outer extent
+            assert hi[2] - floor == pytest.approx(h + grow, abs=0.003) and lo[2] == pytest.approx(floor, abs=0.003)
+            assert (hi - lo)[:2] @ np.abs(np.array([-n_b[1], n_b[0]])) == pytest.approx(w + 2 * grow, abs=0.012)
     t = _value(arch, "partition.P1.thickness")
     a, b = (np.array(objects[f"Opening_1_Architrave_{f}"]["bbox"]).mean(0) for f in "AB")
     assert abs((a - b)[:2] @ _plan_dir(_on_face(arch, _element(arch, "Opening_1"))[2])) == pytest.approx(t + 0.015, abs=0.004)
@@ -1232,3 +1772,90 @@ def test_stage_without_blender_says_so(tmp_path, monkeypatch):
     architecture.run(ctx)
     with pytest.raises(BlenderMissing, match="no-such-blender"):
         blender_stage.run(ctx)
+
+
+@pytest.fixture(scope="module")
+def floored(tmp_path_factory):
+    """The synthetic L room with its door and a partition, and vertical rays cast from above onto the floor."""
+    ctx, _ = make_case(tmp_path_factory.mktemp("floored"), "floored", partition=True)
+    for stage in (shell, model, openings, architecture):
+        stage.run(ctx)
+    arch_path = output_path(ctx, "architecture")
+    arch = json.loads(arch_path.read_text(encoding="utf-8"))
+    blender_stage.run(ctx)
+    floor = _element(arch, "Floor")
+    inside = shapely.Polygon(floor["polygon"])
+    y = _value(arch, "floor.level")
+    down = _blender_point(0.0, -1.0, 0.0)
+    rays = {"inside": [], "threshold": [], "under-wall": [], "outside": [], "ceiling": []}
+    tops = {}
+
+    def add(group, x, z, target="Floor"):
+        rays[group].append({"name": f"{group}-{len(rays[group])}", "object": target, "origin": _blender_point(x, y + 3.0, z), "direction": down})
+
+    x0, z0, x1, z1 = inside.bounds
+    for x in np.arange(x0, x1, 0.3):
+        for z in np.arange(z0, z1, 0.3):
+            if inside.buffer(-0.02).contains(shapely.Point(x, z)):
+                add("inside", x, z)
+    door = _element(arch, "Door_1")
+    width = _value(arch, door["params"]["width"])
+    for along in (-width / 2 + 0.1, 0.0, width / 2 - 0.1):
+        _, p, n = _on_face(arch, door, along)
+        thickness = _value(arch, _element(arch, door["host"])["params"]["thickness"])
+        for depth in (0.03, 0.08, thickness - 0.02):  # as far as the outer face of the wall
+            add("threshold", *(p - n * depth))
+        add("outside", *(p - n * (thickness + 0.03)))
+    for host in (e for e in arch["elements"] if e["kind"] == "wall"):
+        thickness = _value(arch, host["params"]["thickness"])
+        n = np.array([math.cos(_value(arch, host["params"]["azimuth"])), math.sin(_value(arch, host["params"]["azimuth"]))])
+        mid = np.array(host["start"]) + (np.array(host["end"]) - np.array(host["start"])) * 0.2  # clear of the door and the openings
+        mid = mid + n * (_value(arch, host["params"]["offset"]) - n @ mid)
+        add("under-wall", *(mid - n * thickness * 0.4))
+        add("ceiling", *(mid - n * thickness * 0.4), target=["Ceiling_1", "Ceiling_2"])
+        tops[rays["ceiling"][-1]["name"]] = _value(arch, host["params"]["top"])
+        add("outside", *(mid - n * (thickness + 0.03)))
+    flat = [r for group in rays.values() for r in group]
+    return _probe(ctx, arch_path, flat), rays, (y, tops)
+
+
+@needs_blender
+def test_the_floor_meets_the_walls_and_runs_through_the_door_threshold(floored):
+    facts, rays, _ = floored
+    for group in ("inside", "threshold", "under-wall"):
+        assert rays[group]
+        missed = [r["name"] for r in rays[group] if not facts["rays"][r["name"]]["hit"]]
+        assert not missed, f"{group}: no floor under {missed}"
+
+
+@needs_blender
+def test_the_floor_does_not_leave_the_outer_faces_of_the_walls(floored):
+    facts, rays, _ = floored
+    assert rays["outside"]
+    assert not [r["name"] for r in rays["outside"] if facts["rays"][r["name"]]["hit"]]
+
+
+@needs_blender
+def test_the_ceilings_run_over_the_walls_and_no_sheet_is_coplanar_with_a_wall_base_or_top(floored):
+    facts, rays, (floor_y, tops) = floored
+    assert rays["ceiling"]
+    for ray in rays["ceiling"]:
+        hit = facts["rays"][ray["name"]]
+        assert hit["hit"], f"{ray['name']}: no ceiling over the wall"
+        assert hit["location"][2] <= tops[ray["name"]] - 0.0009, "the rim is below the wall top, never coplanar with it"
+    flush = [r for r in rays["ceiling"] if facts["rays"][r["name"]]["location"][2] == pytest.approx(tops[r["name"]] - 0.001, abs=2e-4)]
+    assert flush, "a wall that rises to its own ceiling has the rim 1 mm inside its top"
+    for ray in rays["under-wall"]:
+        assert facts["rays"][ray["name"]]["location"][2] == pytest.approx(floor_y - 0.001, abs=2e-4), "the rim sits 1 mm under the wall base"
+    for ray in rays["inside"]:
+        assert facts["rays"][ray["name"]]["location"][2] == pytest.approx(floor_y, abs=2e-4)
+
+
+def test_a_hung_blender_is_stopped_with_a_clear_error(tmp_path, monkeypatch):
+    fake = tmp_path / "blender-that-hangs"
+    fake.write_text("#!/bin/sh\necho started\nsleep 30\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("BLENDER", str(fake))
+    with pytest.raises(RuntimeError, match="still running after 1 s"):
+        blender_stage.run_blender(["--version"], tmp_path / "blender.log", timeout=1)
+    assert (tmp_path / "blender.log").exists()

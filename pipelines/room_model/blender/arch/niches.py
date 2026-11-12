@@ -3,7 +3,7 @@ import math
 
 import bpy
 
-from . import frame, joinery, shell
+from . import frame, joinery, openings, plan, shell
 
 BOARD = 0.02  # m, thickness of dividers and shelves
 
@@ -20,9 +20,10 @@ def _boards(width: float, height: float, depth: float, dividers: int, shelves: l
     return out
 
 
-def _niche(arch: dict, el: dict, host: dict, collection) -> list[bpy.types.Object]:
-    geom = frame.wall_geometry(arch, host)
-    w, h, sill, centre = (frame.value(arch, el["params"][k]) for k in ("width", "height", "sill", "center_s"))
+def _niche(arch: dict, el: dict, host: dict, bodies: dict, collection) -> list[bpy.types.Object]:
+    geom = plan.host_geometry(arch, host, bodies)
+    w, h, sill = (frame.value(arch, el["params"][k]) for k in ("width", "height", "sill"))
+    centre = openings.resolve(arch, el).centre
     side = frame.side(host, el.get("face"))
     recess = shell.recess_depth(arch, geom, el)
     depth = geom["thickness"] if recess is None else recess
@@ -44,9 +45,10 @@ def _niche(arch: dict, el: dict, host: dict, collection) -> list[bpy.types.Objec
 def add(arch: dict, collections: dict, ctx: dict) -> list[bpy.types.Object]:
     """Dividers and shelves of every hosted niche, in `Menuiseries`."""
     hosts = {e["id"]: e for e in arch["elements"]}
+    bodies = plan.built_bodies(arch)
     out = []
     for el in arch["elements"]:
         host = hosts.get(el.get("host"))
         if el["kind"] == "niche" and host is not None and host["kind"] in ("wall", "partition"):
-            out += _niche(arch, el, host, collections["Menuiseries"])
+            out += _niche(arch, el, host, bodies, collections["Menuiseries"])
     return out

@@ -216,22 +216,32 @@ def _beam_axis(frame: dict, centre: np.ndarray, polygon: shapely.Polygon) -> lis
     return [[float(x), float(z)] for x, z in (centre + start * u, centre + end * u)]
 
 
+def can_merge(a: dict, b: dict) -> bool:
+    """Two levels (a above b) are one rough surface: closer than MERGE_SIGMAS sigmas, merged span within MAX_MERGE_SPAN."""
+    gap = a["level"] - b["level"]
+    return gap < MERGE_SIGMAS * max(a["sigma"], b["sigma"]) and a.get("high", a["level"]) - b.get("low", b["level"]) <= MAX_MERGE_SPAN
+
+
+def combine(a: dict, b: dict) -> dict:
+    """Support-weighted level of two mergeable levels; the caller merges the other fields."""
+    support = a["support_m2"] + b["support_m2"]
+    gap = a["level"] - b["level"]
+    return {"level": (a["level"] * a["support_m2"] + b["level"] * b["support_m2"]) / support,
+            "sigma": float(np.hypot(max(a["sigma"], b["sigma"]), gap / 2)), "support_m2": support,
+            "low": b.get("low", b["level"]), "high": a.get("high", a["level"])}
+
+
 def _merge_rough_levels(levels: list[dict]) -> list[dict]:
-    """Merge levels (highest first) closer than MERGE_SIGMAS sigmas whose regions touch, within MAX_MERGE_SPAN in all."""
+    """Merge touching levels (highest first) that `can_merge`."""
     levels = [{**lv, "low": lv["level"], "high": lv["level"]} for lv in levels]
     k = 0
     while k < len(levels) - 1:
         a, b = levels[k], levels[k + 1]
-        gap = a["level"] - b["level"]
         touch = a["region"].buffer(CLOSING_ITERATIONS * GRID + 1e-6).intersects(b["region"])
-        if gap >= MERGE_SIGMAS * max(a["sigma"], b["sigma"]) or a["high"] - b["low"] > MAX_MERGE_SPAN or not touch:
+        if not touch or not can_merge(a, b):
             k += 1
             continue
-        support = a["support_m2"] + b["support_m2"]
-        levels[k:k + 2] = [{"level": (a["level"] * a["support_m2"] + b["level"] * b["support_m2"]) / support,
-                            "sigma": float(np.hypot(max(a["sigma"], b["sigma"]), gap / 2)), "support_m2": support,
-                            "low": b["low"], "high": a["high"],
-                            "region": _as_multipolygon(shapely.union_all([a["region"], b["region"]]))}]
+        levels[k:k + 2] = [{**combine(a, b), "region": _as_multipolygon(shapely.union_all([a["region"], b["region"]]))}]
     return levels
 
 
@@ -255,16 +265,20 @@ def _unexplained(frame: dict, underside: float, reason: str) -> dict:
             "width": float(frame["minor"]), "length": float(frame["major"]), "reason": reason}
 
 
-def _beam_footprint(beam: dict, polygon: shapely.Polygon):
+def beam_footprint(beam: dict, polygon: shapely.Polygon):
     return shapely.LineString(beam["axis"]).buffer(beam["width"] / 2, cap_style="flat").intersection(polygon)
 
 
-def detect(samples: Samples, polygon: shapely.Polygon, floor_level: float) -> CeilingResult:
-    """Ceiling levels with plan regions, beams, and the fraction of the plan neither covers."""
+def ceiling_points(samples: Samples, polygon: shapely.Polygon, floor_level: float) -> np.ndarray:
+    """Ceiling-facing samples above MIN_HEIGHT, inside the polygon shrunk by POLYGON_MARGIN."""
     P = samples.P
     inner = polygon.buffer(-POLYGON_MARGIN)
     ok = (samples.N[:, 1] < -0.9) & (P[:, 1] > floor_level + MIN_HEIGHT) & shapely.contains_xy(inner, P[:, 0], P[:, 2])
-    cand = P[ok]
+    return P[ok]
+
+
+def level_fits(cand: np.ndarray) -> list[dict]:
+    """Dominant levels of ceiling points as `{"level", "sigma", "support_m2"}`, highest first."""
     found = []
     for yc in _histogram_levels(cand[:, 1]):
         near = cand[np.abs(cand[:, 1] - yc) < LEVEL_WINDOW]
@@ -272,6 +286,14 @@ def detect(samples: Samples, polygon: shapely.Polygon, floor_level: float) -> Ce
         if fit is not None:
             found.append({"level": float(fit.point[1]), "sigma": offset_sigma(fit), "support_m2": fit.support_m2})
     found.sort(key=lambda lv: -lv["level"])
+    return found
+
+
+def detect(samples: Samples, polygon: shapely.Polygon, floor_level: float) -> CeilingResult:
+    """Ceiling levels with plan regions, beams, and the fraction of the plan neither covers."""
+    inner = polygon.buffer(-POLYGON_MARGIN)
+    cand = ceiling_points(samples, polygon, floor_level)
+    found = level_fits(cand)
 
     grid = _Grid(polygon)
     gap = np.abs(cand[:, 1:2] - np.array([lv["level"] for lv in found])) if found else np.zeros((len(cand), 0))
@@ -304,5 +326,5 @@ def detect(samples: Samples, polygon: shapely.Polygon, floor_level: float) -> Ce
             levels.append({"level": lv["level"], "sigma": lv["sigma"], "region": region, "support_m2": lv["support_m2"]})
     levels = _merge_rough_levels(levels)
     beams.sort(key=lambda b: (-b["underside"], b["axis"][0]))
-    covered = shapely.union_all([lv["region"] for lv in levels] + [_beam_footprint(b, polygon) for b in beams])
+    covered = shapely.union_all([lv["region"] for lv in levels] + [beam_footprint(b, polygon) for b in beams])
     return CeilingResult(levels, beams, float(1.0 - covered.intersection(inner).area / inner.area), unexplained)

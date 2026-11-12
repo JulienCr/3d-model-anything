@@ -19,6 +19,8 @@ REACH = 1.5  # x t: a RoomPlan partition ends within about a wall thickness of t
 SNAP = 0.5
 SHADOW = 5.0  # x t a host is swept along a partition line to remove what sticks out behind it
 TOUCH_TOL = 0.001  # m: polygons overlapping by less than this only touch (mesh precision)
+SAME_TOP = 2.0  # sigmas: two tops measured this close, given their uncertainties, are the same height (about 95%)
+TOP_CAP = 0.05  # m: half the height of a standard skirting (about 10 cm), so a large sigma cannot erase a step a moulding would show
 
 
 def _sub(a, b):
@@ -141,7 +143,7 @@ def wall_footprints(arch: dict) -> dict[str, list]:
     return out
 
 
-def _span(a, b, poly: list):
+def span(a, b, poly: list):
     """(enter, leave): parameters (0 at a, 1 at b) where the line a -> b enters and leaves a convex polygon, None if it misses."""
     area = sum(p[0] * q[1] - q[0] * p[1] for p, q in zip(poly, poly[1:] + poly[:1]))
     d = _sub(b, a)
@@ -224,9 +226,9 @@ def _hits(quad: list, hosts: list) -> dict:
                 u = _direction(host)
                 if abs(unit[0] * u[1] - unit[1] * u[0]) < NEAR_PARALLEL:
                     continue
-                span = _span(mid, v, host)
-                if span and 0.0 < span[0] <= 1.0 + REACH * _width(host) / length and (best is None or span[0] < best[0]):
-                    best = (*span, host)
+                crossing = span(mid, v, host)
+                if crossing and 0.0 < crossing[0] <= 1.0 + REACH * _width(host) / length and (best is None or crossing[0] < best[0]):
+                    best = (*crossing, host)
             if best is not None:
                 point = lambda t: (mid[0] + d[0] * t, mid[1] + d[1] * t)  # noqa: E731
                 out[i] = (point(best[0]), point(best[1]), best[2], unit)
@@ -279,8 +281,9 @@ def _middle(quad: list):
 
 
 def partition_plans(arch: dict, walls: dict[str, list]) -> dict[str, dict]:
-    """{partition id: {"face", "solid", "cut"}}: the partition quad with each face line stopped on the host face it meets,
-    the quad extended through those hosts, and the polygons (host shadows, other overlapped hosts) to subtract from it.
+    """{partition id: {"face", "solid", "cut", "hosts"}}: the partition quad with each face line stopped on the host face it
+    meets, the quad extended through those hosts, the polygons (host shadows, other overlapped hosts) to subtract from it,
+    and the ids of the hosts it reaches.
 
     A partition whose body holds the middle of this one is a crossing, not a host; of two partitions that run into
     each other only the later one extends. Hosts are taken untrimmed, so the order of the elements does not matter.
@@ -295,8 +298,9 @@ def partition_plans(arch: dict, walls: dict[str, list]) -> dict[str, dict]:
     reach = {k: {j for j in quads if j != k and _hits(quad, [quads[j]])} for k, quad in quads.items()}
     out = {}
     for pid, quad in quads.items():
-        hosts = [*walls.values(), *(q for j, q in quads.items() if j != pid and not _contains(q, _middle(quad))
-                                    and not (pid in reach[j] and j in reach[pid] and j > pid))]
+        named = [*walls.items(), *((j, q) for j, q in quads.items() if j != pid and not _contains(q, _middle(quad))
+                                   and not (pid in reach[j] and j in reach[pid] and j > pid))]
+        hosts = [q for _, q in named]
         face, solid, cut = list(quad), list(quad), []
         hits = _hits(quad, hosts)
         for i, (enter, leave, host, unit) in hits.items():
@@ -305,13 +309,40 @@ def partition_plans(arch: dict, walls: dict[str, list]) -> dict[str, dict]:
                 cut.append((host, unit))
         shadows = [_shadow(host, unit) for host, unit in cut]
         others = [h for h in hosts if not any(h is c[0] for c in cut) and overlap(h, solid, 1e-9)]
-        out[pid] = {"face": face, "solid": solid, "cut": [*shadows, *others]}
+        met = [name for name, q in named if any(hit[2] is q for hit in hits.values())]
+        out[pid] = {"face": face, "solid": solid, "cut": [*shadows, *others], "hosts": met}
     return out
 
 
 def partition_footprints(arch: dict, walls: dict[str, list]) -> dict[str, list]:
     """{partition id: quad [face start, face end, back end, back start]} with each face line stopped on the host it meets."""
     return {pid: plan["face"] for pid, plan in partition_plans(arch, walls).items()}
+
+
+def built(arch: dict) -> tuple[dict[str, list], dict[str, tuple[list, list]]]:
+    """(bodies, solids) of the shell as built.
+
+    `bodies`: {wall or partition id: quad [face start, face end, back end, back start]} (mitred walls, partitions stopped on
+    their hosts). `solids`: {id: (convex polygon, polygons subtracted from it)}, the plan region the mesh really fills.
+    """
+    walls = wall_footprints(arch)
+    plans = partition_plans(arch, walls)
+    bodies = {**walls, **{pid: p["face"] for pid, p in plans.items()}}
+    return bodies, {**{wid: (quad, []) for wid, quad in walls.items()}, **{pid: (p["solid"], p["cut"]) for pid, p in plans.items()}}
+
+
+def built_bodies(arch: dict) -> dict[str, list]:
+    """{wall or partition id: quad [face start, face end, back end, back start]} as built (mitred walls, trimmed partitions)."""
+    return built(arch)[0]
+
+
+def host_geometry(arch: dict, host: dict, bodies: dict) -> dict:
+    """`frame.wall_geometry` of a wall or partition, its faces moved onto the built ones when it is a partition.
+
+    A wall is built on its nominal lines (a mitre point lies on them), a partition may be snapped off them.
+    """
+    geom = frame.wall_geometry(arch, host)
+    return frame.fit_faces(geom, bodies[host["id"]]) if host["kind"] == "partition" else geom
 
 
 def overlap(a: list, b: list, tol: float = TOUCH_TOL) -> bool:
@@ -328,3 +359,41 @@ def overlap(a: list, b: list, tol: float = TOUCH_TOL) -> bool:
             if min(max(ra), max(rb)) - max(min(ra), min(rb)) <= tol:
                 return False
     return True
+
+
+def level_tops(arch: dict) -> dict:
+    """`arch` with the tops of the walls and partitions that meet set to one height where they agree within their sigmas.
+
+    Two bodies that join (consecutive walls, a partition and the host it ends on) are one height when their tops differ by
+    less than SAME_TOP combined sigmas and by no more than TOP_CAP. A group takes the inverse-variance mean; a member further
+    than SAME_TOP of its own sigmas (or TOP_CAP) from it is left at its own height and the rest is tried again. A top
+    without a sigma is never merged.
+    """
+    ids = {e["id"]: e["params"]["top"] for e in arch["elements"] if e["kind"] in ("wall", "partition")}
+    bodies = {k: arch["parameters"][pid] for k, pid in ids.items()}
+    links = [*wall_links(arch).items(), *((pid, h) for pid, p in partition_plans(arch, wall_footprints(arch)).items() for h in p["hosts"])]
+    sigma = {k: max(v.get("sigma", 0.0), 1e-6) for k, v in bodies.items()}
+    group = {k: k for k in bodies}
+
+    def root(k):
+        while group[k] != k:
+            k = group[k]
+        return k
+
+    for a, b in links:
+        if abs(bodies[a]["value"] - bodies[b]["value"]) <= min(SAME_TOP * math.hypot(sigma[a], sigma[b]), TOP_CAP):
+            group[root(a)] = root(b)
+    parameters = dict(arch["parameters"])
+    for r in {root(k) for k in bodies}:
+        members = [k for k in bodies if root(k) == r]
+        while len(members) > 1:
+            weights = [1 / sigma[k] ** 2 for k in members]
+            mean = sum(w * bodies[k]["value"] for w, k in zip(weights, members)) / sum(weights)
+            slack = {k: abs(bodies[k]["value"] - mean) / min(SAME_TOP * sigma[k], TOP_CAP) for k in members}
+            worst = max(members, key=slack.get)
+            if slack[worst] <= 1.0:
+                for k in members:
+                    parameters[ids[k]] = {**bodies[k], "value": mean}
+                break
+            members.remove(worst)
+    return {**arch, "parameters": parameters}

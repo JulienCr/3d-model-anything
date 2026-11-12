@@ -14,7 +14,7 @@ RETYPE = ("door", "niche", "opening")
 REMOVABLE = (*RECT_KINDS, "panel_frame", "cornice", "skirting")
 TYPING = ("type", "hinge", "swing", "panels", "handle")
 NICHE_FIELDS = ("through", "dividers", "shelves_count")
-FIELDS = ("kind", *TYPING, "frame", *NICHE_FIELDS, "remove")
+FIELDS = ("kind", *TYPING, "frame", *NICHE_FIELDS, "remove", "prefer")
 NICHE_ONLY = ("through", "dividers", "shelves")
 SCHEMA_OF = {**{f: "elements" for f in (*TYPING, "frame")}, **{f: "new_elements" for f in NICHE_FIELDS}}
 
@@ -23,8 +23,24 @@ def _schema() -> dict:
     return json.loads((PACKAGE / "vision_schema.json").read_text(encoding="utf-8"))
 
 
-def _problem(el: dict, field: str, value) -> str | None:
+def _prefer_problem(el: dict, value, scan: dict) -> str | None:
+    if not isinstance(value, dict) or not value:
+        return 'un objet {"<paramètre>": "scan"} est attendu'
+    for name, source in value.items():
+        if name not in el.get("params", {}):
+            return f"{name!r} n'est pas un paramètre de cet élément ({', '.join(el.get('params', {}))})"
+        kept = scan.get(el["params"][name])
+        if kept is None:
+            return f"{name} n'a pas de valeur du scan (élément déclaré par le LLM)"
+        if source not in ("scan", kept["source"]):
+            return f"aucune valeur {source!r} conservée pour {name} (possibles : scan, {kept['source']})"
+    return None
+
+
+def _problem(el: dict, field: str, value, scan: dict | None = None) -> str | None:
     """Why `value` cannot be given to `field` of `el` (None when it can)."""
+    if field == "prefer":
+        return _prefer_problem(el, value, scan or {})
     cat = catalogue()
     kind = el["kind"]
     if field == "kind":
@@ -71,7 +87,11 @@ def _retype(arch: dict, el: dict, kind: str) -> None:
         el["type"] = None
 
 
-def _set(arch: dict, el: dict, field: str, value) -> object:
+def _set(arch: dict, el: dict, field: str, value, scan: dict | None = None) -> object:
+    if field == "prefer":  # back to the scan value: the source, value and sigma the scan gave
+        for name in value:
+            arch["parameters"][el["params"][name]] = dict(scan[el["params"][name]])
+        return value
     if field == "kind":
         _retype(arch, el, value)
     elif field == "frame":
@@ -85,8 +105,12 @@ def _set(arch: dict, el: dict, field: str, value) -> object:
     return value
 
 
-def apply(arch: dict, overrides: dict) -> dict:
-    """Applies the overrides to `arch` in place; {"applied": [{element, field, value}], "rejected": [{id, field, reason}], "removed": [ids]}."""
+def apply(arch: dict, overrides: dict, scan: dict | None = None) -> dict:
+    """Applies the overrides to `arch` in place; {"applied": [{element, field, value}], "rejected": [{id, field, reason}], "removed": [ids]}.
+
+    `scan` holds the parameters as the model and openings stages wrote them, for `prefer: {"<param>": "scan"}` (or
+    the scan's own source name: `lidar`, `roomplan`).
+    """
     rep = {"applied": [], "rejected": [], "removed": []}
     for ident, fields in overrides.items():
         el = _elements(arch).get(ident)
@@ -108,11 +132,11 @@ def apply(arch: dict, overrides: dict) -> dict:
             value = fields[field]
             if field == "remove":
                 continue
-            why = f"champ inconnu (attendus : {', '.join(FIELDS)})" if field not in FIELDS else _problem(el, field, value)
+            why = f"champ inconnu (attendus : {', '.join(FIELDS)})" if field not in FIELDS else _problem(el, field, value, scan)
             if why:
                 rep["rejected"].append({"id": ident, "field": field, "reason": why})
                 continue
-            rep["applied"].append({"element": ident, "field": field, "value": _set(arch, el, field, value)})
+            rep["applied"].append({"element": ident, "field": field, "value": _set(arch, el, field, value, scan)})
             done = True
         if done:
             _flag(el, "user_override")

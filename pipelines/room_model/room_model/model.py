@@ -1,4 +1,4 @@
-"""Model stage: assemble model.json and derive the key dimensions with propagated sigmas."""
+"""Model stage: square the shell, assemble model.json and derive the key dimensions with propagated sigmas."""
 from __future__ import annotations
 
 import json
@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import shapely
 
-from room_model import shell
+from room_model import regularize, shell
 from room_model.capture import load_roomplan
 from room_model.context import StageContext, output_path, require
 from room_model.fmt import fr
@@ -16,7 +16,7 @@ from room_model.roomplan import Room, Station
 
 SCHEMA = "room-model/1"
 VERSION = "v1-scan"
-SOURCE_RANK = {"assumed": 0, "roomplan": 1, "lidar": 2, "llm": 3, "tape": 4}
+SOURCE_RANK = {"assumed": 0, "roomplan": 1, "lidar": 2, "llm": 3, "photo": 4, "tape": 5}
 PARALLEL_COS = np.cos(np.radians(20.0))
 EXTENT_MARGIN = 0.10  # m past a wall end still counted as facing it
 AXES = {"x": np.array([1.0, 0.0]), "z": np.array([0.0, 1.0])}
@@ -249,6 +249,7 @@ def build(ctx: StageContext, doc: dict) -> dict:
     w2r = np.array(doc["frame"]["world_to_room"], float).reshape(4, 4).T
     room = Room(load_roomplan(ctx.capture, ctx.room), w2r)
     samples = load_samples(ctx, w2r)
+    doc = regularize.apply(doc, room.outline, samples)
     d = _Doc(doc)
     dimensions = [x for x in (_station_dimension(d, st) for st in build_stations(room, samples, d)) if x]
     dimensions += _height_dimensions(d) + _beam_dimensions(d) + _column_dimensions(d)

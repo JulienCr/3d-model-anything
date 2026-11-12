@@ -3,7 +3,7 @@ import bmesh
 import bpy
 from mathutils import Vector, geometry
 
-from . import frame, plan
+from . import frame, openings, plan
 
 CUT_KINDS = ("door", "window", "opening", "niche")
 CUT_OVERSHOOT = 0.01  # m a cutter sticks out of each face of its host
@@ -29,12 +29,12 @@ def _prism(name: str, poly: list, y0: float, y1: float) -> bpy.types.Object:
     return _object(name, bm, solid=True)
 
 
-def _sheet(name: str, regions: list[tuple[list, list]], y: float, up: bool) -> bpy.types.Object:
-    """Flat triangulated polygons (exterior, holes) at height y; the faces point up or down."""
+def _sheet(name: str, regions: list[tuple], y: float, up: bool) -> bpy.types.Object:
+    """Flat triangulated polygons (exterior, holes[, drop]) at height y, a drop m lower; the faces point up or down."""
     bm = bmesh.new()
-    for exterior, holes in regions:
+    for exterior, holes, *drop in regions:
         rings = [r[:-1] if len(r) > 1 and r[0] == r[-1] else r for r in (exterior, *holes)]
-        verts = [bm.verts.new(frame.to_blender(x, y, z)) for ring in rings for x, z in ring]
+        verts = [bm.verts.new(frame.to_blender(x, y - (drop[0] if drop else 0.0), z)) for ring in rings for x, z in ring]
         flat = [[Vector((x, -z, 0.0)) for x, z in ring] for ring in rings]
         for tri in geometry.tessellate_polygon(flat):
             a, b, c = (verts[i] for i in tri)
@@ -53,26 +53,37 @@ def recess_depth(arch: dict, geom: dict, el: dict) -> float | None:
     return depth if depth < geom["thickness"] - COPLANAR_TOL else None
 
 
-def _cutter(arch: dict, geom: dict, opening: dict, y_floor: float, host: dict) -> tuple[bpy.types.Object, list] | None:
-    """The cutting box of an opening and the plan quad it cuts through the host (without the overshoots); None for no size."""
-    p = opening["params"]
-    w, h, sill, centre = (frame.value(arch, p[k]) for k in ("width", "height", "sill", "center_s"))
-    if w <= 0 or h <= 0:
-        return None
+def cut_quad(arch: dict, geom: dict, opening: dict, host: dict, lo: float, hi: float) -> tuple[list, list]:
+    """(quad, reach): the plan quad cutting the host between `lo` and `hi` m along it, and the same without the overshoots.
+
+    The quad starts CUT_OVERSHOOT in front of the built face the opening is on and ends CUT_OVERSHOOT behind the
+    built far one (or after the recess depth), so it pierces a partition snapped off its nominal lines.
+    """
     side = frame.side(host, opening.get("face"))
-    a, b = (frame.face_point(geom, centre + d, side) for d in (-w / 2, w / 2))
+    near = [frame.face_point(geom, s, side) for s in (lo, hi)]
     inward = (-geom["n"][0] * side, -geom["n"][1] * side)  # from the cut face into the wall
     recess = recess_depth(arch, geom, opening)
-    front, back = CUT_OVERSHOOT, (geom["thickness"] + CUT_OVERSHOOT if recess is None else recess)
-    quad = [(a[0] - inward[0] * front, a[1] - inward[1] * front), (b[0] - inward[0] * front, b[1] - inward[1] * front),
-            (b[0] + inward[0] * back, b[1] + inward[1] * back), (a[0] + inward[0] * back, a[1] + inward[1] * back)]
+    if recess is None:
+        far = [frame.face_point(geom, s, -side) for s in (lo, hi)]
+        back = [(x + inward[0] * CUT_OVERSHOOT, z + inward[1] * CUT_OVERSHOOT) for x, z in far]
+    else:
+        far = back = [(x + inward[0] * recess, z + inward[1] * recess) for x, z in near]
+    front = [(x - inward[0] * CUT_OVERSHOOT, z - inward[1] * CUT_OVERSHOOT) for x, z in near]
+    return [front[0], front[1], back[1], back[0]], [near[0], near[1], far[1], far[0]]
+
+
+def _cutter(arch: dict, geom: dict, opening: dict, y_floor: float, host: dict) -> tuple[bpy.types.Object, list] | None:
+    """The cutting box of an opening and the plan quad it cuts through the host (without the overshoots); None for no size."""
+    lay = openings.resolve(arch, opening)
+    w, h, sill = lay.cut_w, lay.cut_h, lay.bottom
+    if w <= 0 or h <= 0:
+        return None
+    quad, reach = cut_quad(arch, geom, opening, host, *lay.span)
     y0, y1 = y_floor + sill, y_floor + sill + h
     if sill <= COPLANAR_TOL:
         y0 = y_floor - 2 * CUT_OVERSHOOT
     if y1 >= geom["top"] - COPLANAR_TOL:
         y1 = geom["top"] + 2 * CUT_OVERSHOOT
-    depth = geom["thickness"] if recess is None else recess
-    reach = [(a[0], a[1]), (b[0], b[1]), (b[0] + inward[0] * depth, b[1] + inward[1] * depth), (a[0] + inward[0] * depth, a[1] + inward[1] * depth)]
     return _prism(f"Cutter_{opening['id']}", quad, y0, y1), reach
 
 
@@ -105,14 +116,14 @@ def _column(arch: dict, el: dict, y_floor: float) -> bpy.types.Object:
     return _prism(el["id"], quad, y_floor, frame.value(arch, el["params"]["top"]))
 
 
-def _cutters(arch: dict, y_floor: float, hosts: dict, scene_collection) -> list[tuple[bpy.types.Object, list, str]]:
-    """A cutter for every opening on a wall or partition, linked to the scene until `_remove` drops it."""
+def _cutters(arch: dict, y_floor: float, hosts: dict, bodies: dict, scene_collection) -> list[tuple[bpy.types.Object, list, str]]:
+    """A cutter for every opening on a wall or partition (`bodies`: built footprint of each), linked to the scene until `_remove` drops it."""
     out = []
     for o in arch["elements"]:
         host = hosts.get(o.get("host"))
         if o["kind"] not in CUT_KINDS or host is None:
             continue
-        cutter = _cutter(arch, frame.wall_geometry(arch, host), o, y_floor, host)
+        cutter = _cutter(arch, plan.host_geometry(arch, host, bodies), o, y_floor, host)
         if cutter is not None:
             scene_collection.objects.link(cutter[0])
             out.append((*cutter, host["id"]))
@@ -137,7 +148,7 @@ def build(arch: dict, collections: dict, materials: dict) -> list[bpy.types.Obje
     partitions = plan.partition_plans(arch, walls)
     footprints = {**walls, **{pid: p["face"] for pid, p in partitions.items()}}
     hosts = {e["id"]: e for e in arch["elements"] if e["kind"] in ("wall", "partition")}
-    cutters = _cutters(arch, y_floor, hosts, scene_collection)
+    cutters = _cutters(arch, y_floor, hosts, footprints, scene_collection)
     out = []
     for el in arch["elements"]:
         kind = el["kind"]
@@ -157,9 +168,9 @@ def build(arch: dict, collections: dict, materials: dict) -> list[bpy.types.Obje
             for trim in trims:
                 _remove(trim)
         elif kind == "floor":
-            obj, material = _sheet(el["id"], [(el["polygon"], [])], frame.value(arch, el["params"]["level"]), up=True), "Sol"
+            obj, material = _sheet(el["id"], [(r["exterior"], r["holes"], r["drop"]) for r in el["extent"]] if "extent" in el else [(el["polygon"], [])], frame.value(arch, el["params"]["level"]), up=True), "Sol"
         elif kind == "ceiling":
-            regions = [(r["exterior"], r["holes"]) for r in el["region"]]
+            regions = [(r["exterior"], r["holes"], r.get("drop", 0.0)) for r in el.get("extent", el["region"])]
             obj, material = _sheet(el["id"], regions, frame.value(arch, el["params"]["level"]), up=False), "Plafond"
         elif kind == "beam":
             obj, material = _beam(arch, el), "Mur"

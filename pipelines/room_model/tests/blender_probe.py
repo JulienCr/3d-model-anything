@@ -156,6 +156,29 @@ def _overlaps(step=0.01, levels=(0.1, 0.5, 0.9, 1.3, 1.7, 2.1)):
     return out
 
 
+def _moulding_overlaps(step=0.003, dz=0.03):
+    """{moulding: {body: m3}}: sampled volume where an architrave or a door frame lies inside a wall or partition."""
+    objects, bvh = _shell_objects()
+    deps = bpy.context.evaluated_depsgraph_get()
+    out = {}
+    for m in (o for o in bpy.data.objects if o.type == "MESH" and o.name.endswith(("_Architrave", "_Architrave_A", "_Architrave_B", "_Frame"))):
+        tree, inv = BVHTree.FromObject(m, deps), m.matrix_world.inverted()
+        corners = [m.matrix_world @ Vector(c) for c in m.bound_box]
+        lo, hi = ([f(c[i] for c in corners) for i in range(3)] for f in (min, max))
+        near = [o for o in objects if all(min(v.co[i] for v in o.data.vertices) < hi[i] and max(v.co[i] for v in o.data.vertices) > lo[i] for i in range(3))]
+        counts = {o.name: 0 for o in near}
+        axes = [[lo[i] + 0.0013 + step * k for k in range(math.ceil((hi[i] - lo[i]) / step))] for i in range(2)]
+        for z in [lo[2] + 0.0017 + dz * k for k in range(math.ceil((hi[2] - lo[2]) / dz))]:
+            for x in axes[0]:
+                for y in axes[1]:
+                    p = Vector((x, y, z))
+                    if _inside(tree, inv @ p):
+                        for o in near:
+                            counts[o.name] += _inside(bvh[o.name], p)
+        out[m.name] = {n: c * step * step * dz for n, c in counts.items() if c}
+    return out
+
+
 def _texel_at(obj, origin, direction):
     """Ray-casts the object; returns the material, UV and image pixel (RGB bytes, as stored) at the hit, or {"hit": False}."""
     inv = obj.matrix_world.inverted()
@@ -251,6 +274,7 @@ def main():
         "rigs": {r["name"]: _rig(r) for r in spec["rigs"]},
         "overlaps": _overlaps(),
         "spans": _spans(spec.get("spans", [])),
+        "moulding_overlaps": _moulding_overlaps() if spec.get("moulding_overlaps") else {},
         "texels": {p["name"]: _texel_at(bpy.data.objects[p["object"]], p["origin"], p["direction"]) for p in spec.get("texel_rays", [])},
     }
     facts["measureit_failure"] = _measureit_failure(spec)
