@@ -24,7 +24,7 @@ Decide only when the numbers settle it, and write them down.
 - **`tape_vs_scan` with a reliable scan:** LiDAR, σ < 2 cm, no flag, |Δ| > 3σ and > 3 cm. Ask which is right, with both values and your recommendation. Then edit `measurements.json`:
   - **scan chosen:** `{"value_m": null, "note": "scan retenu : <their words>"}` for that id. The tape value leaves the model, and the note keeps the trace.
   - **tape chosen:** keep the value and add `"note": "mètre confirmé : <their words>"`.
-- **`corner_square` `out_of_square`:** ask whether the wall really runs off square (old buildings often do), or whether the user can tape the stations across that corner (the `L-<label>` the action names has no survey row).
+- **`corner_square` `out_of_square`:** ask whether the wall really runs off square (old buildings often do), or whether the user can tape the two wall lengths (`L-<label>`) the action names.
 - **`leaf_fits`, `opening_overlap`, `opening_inside_host` in conflict:** show the render and ask; propose the action from `reconcile.json`.
 - **`wall_top_vs_ceiling` in conflict:** a ceiling height to measure (`measure:H..`), or a beam or soffit the scan missed.
 

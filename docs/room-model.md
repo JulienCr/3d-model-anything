@@ -128,7 +128,8 @@ A `note` is kept with or without a value; `"value_m": null` is a note alone (or 
 - An opening dimension (`<id>-w`, `-h`, `-sill`) replaces the parameter it measures; a leaf dimension (`<id>-leaf-w`, `-leaf-h`, doors and windows) creates the leaf parameter and its dimension.
 - A ceiling height (`H<k>`) moves the ceiling level, and the wall, beam and column tops that were at that level.
 - A station (`S..`) moves the wall of its pair with the larger offset sigma along its normal, by at most the larger of 10 station sigmas and one wall thickness; floor, ceilings, openings, mouldings and the other stations follow. Beyond the bound the value is refused (« saisie écartée »).
-- `L-<label>` wall lengths and any id the architecture does not know are refused. The survey page has no row for `L-` lengths.
+- A wall length (`L-<label>`, corner to corner, read above the skirtings) moves whichever of the wall's two end walls has the larger offset sigma along its normal, with the same bound as a station.
+- An id the architecture does not know is refused.
 - Probable tape errors found by the reconciliation are kept out of the model, in memory only: see Reconciliation. The file is never rewritten by the pipeline.
 
 ### `overrides.json`
@@ -269,7 +270,7 @@ Dimension ids added by `architecture` (each with `endpoints`, the two ends [x, y
 
 | Id | Kind | Meaning |
 |---|---|---|
-| `L-M1`, ... | `wall_length` | Corner to corner along the room face of a wall. Not a survey row and not applicable by tape |
+| `L-M1`, ... | `wall_length` | Corner to corner along the room face of a wall; a survey row, applied by moving an end wall |
 | `Door_1-w`, `-h` (`-sill` for windows and niches) | `opening_width`, `opening_height`, `opening_sill` | The hole: width, height, height of the bottom above the floor |
 | `Door_1-leaf-w`, `-leaf-h` | `leaf_width`, `leaf_height` | The moving panel of a door or window, once measured or anchored |
 
@@ -330,5 +331,5 @@ Edge `i` runs from `polygon[i]` to `polygon[i+1]`; `edge_heights[i]` is its heig
 - Ducts or trays pressed against the ceiling hide it, so they look like beams.
 - Soffits that drop less than 14 cm below the neighbouring ceiling are not reported as beams.
 - A narrow ceiling region can be classed as an unexplained strip and lower a wall top.
-- `L-<label>` wall lengths appear in `architecture.json`, in the Blender dimensions and in the reconciliation, whose corner checks propose `measure:L-<label>`; the survey page has no row for them and `--tape` refuses them. Tape the stations (`S..`) that cross the corner instead.
+- `L-<label>` wall lengths appear in `architecture.json`, in the Blender dimensions, on the survey page and in the reconciliation, whose corner checks propose `measure:L-<label>`.
 - Networks (M2), photo silhouettes (M3) and the site survey (M4) are expected to settle the remaining cases.
