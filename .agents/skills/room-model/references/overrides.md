@@ -17,7 +17,7 @@ Source: `pipelines/room_model/room_model/overrides.py`. Format `{"<element id>":
 | `dividers` | niche only | Number of vertical dividers. |
 | `shelves_count` | niche only | Number of shelves, evenly spaced. |
 | `prefer` | any element with parameters | `{"<parameter name>": "scan"}` (or the scan's own source, `lidar`/`roomplan`): the parameter goes back to the value the scan gave, over an LLM, photo or tape value. Written by the `room-reconcile` skill for `prefer:` actions. |
-| `remove` | door, window, niche, opening, panel_frame, cornice, skirting | `true` deletes the element and parameters nothing else uses. Other kinds (walls, floor, ceilings) cannot be removed. |
+| `remove` | door, window, niche, opening, panel_frame, `Cornice`, `Skirting` | `true` deletes the element and parameters nothing else uses. Other kinds (walls, floor, ceilings) cannot be removed. |
 
 Enums come from `pipelines/room_model/room_model/vision_schema.json` and the catalogue; re-read them if the code moved, never invent a value.
 
@@ -31,7 +31,7 @@ Enums come from `pipelines/room_model/room_model/vision_schema.json` and the cat
 | "the niche goes all the way through" | `{"Niche_1": {"through": true}}` |
 | "the niche has two shelves" | `{"Niche_1": {"shelves_count": 2}}` |
 | "that is a niche, not a door" | `{"Door_3": {"kind": "niche"}}` (then `through`, `shelves_count` as needed) |
-| "remove niche 2" / "there is no skirting there" | `{"Niche_2": {"remove": true}}`, `{"Skirting_3": {"remove": true}}` |
+| "remove niche 2" / "no skirting at all" | `{"Niche_2": {"remove": true}}`, `{"Skirting": {"remove": true}}` (the skirting is one element for the whole room, so this removes all of it) |
 | "no casing on that window" | `{"Window_1": {"frame": null}}` |
 
 Wording that is not in the table: map it to a field above or tell the user the pipeline cannot express it yet (the LLM and overrides only choose within the catalogue; a missing fixture is a feature request, filed as an issue with no real-capture values).

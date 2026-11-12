@@ -48,11 +48,12 @@ cd pipelines/room_model
 Do all of these, then summarise in a few lines: what is solid, what is flagged, what needs the tape.
 
 - **Renders**: look at `renders/top.png`, `persp_1.png`, `persp_2.png`, `open.png` (Read tool). Compare with the photos in the capture when something looks off: missing door, wrong swing, floating moulding.
-- **`architecture.json`** (schema `room-model/arch-1`): list elements and dimensions carrying `flags`, above all `to_verify`; also `user_override`. Parameters carry `value`, `sigma`, `source` (`tape` > `llm` > `lidar` > `roomplan` > `assumed`); large sigma or `assumed` marks what to measure. Also read `diagnostics` (`tape`, `overrides`, `vision`, `anchor` entries list what was rejected or not applied).
-- **`report.md`** (French): inputs, registration, per-wall table, floor, ceilings, beams (`à vérifier`), columns, unexplained surfaces, orthogonality, `Alertes`; after `architecture` also `Corrections LLM`, `Mesures au mètre`, `Corrections manuelles` (with a `Refusées` list: always relay it).
-- **`blender_report.json`**: `dimensions_backend` (MeasureIt or native fallback) and `measureit_error`. `blender.log` ends with the real failure when Blender fails.
+- **`architecture.json`** (schema `room-model/arch-1`): list elements and dimensions carrying `flags`, above all `to_verify`; also `user_override`. Parameters carry `value`, `sigma`, `source` (`tape` > `photo` > `llm` > `lidar` > `roomplan` > `assumed`); large sigma or `assumed` marks what to measure. Also read `diagnostics` (`tape`, `overrides`, `vision`, `anchor` entries list what was rejected or not applied).
+- **`report.md`** (French): inputs, registration, per-wall table, floor, ceilings, beams (`à vérifier`), columns, unexplained surfaces, `Équerrage` (a corner marked « équerre imposée » was squared beyond 3 sigma, under the 2 degree floor), `Alertes`; after `architecture` also `Corrections LLM`, `Mesures au mètre`, `Corrections manuelles` (with a `Refusées` list: always relay it).
+- **`blender_report.json`**: `dimensions_backend` (MeasureIt or native fallback), `measureit_error`, and `avertissements` (a cut that runs into a neighbouring wall or partition, kept as measured: relay them). `blender.log` ends with the real failure when Blender fails.
 - **`textures/textures.json`**: coverage; holes mean the user may need more photos of that surface.
-- **Flag meanings**: `docs/room-model.md` (Flags table). Walls: `roomplan_fallback`, `shifted_seed`, `low_support`; stations: `obstacle_or_uneven_wall`.
+- **`reconcile.md`** (and `reconcile.json`): written by every `architecture` run; read it after a survey, with the `room-reconcile` skill.
+- **Flag meanings**: `docs/room-model.md` (Flags table). Walls: `roomplan_fallback`, `shifted_seed`, `low_support`, `out_of_square`; stations: `obstacle_or_uneven_wall`; dimensions: `tape_set_aside` (a tape value kept out of the model as a probable error).
 
 ## Which stage to rerun after what
 
@@ -85,7 +86,7 @@ Apply it:
 .venv/bin/python -m room_model blender --capture <cap> --out <out>
 ```
 
-`--tape` (on `architecture` and `all`) copies the file to `<out>/measurements.json`. Effects: an opening dimension replaces the parameter it measures; a ceiling height moves the ceiling; a station moves the wall of its pair with the larger offset sigma (bounded); a leaf larger than its hole is refused. Whatever cannot be applied is listed in `report.md` (`Mesures au mètre`) and `diagnostics.tape`; relay it. Compare scan, LLM and tape: `compare-tape --arch <out>/architecture.json --tape <out>/measurements.json -o tape.md`.
+`--tape` (on `architecture` and `all`) copies the file to `<out>/measurements.json`. Effects: an opening dimension replaces the parameter it measures; a ceiling height moves the ceiling; a station moves the wall of its pair with the larger offset sigma (bounded); a tape value the other tape values contradict is set aside (`tape_set_aside`). Whatever cannot be applied is listed in `report.md` (`Mesures au mètre`) and `diagnostics.tape`; relay it. Compare scan, LLM and tape: `compare-tape --arch <out>/architecture.json --tape <out>/measurements.json -o tape.md`.
 
 Reconciling human measurements against the model (conflicts, outliers, deciding which source wins) is the job of the `room-reconcile` skill (`.agents/skills/room-reconcile/`): hand over to it once the survey is filled. `architecture` writes `reconcile.json` and `reconcile.md` for it.
 

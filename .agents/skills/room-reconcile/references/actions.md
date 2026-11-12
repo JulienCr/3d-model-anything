@@ -1,6 +1,6 @@
 # Action ids → file edits
 
-`reconcile.json` lists action ids in `actions`, and per check or parameter. `reconcile.md` gives a French reading of each. Every id below has an executable form; if you meet an id that is not listed here, read `reconcile.py` and `overrides.py` before acting.
+`reconcile.json` lists action ids in `actions`, and per check or parameter. `reconcile.md` gives a French reading of each. Every id below has an executable form, except `measure:L-<label>` (see below); if you meet an id that is not listed here, read `reconcile.py` and `overrides.py` before acting.
 
 ## `measure:<dimension id>`
 
@@ -13,7 +13,8 @@ When they answer, write the value into `measurements.json` v2 and keep their not
 ```
 
 - **Re-measure after a `probable_tape_error`:** the pipeline already keeps the value out of the model (`tape_set_aside`), so leave the entry and overwrite `value_m` when the new reading arrives. `{"value_m": null, "note": "..."}` is the form for a value the user withdraws: a note without a value is kept and never applied.
-- **Wall lengths and stations:** `L-<label>` dimensions are corner to corner along the room face. Stations (`S..`) are the distance between two parallel walls at a marked spot. Remind the user which one a row is before they measure again.
+- **Stations:** `S..` rows are the distance between two parallel walls at a marked spot. Remind the user which one a row is before they measure again.
+- **`measure:L-<label>` has no survey row.** `L-<label>` (corner to corner along a wall) is a model dimension only: the page has no row for it and `tape_merge` refuses it. The corner checks propose it anyway; ask for the stations (`S..`) that cross that corner instead, or a check on site.
 
 ## `prefer:<parameter id>:<source>`
 
